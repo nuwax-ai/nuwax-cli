@@ -1,0 +1,77 @@
+{
+  "version": "0.0.13",
+  "release_date": "2025-07-12T13:49:59Z",
+  "release_notes": "",
+  "packages": {
+    "full": {
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20250712133533/docker.zip",
+      "hash": "external",
+      "signature": "",
+      "size": 0
+    },
+    "patch": null
+  },
+  "platforms": {
+    "x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNsaSBzZWNyZXQga2V5CkNMSS1MSU5VWC1YNjQtdjEuMS4w",
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20250712133533/docker-arm64.zip"
+    },
+    "aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNsaSBzZWNyZXQga2V5CkNMSS1XSU5ET1dTLVg2NC12MS4xLjA=",
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20250712133533/docker-arm64.zip"
+    }
+  },
+  "patch": {
+    "x86_64": {
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/patches/20250712133533/x86_64-patch.tar.gz",
+      "hash": "sha256:patch_hash_x86_64",
+      "signature": "patch_signature_x86_64",
+      "operations": {
+        "replace": {
+          "files": [
+            "app/app.jar",
+            "config/application.yml",
+            "docker-compose.yml",
+            "scripts/start.sh"
+          ],
+          "directories": ["front/", "plugins/", "templates/"]
+        },
+        "delete": {
+          "files": [
+            "app.jar",
+            "config/application.yml",
+            "docker-compose.yml",
+            "scripts/start.sh"
+          ],
+          "directories": ["front/", "plugins/", "templates/"]
+        }
+      }
+    },
+    "aarch64": {
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/patches/20250712133533/aarch64-patch.tar.gz",
+      "hash": "sha256:patch_hash_aarch64",
+      "signature": "patch_signature_aarch64",
+      "operations": {
+        "replace": {
+          "files": [
+            "app.jar",
+            "config/application.yml",
+            "docker-compose.yml",
+            "scripts/start.sh"
+          ],
+          "directories": ["front/", "plugins/", "templates/"]
+        },
+        "delete": {
+          "files": [
+            "app.jar",
+            "config/application.yml",
+            "docker-compose.yml",
+            "scripts/start.sh"
+          ],
+          "directories": ["front/", "plugins/", "templates/"]
+        }
+      },
+      "notes": "patch包目录结构与docker.zip保持一致"
+    }
+  }
+}

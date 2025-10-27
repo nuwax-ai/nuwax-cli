@@ -1,0 +1,31 @@
+# Duck Client Configuration File
+# 本地配置文件，服务器端点已内置到程序中
+
+# [versions]
+# 服务端版本管理（客户端版本已内置到程序中）
+[versions]
+docker_service = "{docker_service_version}"  # 已部署的 Docker 服务的当前版本
+
+# [docker]
+# Docker 相关配置
+[docker]
+compose_file = "{compose_file}"
+
+# [backup]
+# 备份相关的所有配置
+[backup]
+# 备份文件的统一存储目录。用户可随时修改。
+storage_dir = "{backup_storage_dir}"
+
+# [cache]
+# 缓存相关配置
+[cache]
+# 缓存根目录
+cache_dir = "{cache_dir}"
+# 下载缓存目录
+download_dir = "{download_dir}"
+
+# [updates]
+# 更新相关配置
+[updates]
+check_frequency = "{check_frequency}" 

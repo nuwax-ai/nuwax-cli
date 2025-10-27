@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+1. 统一的常量定义位置: constants.rs ,在 client-core 模块下

@@ -1,0 +1,394 @@
+services:
+  frontend:
+    image: ${DOCKER_REGISTRY}/agent-platform-front:${FRONTEND_VERSION}
+    ports:
+      - "${FRONTEND_HOST_PORT}:80"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./app/front:/app/nginx/html:ro
+      - ./upload:/app/upload
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/index.html"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - agent-network
+
+
+  backend:
+    image: ${DOCKER_REGISTRY}/agent-platform-backend:${BACKEND_VERSION}
+    ports:
+      - "8080:${APP_PORT}"
+      - "5005:${APP_DEBUG_PORT}"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    environment:
+      - JAVA_OPTS=-server -Xms2024m -Xmx2024m -XX:MaxMetaspaceSize=256m -XX:MaxMetaspaceFreeRatio=70
+      - APP_PROFILE=${APP_PROFILE}
+      - APP_PORT=${APP_PORT}
+      - APP_DEBUG_PORT=${APP_DEBUG_PORT}
+      - ENABLE_DEBUG=false
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - MILVUS_HOST=${MILVUS_HOST}
+      - MILVUS_PORT=${MILVUS_PORT}
+      - MILVUS_URI=${MILVUS_URI}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - DORIS_HOST=${DORIS_HOST}
+      - DORIS_PORT=${DORIS_PORT}
+      - DORIS_USER=${DORIS_USER}
+      - DORIS_PASSWORD=${DORIS_PASSWORD}
+      - DORIS_DB=${DORIS_DB}
+      - DORIS_ROOT_USERNAME=${DORIS_ROOT_USERNAME}
+    volumes:
+      - ./app/app.jar:/app/app.jar:ro
+      - ./config/docker-entrypoint.sh:/docker-entrypoint.sh:ro
+      - ./config/application-external.yml:/app/config/application-external.yml:ro
+      - ./logs/agent:/app/logs
+      - ./upload:/app/upload
+      - ./data/jwt/:/app/config/jwt
+    entrypoint: ["/bin/bash", "-c", "/docker-entrypoint.sh 2>&1 | tee -a /app/logs/start.log"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${APP_PORT}/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: always
+    networks:
+      - agent-network
+
+
+  mcp-proxy:
+    image: ${DOCKER_REGISTRY}/mcp-proxy:${MCP_PROXY_VERSION}
+    ports:
+      - "8020:8089"
+    volumes:
+      - ./logs/mcp_proxy:/app/logs
+      - ./config/mcp_config.yml:/app/config.yml:ro
+      - ./data/uv_cache/uv:/root/.cache/uv
+      - ./data/npx_cache/.npm:/root/.npm
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8089/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: always
+    networks:
+      - agent-network
+
+  # MySQL权限修复容器（一次性运行）
+  mysql-permission-fix:
+    image: busybox:1.36-uclibc  # 使用稳定版本而非latest
+    labels:
+      - "com.docker.compose.project=mysql-permission-fix"
+      - "description=MySQL权限修复初始化容器"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 32M
+        reservations:
+          cpus: '0.05'
+          memory: 16M
+    environment:
+      - MYSQL_UID=${MYSQL_UID:-999}
+      - MYSQL_GID=${MYSQL_GID:-999}
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+      - ./logs/mysql:/var/log/mysql
+      - ./config/mysql.cnf:/tmp/mysql.cnf:rw  # 挂载配置文件用于权限检查和修复
+    command: |
+      sh -c "
+      set -e
+      echo '🔧 开始修复MySQL权限问题...'
+      echo '📋 当前用户: '$$(id)
+      echo '🔧 目标MySQL用户: ${MYSQL_UID:-999}:${MYSQL_GID:-999}'
+      
+      # 创建必要目录
+      echo '📁 创建必要目录...'
+      mkdir -p /var/lib/mysql /var/log/mysql
+      
+      # 设置数据目录权限给mysql用户(999)
+      echo '🔑 设置数据目录权限...'
+      chown -R ${MYSQL_UID:-999}:${MYSQL_GID:-999} /var/lib/mysql /var/log/mysql
+      chmod -R 755 /var/lib/mysql /var/log/mysql
+      
+      # 检查和修复配置文件权限
+      echo '🔒 检查配置文件权限...'
+      if [ -f '/tmp/mysql.cnf' ]; then
+        CURRENT_PERM=\$$(stat -c '%a' /tmp/mysql.cnf 2>/dev/null || stat -f '%Lp' /tmp/mysql.cnf 2>/dev/null)
+        echo '📄 当前配置文件权限: '\$${CURRENT_PERM}
+        
+        # 检查是否为组写入或全局写入权限（会被MySQL忽略）
+        if [ \"\$${CURRENT_PERM}\" = '775' ] || [ \"\$${CURRENT_PERM}\" = '777' ] || [ \"\$${CURRENT_PERM}\" = '664' ]; then
+          echo '⚠️  配置文件权限不安全，MySQL会忽略此配置文件'
+          echo '🔧 修复配置文件权限为644...'
+          chmod 644 /tmp/mysql.cnf
+          echo '✅ 配置文件权限已修复为644'
+        else
+          echo '✅ 配置文件权限正常'
+        fi
+        
+        # 显示修复后的权限
+        FIXED_PERM=\$$(stat -c '%a' /tmp/mysql.cnf 2>/dev/null || stat -f '%Lp' /tmp/mysql.cnf 2>/dev/null)
+        echo '📄 修复后配置文件权限: '\$${FIXED_PERM}
+      else
+        echo '⚠️  配置文件 /tmp/mysql.cnf 不存在'
+      fi
+      
+      # 验证权限设置
+      echo '🔍 验证权限设置...'
+      echo '📁 MySQL数据目录: '$$(ls -ld /var/lib/mysql)
+      echo '📁 MySQL日志目录: '$$(ls -ld /var/log/mysql)
+      
+      # 检查现有数据
+      if [ -n \"$$(find /var/lib/mysql -name '*.ibd' -o -name '*.MYD' -o -name '*.MYI' 2>/dev/null)\" ]; then
+        echo '📊 检测到现有MySQL数据文件，权限已修复'
+      else
+        echo '📭 未检测到现有数据文件，这是首次初始化'
+      fi
+      
+      echo '✅ MySQL权限修复完成'
+      echo '🎯 摘要:'
+      echo '   • 数据目录: /var/lib/mysql (755, ${MYSQL_UID:-999}:${MYSQL_GID:-999})'
+      echo '   • 日志目录: /var/log/mysql (755, ${MYSQL_UID:-999}:${MYSQL_GID:-999})'
+      echo '   • 配置文件: mysql.cnf (644, 安全权限)'
+      "
+    restart: "no"
+    networks:
+      - agent-network
+
+  mysql:
+    image: mysql:8.0
+    # 依赖权限修复容器
+    depends_on:
+      mysql-permission-fix:
+        condition: service_completed_successfully
+    ports:
+      - "13306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - TZ=Asia/Shanghai
+      - MYSQL_CHARSET=utf8mb4
+      - MYSQL_COLLATION=utf8mb4_unicode_ci
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+      - ./config/mysql.cnf:/etc/mysql/conf.d/mysql.cnf:ro
+      - ./config/init_mysql.sql:/docker-entrypoint-initdb.d/1_init_mysql.sql:ro
+      - ./config/init_mysql_data.sql:/docker-entrypoint-initdb.d/2_init_mysql_data.sql:ro
+      - ./logs/mysql:/var/log/mysql
+    command: >
+      --authentication-policy=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --init-connect='SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci; SET character_set_client=utf8mb4; SET character_set_connection=utf8mb4; SET character_set_results=utf8mb4;'
+      --explicit_defaults_for_timestamp=true
+      --lower_case_table_names=1
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: always
+    networks:
+      - agent-network
+
+  redis:
+    image: redis:7.0
+    ports:
+      - "16379:6379"
+    environment:
+      - TZ=Asia/Shanghai
+    command: redis-server /usr/local/etc/redis/redis.conf --port 6379 --requirepass 123456
+    volumes:
+      - ./data/redis:/data
+      - ./config/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./logs/redis:/data/logs/redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    networks:
+      - agent-network
+
+  milvus:
+    image: milvusdb/milvus:v2.5.8
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+      - "2379:2379"
+    environment:
+      - TZ=Asia/Shanghai
+      - ETCD_USE_EMBED=true
+      - ETCD_DATA_DIR=/var/lib/milvus/etcd
+      - ETCD_CONFIG_PATH=/milvus/configs/embedEtcd.yaml
+      - COMMON_STORAGETYPE=local
+      - TIMEZONE=Asia/Shanghai
+      # 强制设置日志级别
+      - LOG_LEVEL=error
+      - MILVUS_LOG_LEVEL=error
+      # 强制禁用标准输出日志
+      - LOG_STDOUT=false
+      - LOG_FILE_ROOTPATH=/var/log/milvus
+    volumes:
+      - ./data/milvus/data:/var/lib/milvus/data
+      - ./data/milvus/etcd:/var/lib/milvus/etcd
+      - ./config/milvus/embedEtcd.yaml:/milvus/configs/embedEtcd.yaml:ro
+      - ./config/milvus/user.yaml:/milvus/configs/user.yaml:ro
+      - ./config/milvus/milvus.yaml:/milvus/configs/milvus.yaml:ro
+      - ./logs/milvus:/var/log/milvus
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 90s
+    restart: always
+    networks:
+      - agent-network
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000" # API port
+      - "9001:9001" # Console port
+    volumes:
+      - ./data/minio:/data # 确保此路径适合您的项目结构
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER} 
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - TZ=Asia/Shanghai
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: always
+    networks:
+      - agent-network
+
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      chmod +x /scripts/init-minio.sh && 
+      /scripts/init-minio.sh
+      "
+    volumes:
+      - ./script:/scripts # 将脚本目录挂载到容器中
+    environment:
+      - MINIO_SERVER_URL=http://minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MINIO_BUCKET_NAME=quickwit-indexes # 您想要创建的桶名
+    networks:
+      - agent-network
+    restart: "no" # 脚本执行一次后退出
+
+  log_platform:
+    image: ${DOCKER_REGISTRY}/log-platform:${LOG_PLATFORM_VERSION}
+    ports:
+      - "${LOG_PLATFORM_HOST_PORT:-8097}:8097"
+    volumes:
+      - ./logs/log_platform:/app/logs
+      - ./config/log_platform_config.yml:/app/config.yml:ro
+    environment:
+      - TZ=Asia/Shanghai
+    # 如果 log_platform 需要依赖其他服务，请在此处添加
+    depends_on:
+      quickwit:
+        condition: service_healthy
+    # 智能健康检查：同时检查自身服务和依赖服务
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8097/health"] # 请根据实际健康检查端点修改
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s # 根据应用启动时间调整
+    restart: always
+    networks:
+      - agent-network
+
+  quickwit:
+    image: quickwit/quickwit:latest
+    ports:
+      - "7280:7280"
+      - "7281:7281"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      - TZ=Asia/Shanghai
+      - QW_S3_ENDPOINT=http://minio:9000
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER} # 添加AWS标准凭证变量
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD} # 添加AWS标准凭证变量
+      - QW_S3_FLAVOR=minio
+      # - QW_S3_REGION=us-east-1 # 取消注释并确保设置
+      - AWS_REGION=us-east-1 # 保持与QW_S3_REGION一致
+      - QW_S3_FORCE_PATH_STYLE_ACCESS=true
+      - QW_METASTORE_URI=s3://quickwit-indexes
+      - QW_DEFAULT_INDEX_ROOT_URI=s3://quickwit-indexes/ # 示例存储桶，请确保在 MinIO 中创建
+    volumes:
+      - ./data/quickwit:/quickwit/qwdata # 如果所有数据都存储到S3，此卷可能不再需要
+      - ./logs/quickwit:/quickwit/logs
+      # - ./config/quickwit/quickwit.yaml:/quickwit/config/quickwit.yaml:ro
+    command: ["run"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7280/api/v1/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: always
+    networks:
+      - agent-network
+
+
+networks:
+  agent-network:
+    driver: bridge
+    # 以下配置可能有助于解决 openEuler 上的网络问题  
+    driver_opts:
+      com.docker.network.bridge.name: agent-bridge
+      com.docker.network.bridge.enable_icc: "true"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+      # 禁用IPv6
+      com.docker.network.enable_ipv6: "false"

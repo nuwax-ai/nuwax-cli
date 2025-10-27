@@ -1,0 +1,118 @@
+[package]
+name = "nuwax-cli"
+version = "1.0.55"
+edition = "2024"
+description = "Docker 服务管理和升级工具"
+authors = ["soddygo"]
+license = "MIT OR Apache-2.0"
+homepage = "https://docx.xspaceagi.com/"
+repository = "https://github.com/soddygo/duck_client"
+documentation = "see nuwax-cli --help"
+readme = "../README.md"
+keywords = [
+    "docker",
+    "service-management",
+    "automation",
+    "deployment",
+    "backup",
+]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "nuwax-cli"
+path = "src/main.rs"
+
+[dependencies]
+# 核心库
+client-core = { path = "../client-core", features = ["indicatif"] }
+
+# 命令行参数解析
+clap = { workspace = true, features = ["derive"] }
+
+# 异步运行时
+tokio = { workspace = true, features = ["full"] }
+
+# 错误处理
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+serde_with = { workspace = true }
+
+# 日志
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender = { workspace = true }
+
+# Progress indicators
+indicatif = { workspace = true }
+
+# UUID
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+# ZIP文件处理
+zip = { workspace = true }
+
+# 执行外部命令检查
+which = { workspace = true }
+
+# 集成的 ducker Docker TUI
+ducker = { workspace = true }
+
+# Docker API 客户端 (与ducker兼容的版本)
+bollard = { workspace = true }
+
+# HTTP 客户端
+reqwest = { workspace = true }
+
+# 流处理
+tokio-stream = { workspace = true }
+
+# 自我替换（用于CLI自更新）
+self-replace = "1.5.0"
+
+# 系统信息
+num_cpus = "1.16"
+
+color-eyre = "0.6"
+ratatui = "0.29"
+
+dirs = "6.0"
+toml = "0.9"
+
+nom = "8"
+walkdir = { workspace = true }
+libc = "0.2"
+regex = "1.10"
+
+# 解析.env 环境变量文件
+dotenvy =  {workspace = true}
+log = { workspace = true }
+
+# Unix用户权限检测
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["user"] }
+
+[lib]
+name = "nuwax_cli"
+path = "src/lib.rs"
+
+[features]
+default = []
+
+# 性能测试依赖
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tempfile = { workspace = true }
+tokio-test = "0.4"
+pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
+memory-stats = "1.1"
+futures = "0.3"
+
+# 基准测试配置
+[[bench]]
+name = "upgrade_performance"
+harness = false

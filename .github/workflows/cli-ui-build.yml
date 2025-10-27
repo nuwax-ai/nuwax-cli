@@ -1,0 +1,1396 @@
+---
+name: CLI-UI Build & Release
+
+# 🚀 CLI-UI 桌面应用构建和发布说明:
+# 1. 构建 Duck CLI GUI 桌面应用，内置 nuwax-cli 作为 sidecar
+# 2. 基于 CLI-UI 版本变化自动触发构建和发布
+# 3. nuwax-cli 仅作为内嵌组件构建，不单独发布
+# 4. 使用官方 tauri-action 简化构建流程，自动处理签名和更新
+# 5. 支持跨平台：Linux, Windows, macOS (Intel & Apple Silicon)
+# 6. 🖥️ 自定义Runner配置:
+#    - Windows: [self-hosted, Windows, X64] - 使用SODDY runner
+#    - macOS: [self-hosted, macOS, ARM64] - 使用soddys-Mac-mini runner  
+#    - Linux: 继续使用GitHub托管的ubuntu runner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'nuwax-cli/**'
+      - 'client-core/**'
+      - 'cli-ui/**'
+      - '.github/workflows/cli-ui-build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'duck-cli/**'
+      - 'client-core/**'
+      - 'cli-ui/**'
+      - '.github/workflows/cli-ui-build.yml'
+  workflow_dispatch:
+    inputs:
+      force_cli_ui_release:
+        description: 'Force release CLI-UI even if version unchanged'
+        required: false
+        default: false
+        type: boolean
+
+# 添加必要的权限配置
+permissions:
+  contents: write  # 需要写权限来创建 release
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+
+jobs:
+  # 检查版本变化和决定发布策略
+  check-versions:
+    name: Check Versions & Release Strategy
+    runs-on: ubuntu-latest
+    outputs:
+      # CLI-UI 相关输出
+      cli_ui_version: ${{ steps.cli_ui_check.outputs.version }}
+      cli_ui_tag_name: ${{ steps.cli_ui_check.outputs.tag_name }}
+      cli_ui_should_release: ${{ steps.cli_ui_check.outputs.should_release }}
+      
+      # 构建策略
+      should_build: ${{ steps.build_strategy.outputs.should_build }}
+      
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整历史以检查现有 tags
+
+
+
+      - name: Check CLI-UI version
+        id: cli_ui_check
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          # 从 cli-ui/src-tauri/tauri.conf.json 读取版本号
+          VERSION=$(cat cli-ui/src-tauri/tauri.conf.json | grep '"version"' | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+          TAG_NAME="cli-ui-v${VERSION}"
+          
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          
+          echo "📋 检测到 CLI-UI 版本: ${VERSION}"
+          echo "📋 对应标签: ${TAG_NAME}"
+          
+          # 检查这个版本的 tag 是否已经存在
+          if git tag -l | grep -q "^${TAG_NAME}$"; then
+            echo "⚠️ CLI-UI 标签 ${TAG_NAME} 已存在"
+            if [[ "${{ github.event.inputs.force_cli_ui_release }}" == "true" ]]; then
+              echo "🔧 强制发布 CLI-UI (手动触发)"
+              echo "should_release=true" >> $GITHUB_OUTPUT
+            else
+              echo "📦 CLI-UI 版本 ${VERSION} 已发布，跳过"
+              echo "should_release=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "✅ 发现 CLI-UI 新版本 ${VERSION}，准备发布"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine build strategy
+        id: build_strategy
+        run: |
+          # 如果是 main 分支且 CLI-UI 需要发布，或者是 PR，都需要构建
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            if [[ "${{ steps.cli_ui_check.outputs.should_release }}" == "true" ]]; then
+              echo "should_build=true" >> $GITHUB_OUTPUT
+              echo "🚀 Main 分支检测到 CLI-UI 新版本，开始构建"
+            else
+              echo "should_build=false" >> $GITHUB_OUTPUT
+              echo "📦 Main 分支无 CLI-UI 新版本，跳过构建"
+            fi
+          else
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "🔧 PR 或其他分支，执行构建用于测试"
+          fi
+
+  # 构建 Duck CLI 二进制文件
+  build-nuwax-cli:
+    name: Build Duck CLI for ${{ matrix.platform.name }}
+    runs-on: ${{ matrix.platform.os }}
+    needs: check-versions
+    if: needs.check-versions.outputs.should_build == 'true'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: Linux-x86_64
+            os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            duck_cli_bin: nuwax-cli
+            duck_cli_archive: nuwax-cli-linux-amd64.tar.gz
+            cross: false
+
+          - name: Linux-aarch64
+            os: ubuntu-22.04
+            rust_target: aarch64-unknown-linux-gnu
+            duck_cli_bin: nuwax-cli
+            duck_cli_archive: nuwax-cli-linux-arm64.tar.gz
+            cross: true
+
+          - name: Windows-x86_64
+            os: [self-hosted, Windows, X64]
+            rust_target: x86_64-pc-windows-msvc
+            duck_cli_bin: nuwax-cli.exe
+            duck_cli_archive: nuwax-cli-windows-amd64.zip
+            cross: false
+
+          - name: Windows-aarch64
+            os: [self-hosted, Windows, X64]
+            rust_target: aarch64-pc-windows-msvc
+            duck_cli_bin: nuwax-cli.exe
+            duck_cli_archive: nuwax-cli-windows-arm64.zip
+            cross: false
+
+          - name: macOS-x86_64
+            os: macos-13  # 使用 GitHub 托管的 Intel macOS runner
+            rust_target: x86_64-apple-darwin
+            duck_cli_bin: nuwax-cli
+            duck_cli_archive: nuwax-cli-macos-amd64.tar.gz
+            cross: false
+
+          - name: macOS-aarch64
+            os: [self-hosted, macOS, ARM64]
+            rust_target: aarch64-apple-darwin
+            duck_cli_bin: nuwax-cli
+            duck_cli_archive: nuwax-cli-macos-arm64.tar.gz
+            cross: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies (for Duck CLI build)
+        if: matrix.platform.name == 'Linux-x86_64' || matrix.platform.name == 'Linux-aarch64'
+        run: |
+          echo "Installing Linux dependencies for Duck CLI build"
+          
+          # Update package lists
+          sudo apt-get update
+          
+          # Install basic build dependencies
+          sudo apt-get install -y \
+            curl \
+            wget \
+            file \
+            build-essential \
+            libc6-dev \
+            m4 \
+            pkg-config \
+            libglib2.0-dev \
+            libglib2.0-0 \
+            libglib2.0-data \
+            libglib2.0-bin \
+            glib-networking \
+            glib-networking-common \
+            glib-networking-services
+          
+          # Set PKG_CONFIG_PATH
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          
+          # Verify GLib installation
+          echo "Verifying GLib dependencies..."
+          pkg-config --exists glib-2.0 && echo "✅ glib-2.0 found" || echo "❌ glib-2.0 not found"
+
+      - name: Setup WSL Ubuntu (for Linux builds on Windows)
+        if: matrix.platform.use_wsl == true
+        run: |
+          Write-Host "Setting up WSL Ubuntu environment for Linux builds"
+          
+          # Enable WSL feature if not already enabled
+          Write-Host "Enabling WSL feature..."
+          try {
+            Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart -All
+            Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart -All
+          } catch {
+            Write-Host "WSL features may already be enabled or require restart"
+          }
+          
+          # Set WSL 2 as default
+          Write-Host "Setting WSL 2 as default..."
+          wsl --set-default-version 2
+          
+          # Install Ubuntu if not present
+          Write-Host "Checking for Ubuntu distribution..."
+          $distributions = wsl --list --quiet 2>$null
+          if (-not $distributions -or $distributions -notcontains "Ubuntu") {
+            Write-Host "Installing Ubuntu distribution..."
+            # Use winget to install Ubuntu if available
+            try {
+              winget install Canonical.Ubuntu.2204 --silent --accept-source-agreements --accept-package-agreements
+            } catch {
+              Write-Host "Winget failed, trying direct installation..."
+              wsl --install Ubuntu --no-launch
+            }
+          } else {
+            Write-Host "Ubuntu distribution found"
+          }
+          
+          # Wait for WSL to be ready
+          Start-Sleep -Seconds 10
+          
+          # Initialize Ubuntu (create default user if needed)
+          Write-Host "Initializing Ubuntu..."
+          try {
+            wsl -d Ubuntu -- bash -c 'echo "Ubuntu initialized"'
+          } catch {
+            Write-Host "Ubuntu initialization may need interactive setup"
+            # Try to run Ubuntu without user creation for CI
+            wsl -d Ubuntu -u root -- bash -c 'echo "Running as root"'
+          }
+          
+          # Update package lists
+          Write-Host "Updating package lists..."
+          wsl -d Ubuntu -u root -- bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update'
+          
+          # Install basic dependencies
+          Write-Host "Installing basic dependencies..."
+          wsl -d Ubuntu -u root -- bash -c 'apt-get install -y curl build-essential pkg-config sudo'
+          
+          # Install Tauri Linux dependencies
+          Write-Host "Installing Tauri dependencies..."
+          wsl -d Ubuntu -u root -- bash -c 'apt-get install -y libwebkit2gtk-4.1-dev libwebkit2gtk-4.0-dev libjavascriptcoregtk-4.1-dev libjavascriptcoregtk-4.0-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf'
+          
+          # Install Rust
+          Write-Host "Installing Rust..."
+          wsl -d Ubuntu -u root -- bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs -o rustup.sh && chmod +x rustup.sh && ./rustup.sh -y && rm rustup.sh'
+          
+          # Add target architecture
+          Write-Host "Adding target architecture..."
+          wsl -d Ubuntu -u root -- bash -c 'source /root/.cargo/env && rustup target add ${{ matrix.platform.rust_target }}'
+          
+          # Verify installation
+          Write-Host "Verifying installation..."
+          wsl -d Ubuntu -u root -- bash -c 'source /root/.cargo/env && rustc --version && cargo --version'
+        shell: powershell
+
+      - name: Setup Windows Environment
+        if: matrix.platform.use_wsl != true && runner.os == 'Windows'
+        run: |
+          Write-Host "Setting up Windows build environment"
+          
+          # Check and setup Git Bash environment
+          if (Test-Path "C:\Program Files\Git\bin\bash.exe") {
+            Write-Host "Found Git Bash: C:\Program Files\Git\bin\bash.exe"
+            echo "C:\Program Files\Git\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } elseif (Test-Path "C:\Program Files (x86)\Git\bin\bash.exe") {
+            Write-Host "Found Git Bash: C:\Program Files (x86)\Git\bin\bash.exe"
+            echo "C:\Program Files (x86)\Git\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+            Write-Host "Git Bash not found, using PowerShell instead"
+          }
+          
+          # Verify bash availability
+          try {
+            $bashVersion = & bash --version 2>$null
+            Write-Host "Bash version: $bashVersion"
+          } catch {
+            Write-Host "Bash not available, will use PowerShell for building"
+          }
+        shell: powershell
+
+      - name: Install Visual Studio Build Tools (Windows - Duck CLI stage)
+        if: matrix.platform.use_wsl != true && runner.os == 'Windows'
+        run: |
+          Write-Host "=== Duck CLI 阶段：安装 Visual Studio Build Tools ==="
+          
+          # Check if Visual Studio is already installed
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsFound = $false
+          
+          if (Test-Path $vsWhere) {
+            $vs = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($vs) {
+              Write-Host "✅ Visual Studio found: $vs"
+              $vsFound = $true
+              
+              # Setup environment for MSVC
+              $vcvarsPath = "$vs\VC\Auxiliary\Build\vcvars64.bat"
+              if (Test-Path $vcvarsPath) {
+                Write-Host "Setting up MSVC environment with: $vcvarsPath"
+                
+                # Get environment variables from vcvars
+                $vcvarsOutput = cmd /c "`"$vcvarsPath`" && set" 2>$null
+                foreach ($line in $vcvarsOutput) {
+                  if ($line -match "^([^=]+)=(.*)$") {
+                    $name = $matches[1]
+                    $value = $matches[2]
+                    [Environment]::SetEnvironmentVariable($name, $value, "Process")
+                  }
+                }
+                
+                # Verify critical environment variables
+                Write-Host "Verifying MSVC environment variables..."
+                Write-Host "INCLUDE: $env:INCLUDE"
+                Write-Host "LIB: $env:LIB"
+                Write-Host "PATH additions: $($env:PATH -split ';' | Where-Object { $_ -like '*Visual Studio*' -or $_ -like '*VC*' -or $_ -like '*SDK*' })"
+                
+                Write-Host "✅ MSVC environment configured"
+              }
+            }
+          }
+          
+          if (-not $vsFound) {
+            Write-Host "Installing Visual Studio Build Tools..."
+            
+            # Download VS Build Tools installer
+            $installerPath = "$env:TEMP\vs_buildtools.exe"
+            Write-Host "Downloading Visual Studio Build Tools installer..."
+            Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_buildtools.exe" -OutFile $installerPath
+            
+            # Install with required components
+            Write-Host "Installing Visual Studio Build Tools with MSVC support..."
+            $installArgs = @(
+              "--quiet",
+              "--wait",
+              "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+              "--add", "Microsoft.VisualStudio.Component.VC.Tools.x64",
+              "--add", "Microsoft.VisualStudio.Component.Windows11SDK.22000",
+              "--add", "Microsoft.VisualStudio.Component.Windows10SDK.19041",
+              "--add", "Microsoft.VisualStudio.Component.VC.Redist.14.Latest",
+              "--add", "Microsoft.VisualStudio.Component.VC.CMake.Project"
+            )
+            
+            # Add ARM64 support if building for ARM64
+            if ("${{ matrix.platform.rust_target }}" -eq "aarch64-pc-windows-msvc") {
+              $installArgs += "--add", "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+              $installArgs += "--add", "Microsoft.VisualStudio.Component.VC.Tools.ARM64EC"
+            }
+            
+            Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait
+            
+            Write-Host "✅ Visual Studio Build Tools installation completed"
+            
+            # Setup environment for newly installed MSVC
+            Write-Host "Setting up MSVC environment for newly installed tools..."
+            $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            if (Test-Path $vsWhere) {
+              $vs = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+              if ($vs) {
+                $vcvarsPath = "$vs\VC\Auxiliary\Build\vcvars64.bat"
+                if (Test-Path $vcvarsPath) {
+                  Write-Host "Setting up MSVC environment with: $vcvarsPath"
+                  
+                  # Get environment variables from vcvars
+                  $vcvarsOutput = cmd /c "`"$vcvarsPath`" && set" 2>$null
+                  foreach ($line in $vcvarsOutput) {
+                    if ($line -match "^([^=]+)=(.*)$") {
+                      $name = $matches[1]
+                      $value = $matches[2]
+                      [Environment]::SetEnvironmentVariable($name, $value, "Process")
+                    }
+                  }
+                  
+                  # Verify critical environment variables
+                  Write-Host "Verifying MSVC environment variables..."
+                  Write-Host "INCLUDE: $env:INCLUDE"
+                  Write-Host "LIB: $env:LIB"
+                  Write-Host "PATH additions: $($env:PATH -split ';' | Where-Object { $_ -like '*Visual Studio*' -or $_ -like '*VC*' -or $_ -like '*SDK*' })"
+                  
+                  Write-Host "✅ MSVC environment configured"
+                }
+              }
+            }
+          }
+          
+          # Verify MSVC tools availability
+          Write-Host "Verifying MSVC tools..."
+          try {
+            $clPath = Get-Command cl.exe -ErrorAction Stop
+            Write-Host "✅ cl.exe found: $($clPath.Source)"
+            
+            $libPath = Get-Command lib.exe -ErrorAction Stop
+            Write-Host "✅ lib.exe found: $($libPath.Source)"
+            
+            $linkPath = Get-Command link.exe -ErrorAction Stop
+            Write-Host "✅ link.exe found: $($linkPath.Source)"
+          } catch {
+            Write-Host "❌ MSVC tools not found in PATH"
+            Write-Host "Attempting to locate tools manually..."
+            
+            # Try to find tools manually
+            $possiblePaths = @(
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*\bin\Hostx64\x64",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\*\bin\Hostx64\x64",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\*\bin\Hostx64\x64",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\*\bin\Hostx64\x64"
+            )
+            
+            foreach ($pattern in $possiblePaths) {
+              $toolDirs = Get-ChildItem $pattern -ErrorAction SilentlyContinue
+              if ($toolDirs) {
+                $toolDir = $toolDirs | Sort-Object Name -Descending | Select-Object -First 1
+                Write-Host "Found MSVC tools at: $($toolDir.FullName)"
+                $env:PATH = "$($toolDir.FullName);$env:PATH"
+                break
+              }
+            }
+            
+            # Re-verify after manual path addition
+            try {
+              $clPath = Get-Command cl.exe -ErrorAction Stop
+              Write-Host "✅ cl.exe found after manual search: $($clPath.Source)"
+              
+              $libPath = Get-Command lib.exe -ErrorAction Stop
+              Write-Host "✅ lib.exe found after manual search: $($libPath.Source)"
+            } catch {
+              Write-Error "❌ Could not locate MSVC tools even after manual search"
+              exit 1
+            }
+          }
+          
+          Write-Host "✅ Visual Studio Build Tools setup completed for Duck CLI stage"
+        shell: powershell
+
+      - name: Install Rust toolchain (Windows)
+        if: matrix.platform.use_wsl != true && runner.os == 'Windows'
+        run: |
+          Write-Host "Installing Rust toolchain"
+          
+          # Download and install Rust
+          $rustupPath = Join-Path $env:TEMP "rustup-init.exe"
+          
+          try {
+            # Use PowerShell to download and install Rust
+            Write-Host "Downloading Rust installer..."
+            Invoke-WebRequest -Uri "https://win.rustup.rs" -OutFile $rustupPath
+            
+            Write-Host "Installing Rust..."
+            & $rustupPath -y --default-toolchain stable --default-host x86_64-pc-windows-msvc
+            
+            # Refresh environment variables
+            $cargoPath = Join-Path $env:USERPROFILE ".cargo\bin"
+            $env:PATH = "$cargoPath;$env:PATH"
+            
+            # Add target architecture
+            Write-Host "Adding target architecture..."
+            $rustupExe = Join-Path $cargoPath "rustup.exe"
+            & $rustupExe target add ${{ matrix.platform.rust_target }}
+            
+            # Verify installation
+            Write-Host "Verifying installation..."
+            $rustcExe = Join-Path $cargoPath "rustc.exe"
+            $cargoExe = Join-Path $cargoPath "cargo.exe"
+            & $rustcExe --version
+            & $cargoExe --version
+            
+            Write-Host "Rust toolchain installed successfully"
+          } catch {
+            Write-Host "Rust installation failed: $_"
+            throw
+          }
+        shell: powershell
+
+      - name: Install Rust toolchain (Linux)
+        if: matrix.platform.name == 'Linux-x86_64' || matrix.platform.name == 'Linux-aarch64'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust_target }}
+
+      - name: Install Rust toolchain (macOS)
+        if: matrix.platform.use_wsl != true && runner.os == 'macOS'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust_target }}
+
+      - name: Setup macOS native environment (Duck CLI stage)
+        if: matrix.platform.use_wsl != true && runner.os == 'macOS'
+        run: |
+          echo "=== Duck CLI阶段：设置macOS原生编译环境 ==="
+          
+          # 确保Xcode工具
+          if ! xcode-select -p &> /dev/null; then
+            echo "Installing Xcode command line tools..."
+            sudo xcode-select --install 2>/dev/null || echo "Xcode installation initiated"
+            sleep 30
+          fi
+          
+          # 加载Rust环境
+          source ~/.cargo/env 2>/dev/null || true
+          
+          echo "Duck CLI stage - System: $(uname -m) -> Target: ${{ matrix.platform.rust_target }}"
+          echo "Rust: $(rustc --version)"
+          
+          # 安装目标
+          if ! rustup target list --installed | grep -q "${{ matrix.platform.rust_target }}"; then
+            echo "Installing target ${{ matrix.platform.rust_target }}..."
+            rustup target add ${{ matrix.platform.rust_target }}
+          fi
+          
+          # 验证目标安装成功
+          if rustup target list --installed | grep -q "${{ matrix.platform.rust_target }}"; then
+            echo "✅ Target ${{ matrix.platform.rust_target }} confirmed for Duck CLI"
+          else
+            echo "❌ FATAL: Cannot install target for Duck CLI build"
+            exit 1
+          fi
+          
+          # 设置环境变量
+          echo "MACOSX_DEPLOYMENT_TARGET=10.15" >> $GITHUB_ENV
+          
+          echo "✅ Duck CLI macOS环境就绪"
+        shell: bash
+
+      - name: Install cross (for cross compilation - WSL)
+        if: matrix.platform.cross && matrix.platform.use_wsl == true
+        run: |
+          Write-Host "Installing cross tool in WSL"
+          wsl -d Ubuntu -u root -- bash -c 'source /root/.cargo/env && cargo install cross --git https://github.com/cross-rs/cross'
+          Write-Host "Cross tool installed successfully"
+        shell: powershell
+
+      - name: Install cross (for cross compilation - Windows)
+        if: matrix.platform.cross && matrix.platform.use_wsl != true && runner.os == 'Windows'
+        run: |
+          Write-Host "Installing cross tool"
+          
+          # Set environment variables
+          $cargoPath = Join-Path $env:USERPROFILE ".cargo\bin"
+          $env:PATH = "$cargoPath;$env:PATH"
+          
+          # Install cross tool
+          Write-Host "Installing cross tool..."
+          $cargoExe = Join-Path $cargoPath "cargo.exe"
+          & $cargoExe install cross --git https://github.com/cross-rs/cross
+          
+          Write-Host "Cross tool installed successfully"
+        shell: powershell
+
+      - name: Install cross (for cross compilation - Linux)
+        if: matrix.platform.cross && (matrix.platform.name == 'Linux-x86_64' || matrix.platform.name == 'Linux-aarch64')
+        run: |
+          echo "Installing cross tool for Linux"
+          cargo install cross --git https://github.com/cross-rs/cross
+        shell: bash
+
+      - name: Install cross (for cross compilation - macOS)
+        if: matrix.platform.cross && matrix.platform.use_wsl != true && runner.os == 'macOS'
+        run: |
+          echo "Installing cross tool for macOS"
+          cargo install cross --git https://github.com/cross-rs/cross
+        shell: bash
+
+      - name: Cache cargo (WSL)
+        if: matrix.platform.use_wsl == true
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/cargo-cache-wsl
+          key: ${{ runner.os }}-wsl-${{ matrix.platform.rust_target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo (Windows)
+        if: matrix.platform.use_wsl != true
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.platform.rust_target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Duck CLI binary (WSL)
+        if: matrix.platform.use_wsl == true
+        run: |
+          Write-Host "Building Duck CLI in WSL Ubuntu"
+          
+          # Get current workspace path in WSL format
+          $currentPath = Get-Location
+          $wslPath = $currentPath.Path -replace 'C:\\', '/mnt/c/' -replace '\\', '/'
+          
+          if ('${{ matrix.platform.cross }}' -eq 'true') {
+            Write-Host "Using cross tool to build Duck CLI"
+            wsl -d Ubuntu -u root -- bash -c "source /root/.cargo/env && cd '$wslPath' && cross build --release --target ${{ matrix.platform.rust_target }} -p nuwax-cli"
+          } else {
+            Write-Host "Building Duck CLI locally"
+            wsl -d Ubuntu -u root -- bash -c "source /root/.cargo/env && cd '$wslPath' && cargo build --release --target ${{ matrix.platform.rust_target }} -p nuwax-cli"
+          }
+          
+          Write-Host "Duck CLI build completed"
+        shell: powershell
+
+      - name: Build Duck CLI binary (Windows)
+        if: matrix.platform.use_wsl != true && runner.os == 'Windows'
+        run: |
+          Write-Host "Building Duck CLI binary with MSVC"
+          
+          # Set environment variables
+          $cargoPath = Join-Path $env:USERPROFILE ".cargo\bin"
+          $env:PATH = "$cargoPath;$env:PATH"
+          
+          # Ensure MSVC tools and include paths are properly configured
+          Write-Host "Verifying MSVC tools and environment before build..."
+          try {
+            $clPath = Get-Command cl.exe -ErrorAction Stop
+            Write-Host "✅ cl.exe available: $($clPath.Source)"
+            
+            $libPath = Get-Command lib.exe -ErrorAction Stop
+            Write-Host "✅ lib.exe available: $($libPath.Source)"
+          } catch {
+            Write-Host "❌ MSVC tools not found, attempting to fix PATH..."
+            
+            # Try to find and add MSVC tools to PATH
+            $possiblePaths = @(
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*\bin\Hostx64\x64",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\*\bin\Hostx64\x64",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\*\bin\Hostx64\x64",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\*\bin\Hostx64\x64"
+            )
+            
+            foreach ($pattern in $possiblePaths) {
+              $toolDirs = Get-ChildItem $pattern -ErrorAction SilentlyContinue
+              if ($toolDirs) {
+                $toolDir = $toolDirs | Sort-Object Name -Descending | Select-Object -First 1
+                Write-Host "Adding MSVC tools to PATH: $($toolDir.FullName)"
+                $env:PATH = "$($toolDir.FullName);$env:PATH"
+                break
+              }
+            }
+          }
+          
+          # Verify and fix INCLUDE and LIB paths if needed
+          Write-Host "Checking INCLUDE and LIB environment variables..."
+          if (-not $env:INCLUDE -or $env:INCLUDE -eq "") {
+            Write-Host "❌ INCLUDE path not set, attempting to fix..."
+            
+            # Find Visual Studio installation and setup environment
+            $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            if (Test-Path $vsWhere) {
+              $vs = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+              if ($vs) {
+                Write-Host "Re-running vcvars64.bat to fix environment..."
+                $vcvarsPath = "$vs\VC\Auxiliary\Build\vcvars64.bat"
+                if (Test-Path $vcvarsPath) {
+                  # Re-run vcvars and apply environment
+                  $vcvarsOutput = cmd /c "`"$vcvarsPath`" && set" 2>$null
+                  foreach ($line in $vcvarsOutput) {
+                    if ($line -match "^([^=]+)=(.*)$") {
+                      $name = $matches[1]
+                      $value = $matches[2]
+                      [Environment]::SetEnvironmentVariable($name, $value, "Process")
+                    }
+                  }
+                }
+              }
+            }
+          }
+          
+          Write-Host "Final environment check:"
+          Write-Host "INCLUDE: $env:INCLUDE"
+          Write-Host "LIB: $env:LIB"
+          
+          if (-not $env:INCLUDE) {
+            Write-Error "❌ INCLUDE environment variable is still not set. This will cause C compilation to fail."
+            exit 1
+          }
+          
+          # Set Rust environment variables for MSVC
+          Write-Host "Configuring Rust for MSVC..."
+          $env:CC = "cl.exe"
+          $env:CXX = "cl.exe"
+          $env:AR = "lib.exe"
+          
+          # Additional environment variables for Windows compilation
+          if ("${{ matrix.platform.rust_target }}" -eq "aarch64-pc-windows-msvc") {
+            Write-Host "Configuring for ARM64 target"
+            $env:CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER = "rust-lld.exe"
+            
+            # For ARM64, we need to ensure we use the right vcvars script
+            $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            if (Test-Path $vsWhere) {
+              $vs = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+              if ($vs) {
+                $vcvarsARM64Path = "$vs\VC\Auxiliary\Build\vcvarsx86_arm64.bat"
+                if (Test-Path $vcvarsARM64Path) {
+                  Write-Host "Setting up ARM64 cross-compilation environment with: $vcvarsARM64Path"
+                  $vcvarsOutput = cmd /c "`"$vcvarsARM64Path`" && set" 2>$null
+                  foreach ($line in $vcvarsOutput) {
+                    if ($line -match "^([^=]+)=(.*)$") {
+                      $name = $matches[1]
+                      $value = $matches[2]
+                      [Environment]::SetEnvironmentVariable($name, $value, "Process")
+                    }
+                  }
+                  Write-Host "ARM64 cross-compilation environment configured"
+                }
+              }
+            }
+          }
+          
+          # Choose build method
+          if ('${{ matrix.platform.cross }}' -eq 'true') {
+            Write-Host "Using cross tool to build Duck CLI"
+            $crossExe = Join-Path $cargoPath "cross.exe"
+            & $crossExe build --release --target ${{ matrix.platform.rust_target }} -p nuwax-cli
+          } else {
+            Write-Host "Building Duck CLI locally with target: ${{ matrix.platform.rust_target }}"
+            $cargoExe = Join-Path $cargoPath "cargo.exe"
+            & $cargoExe build --release --target ${{ matrix.platform.rust_target }} -p nuwax-cli
+          }
+          
+          # Verify the built binary
+          $binaryPath = "target\${{ matrix.platform.rust_target }}\release\${{ matrix.platform.duck_cli_bin }}"
+          if (Test-Path $binaryPath) {
+            Write-Host "✅ Duck CLI binary built successfully: $binaryPath"
+            $binaryInfo = Get-Item $binaryPath
+            Write-Host "Binary size: $($binaryInfo.Length) bytes"
+          } else {
+            Write-Error "❌ Duck CLI binary not found at expected path: $binaryPath"
+            exit 1
+          }
+          
+          Write-Host "Duck CLI build completed"
+        shell: powershell
+
+      - name: Build Duck CLI binary (Linux)
+        if: matrix.platform.name == 'Linux-x86_64' || matrix.platform.name == 'Linux-aarch64'
+        run: |
+          echo "Building Duck CLI for Linux"
+          
+          # Set environment variables for Linux builds
+          export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig:$PKG_CONFIG_PATH"
+          export PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+          export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
+          
+          # Verify glib dependencies
+          echo "Verifying glib dependencies..."
+          pkg-config --exists glib-2.0 && echo "✅ glib-2.0 available" || echo "❌ glib-2.0 not found"
+          
+          # Choose build method
+          if [ "${{ matrix.platform.cross }}" = "true" ]; then
+            echo "Using cross tool for cross compilation"
+            echo "Target architecture: ${{ matrix.platform.rust_target }}"
+            cross build --release --target ${{ matrix.platform.rust_target }} -p nuwax-cli
+          else
+            echo "Building natively for ${{ matrix.platform.rust_target }}"
+            cargo build --release --target ${{ matrix.platform.rust_target }} -p nuwax-cli
+          fi
+          
+          echo "Duck CLI build completed successfully"
+        shell: bash
+
+      - name: Build Duck CLI binary (macOS)
+        if: matrix.platform.use_wsl != true && runner.os == 'macOS'
+        run: |
+          echo "Building Duck CLI for macOS"
+          
+          # Environment variables should already be set in previous step, but let's verify and set them again if needed
+          if [ "${{ matrix.platform.rust_target }}" = "x86_64-apple-darwin" ]; then
+            echo "Configuring ARM64 -> x86_64 cross-compilation"
+            export MACOSX_DEPLOYMENT_TARGET=10.15
+            export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=clang
+            export CC_x86_64_apple_darwin=clang
+            export CXX_x86_64_apple_darwin=clang++
+            export AR_x86_64_apple_darwin=ar
+            export CFLAGS_x86_64_apple_darwin="-arch x86_64"
+            export CXXFLAGS_x86_64_apple_darwin="-arch x86_64"
+            
+            # Verify cross-compilation environment
+            echo "Cross-compilation environment:"
+            echo "MACOSX_DEPLOYMENT_TARGET: $MACOSX_DEPLOYMENT_TARGET"
+            echo "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER: $CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER"
+          else
+            echo "Configuring native ARM64 compilation"
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+            echo "MACOSX_DEPLOYMENT_TARGET: $MACOSX_DEPLOYMENT_TARGET"
+          fi
+          
+          # Verify target is available
+          echo "Verifying target availability..."
+          if rustup target list --installed | grep -q "${{ matrix.platform.rust_target }}"; then
+            echo "✅ Target ${{ matrix.platform.rust_target }} is available"
+          else
+            echo "❌ Target ${{ matrix.platform.rust_target }} is not available"
+            echo "Installed targets:"
+            rustup target list --installed
+            exit 1
+          fi
+          
+          # Test cross-compilation setup
+          echo "Testing cross-compilation setup..."
+          rustc --print cfg --target ${{ matrix.platform.rust_target }}
+          
+          # Build Duck CLI
+          echo "Building Duck CLI for target: ${{ matrix.platform.rust_target }}"
+          cargo build --release --target ${{ matrix.platform.rust_target }} -p nuwax-cli
+          
+          echo "Duck CLI build completed successfully"
+        shell: bash
+
+      - name: Package Duck CLI binary (Windows)
+        if: matrix.platform.name == 'Windows-x86_64' || matrix.platform.name == 'Windows-aarch64'
+        run: |
+          # 进入构建目录
+          Push-Location "target/${{ matrix.platform.rust_target }}/release"
+          
+          # 使用 PowerShell 内置压缩功能代替 7z
+          Write-Host "Compressing ${{ matrix.platform.duck_cli_bin }} to ${{ matrix.platform.duck_cli_archive }}"
+          Compress-Archive -Path ${{ matrix.platform.duck_cli_bin }} -DestinationPath "../../../${{ matrix.platform.duck_cli_archive }}" -Force
+          
+          # 返回原目录
+          Pop-Location
+          
+          # 验证文件创建
+          if (Test-Path "${{ matrix.platform.duck_cli_archive }}") {
+            Write-Host "Archive created successfully: ${{ matrix.platform.duck_cli_archive }}"
+            Get-Item "${{ matrix.platform.duck_cli_archive }}" | Format-List Name, Length
+          } else {
+            Write-Error "Failed to create archive: ${{ matrix.platform.duck_cli_archive }}"
+            exit 1
+          }
+        shell: powershell
+
+      - name: Package Duck CLI binary (Linux)
+        if: matrix.platform.name == 'Linux-x86_64' || matrix.platform.name == 'Linux-aarch64'
+        run: |
+          cd target/${{ matrix.platform.rust_target }}/release
+          tar czf ../../../${{ matrix.platform.duck_cli_archive }} ${{ matrix.platform.duck_cli_bin }}
+          cd -
+        shell: bash
+
+      - name: Package Duck CLI binary (macOS)
+        if: matrix.platform.name == 'macOS-x86_64' || matrix.platform.name == 'macOS-aarch64'
+        run: |
+          cd target/${{ matrix.platform.rust_target }}/release
+          tar czf ../../../${{ matrix.platform.duck_cli_archive }} ${{ matrix.platform.duck_cli_bin }}
+          cd -
+        shell: bash
+
+
+
+      - name: Upload Duck CLI artifact (for sidecar)
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuwax-cli-${{ matrix.platform.name }}
+          path: ${{ matrix.platform.duck_cli_archive }}
+          retention-days: 1
+
+  # 使用官方 tauri-action 构建 CLI-UI 桌面应用
+  build-cli-ui:
+    name: Build CLI-UI for ${{ matrix.platform.name }}
+    runs-on: ${{ matrix.platform.os }}
+    needs: [check-versions, build-nuwax-cli]
+    if: needs.check-versions.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: Linux-x86_64
+            os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            duck_cli_artifact: nuwax-cli-Linux-x86_64
+
+          - name: Windows-x86_64
+            os: [self-hosted, Windows, X64]
+            rust_target: x86_64-pc-windows-msvc
+            duck_cli_artifact: nuwax-cli-Windows-x86_64
+
+          - name: macOS-x86_64
+            os: macos-13  # 使用 GitHub 托管的 Intel macOS runner
+            rust_target: x86_64-apple-darwin
+            duck_cli_artifact: nuwax-cli-macOS-x86_64
+
+          - name: macOS-aarch64
+            os: [self-hosted, macOS, ARM64]
+            rust_target: aarch64-apple-darwin
+            duck_cli_artifact: nuwax-cli-macOS-aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'yarn'
+          cache-dependency-path: cli-ui/yarn.lock
+
+
+      - name: Install Linux dependencies
+        if: matrix.platform.name == 'Linux-x86_64' || matrix.platform.name == 'Linux-aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libwebkit2gtk-4.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libjavascriptcoregtk-4.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Cache Linux dependencies
+        if: matrix.platform.name == 'Linux-x86_64' || matrix.platform.name == 'Linux-aarch64'
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt
+          key: ${{ runner.os }}-apt-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
+
+      - name: Setup WSL Ubuntu (for Linux builds on Windows)
+        if: matrix.platform.use_wsl == true
+        run: |
+          Write-Host "Setting up WSL Ubuntu environment for Linux GUI builds"
+          
+          # WSL should already be set up in Duck CLI build stage, here we just need to install Node.js
+          Write-Host "Checking and installing Node.js..."
+          $nodeInstalled = wsl -d Ubuntu -u root -- bash -c 'command -v node > /dev/null 2>&1 && echo "installed" || echo "not-installed"'
+          if ($nodeInstalled -eq "not-installed") {
+            Write-Host "Installing Node.js..."
+            wsl -d Ubuntu -u root -- bash -c 'curl -fsSL https://deb.nodesource.com/setup_lts.x -o nodesource_setup.sh'
+            wsl -d Ubuntu -u root -- bash -c 'bash nodesource_setup.sh'
+            wsl -d Ubuntu -u root -- bash -c 'apt-get install -y nodejs'
+            wsl -d Ubuntu -u root -- bash -c 'rm nodesource_setup.sh'
+          } else {
+            Write-Host "Node.js already installed"
+          }
+          
+          # Install Yarn
+          Write-Host "Checking and installing Yarn..."
+          $yarnInstalled = wsl -d Ubuntu -u root -- bash -c 'command -v yarn > /dev/null 2>&1 && echo "installed" || echo "not-installed"'
+          if ($yarnInstalled -eq "not-installed") {
+            Write-Host "Installing Yarn..."
+            wsl -d Ubuntu -u root -- bash -c 'npm install -g yarn'
+          } else {
+            Write-Host "Yarn already installed"
+          }
+          
+          # Verify installation
+          Write-Host "Verifying installation..."
+          wsl -d Ubuntu -u root -- bash -c 'node --version'
+          wsl -d Ubuntu -u root -- bash -c 'yarn --version'
+          wsl -d Ubuntu -u root -- bash -c 'source /root/.cargo/env && rustc --version'
+        shell: powershell
+
+      - name: Install Rust toolchain (Windows/macOS) 
+        if: matrix.platform.use_wsl != true
+        run: |
+          echo "=== Installing Rust Toolchain ==="
+          
+          # 使用 dtolnay/rust-toolchain action 已经安装了 Rust，只需要验证
+          if command -v rustup &> /dev/null; then
+            echo "Rust toolchain already installed"
+          else
+            echo "Installing fresh Rust toolchain..."
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile default
+            source ~/.cargo/env
+          fi
+          
+          # 安装目标
+          echo "Installing target: ${{ matrix.platform.rust_target }}"
+          rustup target add ${{ matrix.platform.rust_target }}
+          
+          # 验证安装
+          echo "=== Verification ==="
+          echo "Rust: $(rustc --version)"
+          echo "Installed targets:"
+          rustup target list --installed
+          
+          if rustup target list --installed | grep -q "${{ matrix.platform.rust_target }}"; then
+            echo "✅ Target ${{ matrix.platform.rust_target }} confirmed!"
+          else
+            echo "❌ Target verification failed!"
+            exit 1
+          fi
+          
+          echo "✅ Rust toolchain ready!"
+        shell: bash
+
+      - name: Setup macOS environment (CLI-UI stage)
+        if: matrix.platform.name == 'macOS-x86_64'
+        run: |
+          echo "=== macOS 原生编译环境准备 ==="
+          
+          # 加载Rust环境
+          source ~/.cargo/env 2>/dev/null || true
+          
+          echo "System: $(uname -m) -> Target: x86_64"
+          echo "Rust: $(rustc --version)"
+          
+          # 确保目标已安装
+          if ! rustup target list --installed | grep -q "x86_64-apple-darwin"; then
+            echo "Installing x86_64-apple-darwin target..."
+            rustup target add x86_64-apple-darwin
+          fi
+          
+          # 验证目标安装
+          if rustup target list --installed | grep -q "x86_64-apple-darwin"; then
+            echo "✅ x86_64-apple-darwin target confirmed"
+          else
+            echo "❌ Target installation failed!"
+            exit 1
+          fi
+          
+          # 设置环境变量
+          echo "MACOSX_DEPLOYMENT_TARGET=10.15" >> $GITHUB_ENV
+          
+          echo "✅ macOS环境准备完成！"
+
+      - name: Setup macOS native environment (CLI-UI stage)
+        if: matrix.platform.name == 'macOS-aarch64'
+        run: |
+          echo "Setting up native ARM64 compilation for CLI-UI build"
+          
+          # Verify Xcode command line tools
+          if ! xcode-select -p &> /dev/null; then
+            echo "Installing Xcode command line tools..."
+            xcode-select --install
+            sleep 30
+          fi
+          
+          # Ensure target architecture is installed
+          echo "Installing aarch64-apple-darwin target..."
+          rustup target add aarch64-apple-darwin
+          
+          # Verify target installation
+          if rustup target list --installed | grep -q "aarch64-apple-darwin"; then
+            echo "✅ aarch64-apple-darwin target successfully installed"
+          else
+            echo "❌ aarch64-apple-darwin target installation failed"
+            exit 1
+          fi
+          
+          # Set environment variables for native ARM64
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> $GITHUB_ENV
+          
+          echo "Native ARM64 environment ready"
+          echo "Current system architecture: $(uname -m)"
+          echo "Target architecture: aarch64"
+          echo "Rust target: aarch64-apple-darwin"
+          echo "Rust toolchain: $(rustc --version)"
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cli-ui/src-tauri/target
+          key: ${{ runner.os }}-${{ matrix.platform.rust_target }}-cargo-cli-ui-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.platform.rust_target }}-cargo-cli-ui-
+            ${{ runner.os }}-${{ matrix.platform.rust_target }}-cargo-
+
+      - name: Install frontend dependencies (Linux)
+        if: matrix.platform.name == 'Linux-x86_64'
+        run: |
+          echo "Installing frontend dependencies (Linux environment)"
+          cd cli-ui
+          yarn install
+          echo "Frontend dependencies installed successfully"
+        shell: bash
+
+      - name: Install Visual Studio Build Tools for ARM64
+        if: matrix.platform.name == 'Windows-aarch64'
+        run: |
+          Write-Host "Checking for Visual Studio Build Tools..."
+          
+          # Check if Visual Studio is already installed
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsFound = $false
+          
+          if (Test-Path $vsWhere) {
+            $vs = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($vs) {
+              Write-Host "✅ Visual Studio found: $vs"
+              $vsFound = $true
+            }
+          }
+          
+          if (-not $vsFound) {
+            Write-Host "Installing Visual Studio Build Tools..."
+            
+            # Download VS Build Tools installer
+            $installerPath = "$env:TEMP\vs_buildtools.exe"
+            Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_buildtools.exe" -OutFile $installerPath
+            
+            # Install with ARM64 support
+            Write-Host "Installing Visual Studio Build Tools with ARM64 support..."
+            Start-Process -FilePath $installerPath -ArgumentList @(
+              "--quiet",
+              "--wait",
+              "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+              "--add", "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
+              "--add", "Microsoft.VisualStudio.Component.Windows10SDK.19041"
+            ) -Wait
+            
+            Write-Host "✅ Visual Studio Build Tools installation completed"
+          }
+        shell: powershell
+
+      - name: Setup Windows ARM64 cross-compilation
+        if: matrix.platform.name == 'Windows-aarch64'
+        run: |
+          Write-Host "Setting up Windows ARM64 cross-compilation"
+          
+          # Setup Visual Studio Environment for ARM64 cross-compilation
+          Write-Host "Setting up Visual Studio environment for ARM64..."
+          
+          # Find Visual Studio installation
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vsWhere) {
+            $vs = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($vs) {
+              Write-Host "✅ Visual Studio found: $vs"
+              
+              # Setup environment for x64 host, ARM64 target
+              $vcvarsPath = "$vs\VC\Auxiliary\Build\vcvarsx86_arm64.bat"
+              if (-not (Test-Path $vcvarsPath)) {
+                $vcvarsPath = "$vs\VC\Auxiliary\Build\vcvars64.bat"
+              }
+              
+              if (Test-Path $vcvarsPath) {
+                Write-Host "Setting up MSVC environment with: $vcvarsPath"
+                
+                # Get environment variables from vcvars
+                $vcvarsOutput = cmd /c "`"$vcvarsPath`" && set" 2>$null
+                foreach ($line in $vcvarsOutput) {
+                  if ($line -match "^([^=]+)=(.*)$") {
+                    $name = $matches[1]
+                    $value = $matches[2]
+                    [Environment]::SetEnvironmentVariable($name, $value, "Process")
+                  }
+                }
+                
+                Write-Host "✅ MSVC environment configured"
+              } else {
+                Write-Warning "vcvars script not found"
+              }
+            } else {
+              Write-Warning "Visual Studio not found"
+            }
+          } else {
+            Write-Warning "vswhere.exe not found"
+          }
+          
+          # Add ARM64 target for Rust
+          Write-Host "Adding ARM64 Rust target..."
+          rustup target add aarch64-pc-windows-msvc
+          
+          # Verify target installation
+          $installedTargets = rustup target list --installed
+          if ($installedTargets -match "aarch64-pc-windows-msvc") {
+            Write-Host "✅ aarch64-pc-windows-msvc target installed successfully"
+          } else {
+            Write-Error "❌ Failed to install aarch64-pc-windows-msvc target"
+            exit 1
+          }
+          
+          # Set Rust environment variables for MSVC
+          Write-Host "Configuring Rust environment for MSVC..."
+          $env:CC = "cl.exe"
+          $env:CXX = "cl.exe"
+          $env:AR = "lib.exe"
+          
+          # Verify compiler availability
+          Write-Host "Verifying compiler setup..."
+          try {
+            $clPath = Get-Command cl.exe -ErrorAction Stop
+            Write-Host "✅ MSVC compiler found: $($clPath.Source)"
+            
+            # Test basic compilation
+            Write-Host "Testing compilation..."
+            $testResult = cl.exe 2>&1
+            Write-Host "Compiler test result: $testResult"
+          } catch {
+            Write-Host "❌ MSVC compiler not accessible"
+            Write-Host "PATH: $env:PATH"
+            
+            # Try to find cl.exe manually
+            $possiblePaths = @(
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*\bin\Hostx64\x64\cl.exe",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\*\bin\Hostx64\x64\cl.exe",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\*\bin\Hostx64\x64\cl.exe",
+              "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\Enterprise\VC\Tools\MSVC\*\bin\Hostx64\x64\cl.exe"
+            )
+            
+            foreach ($pattern in $possiblePaths) {
+              $found = Get-ChildItem $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($found) {
+                Write-Host "Found compiler at: $($found.FullName)"
+                $compilerDir = Split-Path $found.FullName
+                $env:PATH = "$compilerDir;$env:PATH"
+                break
+              }
+            }
+          }
+          
+          Write-Host "Windows ARM64 cross-compilation environment ready"
+        shell: powershell
+
+      - name: Install frontend dependencies (Windows)
+        if: matrix.platform.use_wsl != true && runner.os == 'Windows'
+        run: |
+          Write-Host "Installing frontend dependencies"
+          cd cli-ui
+          yarn install
+          Write-Host "Frontend dependencies installed successfully"
+        shell: powershell
+
+      - name: Install frontend dependencies (macOS)
+        if: matrix.platform.use_wsl != true && runner.os == 'macOS'
+        run: |
+          cd cli-ui
+          yarn install
+
+      - name: Download Duck CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.platform.duck_cli_artifact }}
+          path: duck-cli-artifacts/
+
+      - name: Setup Duck CLI sidecar (Windows)
+        if: matrix.platform.name == 'Windows-x86_64' || matrix.platform.name == 'Windows-aarch64'
+        run: |
+          # Create sidecar directory
+          New-Item -ItemType Directory -Force -Path "cli-ui/src-tauri/binaries"
+          
+          # Extract nuwax-cli to temporary directory
+          cd duck-cli-artifacts
+          
+          # 使用 PowerShell 内置解压缩功能代替 7z
+          $zipFile = Get-ChildItem -Filter "*.zip" | Select-Object -First 1
+          Write-Host "Extracting $($zipFile.Name)"
+          Expand-Archive -Path $zipFile.FullName -DestinationPath "." -Force
+          
+          # 移动二进制文件
+          Move-Item nuwax-cli.exe "../cli-ui/src-tauri/binaries/nuwax-cli-${{ matrix.platform.rust_target }}.exe"
+          
+          # Verify sidecar files
+          Write-Host "Verifying sidecar files"
+          Get-ChildItem "../cli-ui/src-tauri/binaries/"
+        shell: powershell
+
+      - name: Setup Duck CLI sidecar (Linux)
+        if: matrix.platform.name == 'Linux-x86_64'
+        run: |
+          echo "Setting up Duck CLI sidecar (Linux environment)"
+          
+          # Create sidecar directory
+          mkdir -p cli-ui/src-tauri/binaries
+          
+          # Extract nuwax-cli to temporary directory
+          cd duck-cli-artifacts
+          tar -xzf *.tar.gz
+          mv nuwax-cli "../cli-ui/src-tauri/binaries/nuwax-cli-${{ matrix.platform.rust_target }}"
+          
+          # Verify sidecar files
+          echo "Verifying sidecar files"
+          ls -la "../cli-ui/src-tauri/binaries/"
+        shell: bash
+
+      - name: Setup Duck CLI sidecar (macOS)
+        if: matrix.platform.name == 'macOS-x86_64' || matrix.platform.name == 'macOS-aarch64'
+        run: |
+          # Create sidecar directory
+          mkdir -p cli-ui/src-tauri/binaries
+          
+          # Extract nuwax-cli to temporary directory
+          cd duck-cli-artifacts
+          tar -xzf *.tar.gz
+          mv nuwax-cli "../cli-ui/src-tauri/binaries/nuwax-cli-${{ matrix.platform.rust_target }}"
+          
+          # Verify sidecar files
+          echo "Verifying sidecar files"
+          ls -la "../cli-ui/src-tauri/binaries/"
+        shell: bash
+
+
+
+      - name: Build CLI-UI with Tauri Action
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          # 优化编译性能
+          CARGO_TERM_COLOR: always
+          CARGO_INCREMENTAL: 0
+          CARGO_NET_RETRY: 10
+          # 减少日志输出以提升性能
+          RUST_BACKTRACE: short
+          # macOS 编译环境变量
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.name == 'macOS-x86_64' && '10.15' || '11.0' }}
+          # 移除 debug 日志以减少 I/O 开销
+          # RUST_LOG: debug
+        with:
+          projectPath: cli-ui
+          # 移除 --verbose 参数减少日志输出
+          args: --target ${{ matrix.platform.rust_target }}
+          tagName: ${{ needs.check-versions.outputs.cli_ui_should_release == 'true' && needs.check-versions.outputs.cli_ui_tag_name || '' }}
+          releaseName: ${{ needs.check-versions.outputs.cli_ui_should_release == 'true' && format('Duck CLI GUI v{0}', needs.check-versions.outputs.cli_ui_version) || '' }}
+          releaseBody: ${{ needs.check-versions.outputs.cli_ui_should_release == 'true' && format('Duck CLI GUI {0} 发布说明', needs.check-versions.outputs.cli_ui_version) || '' }}
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+
+
+
+
+
+
+
+  # 构建摘要
+  build-summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [check-versions, build-nuwax-cli, build-cli-ui]
+    if: ${{ always() }}
+    steps:
+      - name: Generate build summary
+        run: |
+          echo "## 🚀 Unified Build & Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 📋 Version Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **CLI-UI**: ${{ needs.check-versions.outputs.cli_ui_version || 'Not checked' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 🔄 Build Status" >> $GITHUB_STEP_SUMMARY
+          echo "- Duck CLI build: ${{ needs.build-nuwax-cli.result == 'success' && '✅ Completed' || needs.build-nuwax-cli.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- CLI-UI build: ${{ needs.build-cli-ui.result == 'success' && '✅ Completed' || needs.build-cli-ui.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 📦 Release Status" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ needs.check-versions.outputs.cli_ui_should_release }}" == "true" ]]; then
+            echo "- 🖥️ **CLI-UI ${{ needs.check-versions.outputs.cli_ui_version }}** has been released!" >> $GITHUB_STEP_SUMMARY
+            echo "  - 🔗 [Download CLI-UI](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-versions.outputs.cli_ui_tag_name }})" >> $GITHUB_STEP_SUMMARY
+            echo "  - 🔄 Automatic updates enabled in the app (via official Tauri updater)" >> $GITHUB_STEP_SUMMARY
+            echo "  - 📝 Signatures automatically included by tauri-action" >> $GITHUB_STEP_SUMMARY
+            echo "  - 🦆 Duck CLI integrated as sidecar binary" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- 🖥️ CLI-UI: No new version to release" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎯 Supported Platforms" >> $GITHUB_STEP_SUMMARY
+          echo "#### 🖥️ Duck CLI GUI (Desktop Application)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐧 Linux (x86_64) - AppImage" >> $GITHUB_STEP_SUMMARY
+          echo "- 🪟 Windows (x86_64, ARM64) - MSI Installer" >> $GITHUB_STEP_SUMMARY
+          echo "- 🍎 macOS (x86_64, Apple Silicon) - DMG Package" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Note**: Duck CLI is integrated as a sidecar binary and doesn't require separate installation." >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 💡 Usage Instructions" >> $GITHUB_STEP_SUMMARY
+          echo "#### To release new versions:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Update version**: Modify \`cli-ui/src-tauri/tauri.conf.json\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit and push**: Changes to main branch trigger automatic release" >> $GITHUB_STEP_SUMMARY
+          echo "- **Duck CLI**: Automatically built and integrated as sidecar" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### 🔄 Automatic Updates:" >> $GITHUB_STEP_SUMMARY
+          echo "- Built-in Tauri updater with signature verification" >> $GITHUB_STEP_SUMMARY
+          echo "- Updates checked and applied automatically within the app" >> $GITHUB_STEP_SUMMARY
+          echo "- Duck CLI updates included with GUI releases" >> $GITHUB_STEP_SUMMARY

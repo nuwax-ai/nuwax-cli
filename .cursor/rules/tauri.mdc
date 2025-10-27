@@ -1,0 +1,9 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+1. 我们是workspace 项目结构,启动 tauri 应用命名,不要在项目根目录下启动
+2. tauri 官方 updater 插件,地址文档: https://tauri.app/plugin/updater/
+3. tauri 官方 file system 插件,地址文档: https://tauri.app/plugin/file-system/
+4. 需要再 cli-ui 目录下,执行 npm run tauri dev , 因为我们当前工程是 workspace结构

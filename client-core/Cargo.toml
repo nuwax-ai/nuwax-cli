@@ -1,0 +1,109 @@
+[package]
+name = "client-core"
+version = "0.1.0"
+edition = "2024"
+description = "Duck Client 核心库"
+authors = ["Duck Team"]
+license = "MIT OR Apache-2.0"
+# 内部库，不需要详细的发布信息
+
+
+
+[dependencies]
+
+# 异步运行时
+tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true }
+futures-util = { workspace = true }
+
+# HTTP 客户端
+reqwest = { workspace = true, features = ["json", "stream"] }
+
+# 数据库
+# sqlx = { workspace = true, features = ["migrate", "uuid", "chrono"] }
+duckdb = { workspace = true }
+tokio-stream = { workspace = true }
+
+# 序列化
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# UUID 生成
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+# 时间处理
+chrono = { workspace = true, features = ["serde"] }
+
+# 错误处理
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# 日志
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# 配置文件
+toml = { workspace = true }
+
+# 自更新 - 已移除，现在使用基于 GitHub API 的更新机制
+
+# Docker 命令执行
+which = { workspace = true }
+
+# Docker 容器管理
+ducker = { workspace = true }
+
+# 文件系统操作
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+zip-extract = { workspace = true }
+fs_extra = "1.3"                   # 扩展文件操作功能
+remove_dir_all = "1"             # 跨平台目录删除
+
+# 压缩
+zip = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+
+# 哈希计算
+sha2 = { workspace = true }
+
+# Base64 编码/解码
+base64 = "0.22"
+
+# OSS 依赖
+# aliyun-oss-rust-sdk = { version = "0.2.1", features = ["blocking"] }
+# url = "2.5.0"
+
+# Optional dependency
+indicatif = { workspace = true, optional = true }
+
+# 系统信息
+num_cpus = "1.16"
+
+# SQL解析 依赖的库
+sqlparser = { workspace = true }
+regex = { workspace = true }
+
+
+winnow = { workspace = true }
+derive_builder = { workspace = true }
+
+mysql_async = { workspace = true, features = ["minimal"] }
+dotenvy =  {workspace = true}
+shellexpand = "3.1.0"
+
+
+docker-compose-types = {workspace = true}
+
+bollard = {workspace = true}
+
+# 缓存库
+quick_cache = "0.6"
+once_cell = "1.19"
+
+[dev-dependencies]
+sqlx = { version = "0.8", features = [ "runtime-tokio-native-tls", "mysql" ] }
+tokio = { version = "1", features = ["full"] }
+tempfile = { workspace = true }

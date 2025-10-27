@@ -1,0 +1,6 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+server端http接口文档,格式是openApi json格式, 请求地址是: http://127.0.0.1:3000/api-docs/openapi.json ,使用 curl 命令查看,因为是本地的ip地址
