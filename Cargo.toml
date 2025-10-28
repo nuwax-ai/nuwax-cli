@@ -113,8 +113,8 @@ indicatif = "0.18"
 tokio-stream = "0.1"
 
 # SQL解析 依赖的库
-sqlparser = "0.57"
-regex = "1.11"
+sqlparser = "0.59"
+regex = "1.12"
 
 # --- OSS Dependencies ---
 # Note: 使用 aliyun-oss-rust-sdk 库，支持分片上传，解决大文件(>5GB)上传问题;另外: 当文件较大，建议使用 SDK 或者 ossutil 进行大文件下载。下载链接默认有效期 300s，大文件下载可能会失败，失败仍会产生流量费用
@@ -126,12 +126,12 @@ winnow = "0.7"
 
 
 # Docker API 客户端 (与ducker兼容的版本)
-bollard = "0.18"
+bollard = "0.19"
 
 # MySQL Async 客户端,用于连接mysql,执行差异sql,升级库表结构
 mysql_async = "0.36.1"
 
-docker-compose-types = "0.19"
+docker-compose-types = "0.22"
 
 # 解析.env 环境变量文件
 dotenvy = "0.15"

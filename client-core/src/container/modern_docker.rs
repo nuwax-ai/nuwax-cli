@@ -287,8 +287,8 @@ impl ModernDockerManager {
                     if name.contains(&self.project_name) {
                         info!("🛑 停止容器: {}", name);
                         if let Some(id) = &container.id {
-                            let _ = self.docker.stop_container(id, None).await;
-                            let _ = self.docker.remove_container(id, None).await;
+                            let _ = self.docker.stop_container(id, None::<bollard::container::StopContainerOptions>).await;
+                            let _ = self.docker.remove_container(id, None::<bollard::container::RemoveContainerOptions>).await;
                         }
                     }
                 }
@@ -315,8 +315,12 @@ impl ModernDockerManager {
             if let Some(names) = container.names {
                 for name in names {
                     if name.contains(&self.project_name) {
-                        let status = if container.state.as_deref() == Some("running") {
-                            crate::container::types::ServiceStatus::Running
+                        let status = if let Some(state) = &container.state {
+                            if state.to_string().to_lowercase() == "running" {
+                                crate::container::types::ServiceStatus::Running
+                            } else {
+                                crate::container::types::ServiceStatus::Stopped
+                            }
                         } else {
                             crate::container::types::ServiceStatus::Stopped
                         };
