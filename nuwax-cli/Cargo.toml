@@ -105,7 +105,7 @@ default = []
 
 # 性能测试依赖
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
 tempfile = { workspace = true }
 tokio-test = "0.4"
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
