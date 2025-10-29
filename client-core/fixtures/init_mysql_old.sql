@@ -233,6 +233,8 @@ create table eco_market_client_config
     modified_id       bigint                             null comment '最后修改人id',
     modified_name     varchar(64)                        null comment '最后修改人',
     yn                tinyint  default 1                 null comment '逻辑标记,1:有效;-1:无效',
+    approve_message   varchar(256)                       null comment '审批原因',
+    tenant_enabled    tinyint  default 0                 null comment '是否租户自动启用插件,1:租户自动启用;0:非租户自动启用;默认:0',
     constraint uk_uid
         unique (uid, _tenant_id)
 )
@@ -270,6 +272,8 @@ create table eco_market_client_publish_config
     modified_id       bigint                             null comment '最后修改人id',
     modified_name     varchar(64)                        null comment '最后修改人',
     yn                tinyint  default 1                 null comment '逻辑标记,1:有效;-1:无效',
+    approve_message   varchar(256)                       null comment '审批原因',
+    tenant_enabled    tinyint  default 0                 null comment '是否租户自动启用插件,1:租户自动启用;0:非租户自动启用;默认:0',
     constraint uk_uid
         unique (uid, _tenant_id)
 )
@@ -294,6 +298,7 @@ create table eco_market_client_secret
 )
     comment '生态市场,客户端端配置';
 
+
 create table knowledge_config
 (
     id                 bigint auto_increment comment '主键id'
@@ -314,7 +319,8 @@ create table knowledge_config
     modified_name      varchar(64)                                             null comment '最后修改人',
     yn                 tinyint                       default 1                 null comment '逻辑标记,1:有效;-1:无效',
     icon               varchar(255)                                            null comment '图标图片地址',
-    file_size          bigint                        default 0                 null comment '文件大小,单位字节byte'
+    file_size          bigint                        default 0                 null comment '文件大小,单位字节byte',
+    workflow_id        bigint                                                  null comment '工作流id,可选,已工作流的形式,来执行解析文档获取文本的任务'
 )
     comment '知识库表';
 
@@ -470,10 +476,12 @@ create table mcp_config
     _tenant_id      bigint      default 1                 not null comment '租户ID',
     space_id        bigint                                not null comment '空间ID',
     creator_id      bigint                                not null comment '创建用户ID',
+    uid             varchar(64)                           null,
     name            varchar(64)                           not null comment 'MCP名称',
     server_name     varchar(64)                           null,
     description     text                                  null comment 'MCP描述信息',
     icon            varchar(255)                          null comment 'icon图片地址',
+    category        varchar(64)                           null,
     install_type    varchar(64)                           not null comment 'MCP安装类型',
     deploy_status   varchar(64) default 'Initialization'  not null comment '部署状态',
     config          json                                  null comment 'MCP配置',
@@ -482,6 +490,9 @@ create table mcp_config
     modified        datetime    default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP,
     created         datetime    default CURRENT_TIMESTAMP not null
 );
+
+create index idx_uid
+    on mcp_config (uid);
 
 create table model_config
 (
@@ -759,7 +770,9 @@ create table tenant
     status      enum ('Pending', 'Enabled', 'Disabled') not null comment '商户状态',
     domain      varchar(64) default ''                  not null,
     modified    datetime    default CURRENT_TIMESTAMP   not null on update CURRENT_TIMESTAMP comment '更新时间',
-    created     datetime    default CURRENT_TIMESTAMP   not null comment '创建时间'
+    created     datetime    default CURRENT_TIMESTAMP   not null comment '创建时间',
+    constraint uk_domain
+        unique (domain)
 );
 
 create table tenant_config
@@ -919,3 +932,4 @@ create table workflow_node_config
     created             datetime default CURRENT_TIMESTAMP not null
 )
     comment '智能体组件配置';
+

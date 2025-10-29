@@ -103,6 +103,47 @@ pub fn generate_schema_diff(
     }
 }
 
+/// 格式化默认值用于SQL输出，正确处理不同类型的值
+fn format_default_value_for_sql(default: &str) -> String {
+    // 检查是否是MySQL关键字/函数（不需要引号）
+    let mysql_keywords = [
+        "CURRENT_TIMESTAMP",
+        "NOW()",
+        "CURRENT_DATE",
+        "CURRENT_TIME",
+        "LOCALTIMESTAMP",
+        "LOCALTIME",
+        "NULL",
+        "TRUE",
+        "FALSE",
+    ];
+
+    let upper_default = default.to_uppercase();
+
+    // 如果是MySQL关键字，直接返回（不加引号）
+    if mysql_keywords.contains(&upper_default.as_str()) {
+        return default.to_string();
+    }
+
+    // 如果是纯数字（可能包含负号和小数点），直接返回
+    if default
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '-' || c == '.')
+    {
+        return default.to_string();
+    }
+
+    // 如果已经是引号包围的，直接返回
+    if (default.starts_with('\'') && default.ends_with('\''))
+        || (default.starts_with('"') && default.ends_with('"'))
+    {
+        return default.to_string();
+    }
+
+    // 其他情况作为字符串处理，添加单引号
+    format!("'{}'", default)
+}
+
 /// 生成CREATE TABLE SQL
 pub fn generate_create_table_sql(table: &TableDefinition) -> String {
     let mut sql = format!("CREATE TABLE `{}` (", table.name);
@@ -142,7 +183,10 @@ pub fn generate_column_sql(column: &TableColumn) -> String {
     }
 
     if let Some(default) = &column.default_value {
-        sql.push_str(&format!(" DEFAULT '{default}'"));
+        sql.push_str(&format!(
+            " DEFAULT {}",
+            format_default_value_for_sql(default)
+        ));
     }
 
     if column.auto_increment {
