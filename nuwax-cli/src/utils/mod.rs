@@ -202,16 +202,17 @@ fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// 判断路径是否属于 upload 目录
+/// 判断路径是否属于保护目录 (upload, data 等)
 fn is_upload_directory_path(path: &std::path::Path) -> bool {
-    // 判断 [upload, project_workspace, project_zips, project_nginx, project_init] 目录
-    const EXCLUDE_DIRS: [&str; 6] = [
+    // 判断 [upload, project_workspace, project_zips, project_nginx, project_init, data] 目录
+    const EXCLUDE_DIRS: [&str; 7] = [
         "upload",
         "project_workspace",
         "project_zips",
         "project_nginx",
         "project_init",
-        "uv_cache"
+        "uv_cache",
+        "data",
     ];
     path.components()
         .any(|component| EXCLUDE_DIRS.iter().any(|d| component.as_os_str() == *d))
@@ -223,7 +224,10 @@ fn safe_remove_docker_directory(output_dir: &std::path::Path) -> Result<()> {
         return Ok(());
     }
 
-    info!("🧹 安全清理 docker 目录（保留 upload 目录）: {}", output_dir.display());
+    info!(
+        "🧹 安全清理 docker 目录（保留 upload 目录）: {}",
+        output_dir.display()
+    );
 
     // 遍历 docker 目录，删除除了 upload 之外的所有内容
     for entry in std::fs::read_dir(output_dir)? {
@@ -231,20 +235,20 @@ fn safe_remove_docker_directory(output_dir: &std::path::Path) -> Result<()> {
         let path = entry.path();
         let file_name = entry.file_name();
 
-        // 跳过 [upload, project_workspace, project_zips, project_nginx, project_init] 目录
-        const EXCLUDE_DIRS: [&str; 6] = [
+        // 跳过 [upload, project_workspace, project_zips, project_nginx, project_init, data] 目录
+        const EXCLUDE_DIRS: [&str; 7] = [
             "upload",
             "project_workspace",
             "project_zips",
             "project_nginx",
             "project_init",
-            "uv_cache"
+            "uv_cache",
+            "data",
         ];
         if EXCLUDE_DIRS.iter().any(|d| file_name.as_os_str() == *d) {
             info!("🛡️ 保留目录: {}", path.display());
             continue;
         }
-
 
         // 删除其他文件或目录
         if path.is_dir() {
@@ -327,7 +331,10 @@ pub async fn extract_docker_service(
                     // 如果 upload 目录已存在，跳过解压以保护用户数据
                     // 如果 upload 目录不存在，正常解压以创建目录结构
                     if target_path.exists() {
-                        info!("🛡️ 保护现有 upload 目录，跳过解压: {}", target_path.display());
+                        info!(
+                            "🛡️ 保护现有 upload 目录，跳过解压: {}",
+                            target_path.display()
+                        );
                         continue;
                     } else {
                         info!("📁 创建新的 upload 目录结构: {}", target_path.display());
@@ -468,7 +475,10 @@ pub async fn extract_docker_service(
                     // 清理现有目录（跳过upload目录）
                     let target_dir = work_dir.join(&dir);
                     if is_upload_directory_path(&target_dir) && target_dir.exists() {
-                        info!("🛡️ 保护 upload 目录，跳过目录替换: {}", target_dir.display());
+                        info!(
+                            "🛡️ 保护 upload 目录，跳过目录替换: {}",
+                            target_dir.display()
+                        );
                         continue;
                     }
 

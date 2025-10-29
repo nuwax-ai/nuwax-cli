@@ -941,13 +941,14 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
                     // 只检查docker目录下的第一层[upload, project_workspace, project_zips, project_nginx, project_init]目录
 
                     // 排除指定目录，不进行删除
-                    const EXCLUDE_DIRS: [&str; 6] = [
+                    const EXCLUDE_DIRS: [&str; 7] = [
                         "upload",
                         "project_workspace",
                         "project_zips",
                         "project_nginx",
                         "project_init",
-                        "uv_cache"
+                        "uv_cache",
+                        "data"
                     ];
 
                     if EXCLUDE_DIRS.contains(&file_name_str.as_ref()) && entry_path.is_dir() {
