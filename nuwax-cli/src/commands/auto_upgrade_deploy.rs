@@ -38,10 +38,6 @@ pub async fn handle_auto_upgrade_deploy_command(
             info!("🚀 开始自动升级部署流程...");
             run_auto_upgrade_deploy(app, port, config, project).await
         }
-        AutoUpgradeDeployCommand::DelayTimeDeploy { time, unit } => {
-            info!("配置延迟自动升级部署: {} {}", time, unit);
-            schedule_delayed_deploy(app, time, &unit).await
-        }
         AutoUpgradeDeployCommand::Status => {
             info!("显示自动升级部署状态");
             show_status(app).await
@@ -250,10 +246,6 @@ pub async fn run_auto_upgrade_deploy(
                     Ok(_) => info!("✅ docker目录清理完成"),
                     Err(e) => {
                         warn!("⚠️ 清理docker目录失败: {}, 尝试继续解压", e);
-                        // 清理失败时，恢复备份的数据（仅在升级部署时）
-                        if !is_first_deployment {
-                            restore_data_after_cleanup(&temp_data_backup).await?;
-                        }
                         return Err(anyhow::anyhow!(format!("清理docker目录失败: {e}")));
                     }
                 }
@@ -273,22 +265,6 @@ pub async fn run_auto_upgrade_deploy(
 
             // 🔧 自动修复关键脚本文件权限
             fix_script_permissions().await?;
-
-            // 🛡️ 数据恢复：智能恢复逻辑（支持首次部署恢复历史备份）
-            if let Some(backup_id) = latest_backup_id {
-                info!("🔄 正在从备份恢复数据 (备份ID: {})", backup_id);
-                // 🔧 复用backup.rs的成熟恢复逻辑
-                backup::run_rollback_data_only(
-                    app,
-                    Some(backup_id),
-                    true,
-                    false,
-                    config_file.as_ref(),
-                )
-                .await?;
-            } else {
-                info!("🆕 无历史备份，使用全新初始化数据");
-            }
 
             // 📝 更新配置文件中的Docker服务版本
             if latest_version != app.config.get_docker_versions() {
@@ -948,7 +924,7 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
                         "project_nginx",
                         "project_init",
                         "uv_cache",
-                        "data"
+                        "data",
                     ];
 
                     if EXCLUDE_DIRS.contains(&file_name_str.as_ref()) && entry_path.is_dir() {

@@ -238,8 +238,8 @@ pub mod docker {
 pub mod api {
 
     ///TODO: 默认API服务器地址
-    // pub const DEFAULT_BASE_URL: &str = "https://api-version.nuwax.com";
-    pub const DEFAULT_BASE_URL: &str = "http://192.168.2.244:3000";
+    pub const DEFAULT_BASE_URL: &str = "https://api-version.nuwax.com";
+    // pub const DEFAULT_BASE_URL: &str = "http://192.168.2.244:3000";
 
     /// API版本前缀
     pub const VERSION_PREFIX: &str = "/api/v1";

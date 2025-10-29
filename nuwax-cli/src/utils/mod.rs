@@ -158,35 +158,56 @@ pub fn copy_with_progress<R: Read, W: Write>(
     Ok(copied)
 }
 
+/// 强制覆盖文件/目录：先删除再创建（彻底解决 Directory not empty 错误）
+fn force_extract_file(
+    entry: &mut ZipFile<std::fs::File>,
+    target_path: &std::path::Path,
+) -> Result<()> {
+    // 如果目标存在，先彻底删除
+    if target_path.exists() {
+        if target_path.is_dir() {
+            info!("🗑️  强制删除目录: {}", target_path.display());
+            std::fs::remove_dir_all(target_path)?;
+        } else {
+            info!("🗑️  强制删除文件: {}", target_path.display());
+            std::fs::remove_file(target_path)?;
+        }
+    }
+
+    // 确保父目录存在
+    if let Some(parent) = target_path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    // 创建新文件/目录
+    if entry.is_dir() {
+        std::fs::create_dir_all(target_path).map_err(|e| {
+            error!("❌ 目录创建失败: {} - 错误: {}", target_path.display(), e);
+            e
+        })?;
+    } else {
+        let mut outfile = std::fs::File::create(target_path).map_err(|e| {
+            error!("❌ 文件创建失败: {} - 错误: {}", target_path.display(), e);
+            e
+        })?;
+        std::io::copy(entry, &mut outfile).map_err(|e| {
+            error!("❌ 文件写入失败: {} - 错误: {}", target_path.display(), e);
+            e
+        })?;
+    }
+
+    Ok(())
+}
+
 fn handle_extraction(
     entry: &mut ZipFile<std::fs::File>,
     dst: &std::path::Path,
     extracted_files: &mut usize,
     extracted_size: &mut u64,
 ) -> Result<()> {
-    if entry.is_dir() {
-        // 创建目录
-        std::fs::create_dir_all(dst).map_err(|e| {
-            error!("❌ 目录创建失败: {} - 错误: {}", dst.display(), e);
-            e
-        })?;
-    } else {
-        // 检查目标路径是否存在且为目录，如果是则删除
-        if dst.exists() && dst.is_dir() {
-            info!("🗑️  删除已存在的目录: {}", dst.display());
-            std::fs::remove_dir_all(dst)?;
-        }
-
-        // 创建文件并写入内容
-        let mut outfile = std::fs::File::create(dst).map_err(|e| {
-            error!("❌ 文件创建失败: {} - 错误: {}", dst.display(), e);
-            e
-        })?;
-        std::io::copy(entry, &mut outfile).map_err(|e| {
-            error!("❌ 文件写入失败: {} - 错误: {}", dst.display(), e);
-            e
-        })?;
-    }
+    force_extract_file(entry, dst)?;
     *extracted_files += 1;
     *extracted_size += entry.size();
     Ok(())
@@ -345,26 +366,8 @@ pub async fn extract_docker_service(
                     // 创建目录
                     std::fs::create_dir_all(&target_path)?;
                 } else {
-                    // 确保父目录存在
-                    if let Some(parent) = target_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-
-                    // 检查目标路径是否存在且为目录，如果是则删除
-                    if target_path.exists() && target_path.is_dir() {
-                        info!("🗑️  删除已存在的目录: {}", target_path.display());
-                        std::fs::remove_dir_all(&target_path)?;
-                    }
-
-                    // 解压文件
-                    let mut outfile = std::fs::File::create(&target_path).map_err(|e| {
-                        error!("❌ 文件创建失败: {} - 错误: {}", target_path.display(), e);
-                        e
-                    })?;
-                    std::io::copy(&mut file, &mut outfile).map_err(|e| {
-                        error!("❌ 文件写入失败: {} - 错误: {}", target_path.display(), e);
-                        e
-                    })?;
+                    // 强制覆盖：先删除再解压（彻底解决 Directory not empty 错误）
+                    force_extract_file(&mut file, &target_path)?;
 
                     extracted_files += 1;
                     extracted_size += file.size();
@@ -445,26 +448,22 @@ pub async fn extract_docker_service(
 
                     let dst = work_dir.join(&file);
 
-                    // 检查是否为 upload 目录路径
+                    // 检查是否为保护目录路径
                     if is_upload_directory_path(&dst) {
-                        // 如果 upload 目录已存在，跳过解压以保护用户数据
+                        // 如果保护目录已存在，跳过解压以保护用户数据
                         if dst.exists() {
-                            info!("🛡️ 保护现有 upload 目录，跳过替换: {}", dst.display());
+                            info!("🛡️ 保护现有目录，跳过替换: {}", dst.display());
                             continue;
                         } else {
-                            info!("📁 创建新的 upload 目录结构: {}", dst.display());
+                            info!("📁 创建新的保护目录结构: {}", dst.display());
                         }
                     }
 
-                    ensure_parent_dir(&dst)?;
+                    // 强制覆盖：先删除再解压（彻底解决 Directory not empty 错误）
+                    force_extract_file(&mut entry, &dst)?;
 
-                    // 如果目标路径存在且为目录，则删除
-                    if dst.exists() && dst.is_dir() {
-                        info!("🗑️  删除已存在的目录: {}", dst.display());
-                        std::fs::remove_dir_all(&dst)?;
-                    }
-
-                    handle_extraction(&mut entry, &dst, &mut extracted_files, &mut extracted_size)?;
+                    extracted_files += 1;
+                    extracted_size += entry.size();
                 }
 
                 // 处理替换目录
@@ -472,17 +471,15 @@ pub async fn extract_docker_service(
                     let zip_dir_path = format!("docker/{}", dir.trim_start_matches('/'));
                     info!("📁 处理目录: {} -> {}", dir, zip_dir_path);
 
-                    // 清理现有目录（跳过upload目录）
+                    // 清理现有目录（跳过保护目录）
                     let target_dir = work_dir.join(&dir);
                     if is_upload_directory_path(&target_dir) && target_dir.exists() {
-                        info!(
-                            "🛡️ 保护 upload 目录，跳过目录替换: {}",
-                            target_dir.display()
-                        );
+                        info!("🛡️ 保护现有目录，跳过目录替换: {}", target_dir.display());
                         continue;
                     }
 
                     if target_dir.exists() {
+                        info!("🗑️  强制删除目录: {}", target_dir.display());
                         std::fs::remove_dir_all(&target_dir)?;
                     }
 

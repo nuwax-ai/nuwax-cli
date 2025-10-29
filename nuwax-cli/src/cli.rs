@@ -48,19 +48,6 @@ pub enum AutoUpgradeDeployCommand {
         )]
         project: Option<String>,
     },
-    /// 延迟执行自动升级部署
-    DelayTimeDeploy {
-        /// 延迟时间数值
-        #[arg(help = "延迟时间数值，例如 2")]
-        time: u32,
-        /// 时间单位 (hours, minutes, days)
-        #[arg(
-            long,
-            default_value = "hours",
-            help = "时间单位：hours(小时), minutes(分钟), days(天)"
-        )]
-        unit: String,
-    },
     /// 显示当前自动升级配置
     Status,
 }

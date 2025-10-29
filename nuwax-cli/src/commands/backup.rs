@@ -356,6 +356,7 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
     // 3. 执行备份
     info!("🔄 开始创建备份...");
 
+    // 执行需要备份的目录: app, data 目录
     let source_paths = vec![docker::get_data_dir_path(), docker::get_app_dir_path()];
 
     let backup_options = BackupOptions {
@@ -583,8 +584,7 @@ pub async fn run_rollback(
     } else {
         info!("rollback_data 为 false, 不回滚 data 目录(mysql,redis等数据,不会回滚)");
         //data 数据目录不用恢复,回滚应用业务逻辑, 考虑改写: perform_selective_restore ,增加参数,用于排除 data 目录
-        run_rollback_with_exculde(app, selected_backup_id, auto_start_service, &["data"])
-            .await?;
+        run_rollback_with_exculde(app, selected_backup_id, auto_start_service, &["data"]).await?;
     }
 
     info!("✅ 数据回滚完成");
@@ -632,7 +632,8 @@ pub async fn run_rollback_data_only(
     info!("开始 data 目录回滚操作...");
 
     // 🔧 只回滚 data 目录：只恢复 data 目录，保留 app 目录和配置文件
-    run_data_directory_only_rollback(app, selected_backup_id, auto_start_service, config_file).await?;
+    run_data_directory_only_rollback(app, selected_backup_id, auto_start_service, config_file)
+        .await?;
 
     info!("✅ data 目录回滚完成");
     Ok(())
@@ -914,7 +915,7 @@ async fn run_data_directory_only_rollback(
         let env_file = config_path.with_file_name(".env");
         let custom_docker_manager = Arc::new(
             client_core::container::DockerManager::new(config_path.clone(), env_file.clone())
-                .map_err(|e| anyhow::anyhow!("创建自定义DockerManager失败: {}", e))?
+                .map_err(|e| anyhow::anyhow!("创建自定义DockerManager失败: {}", e))?,
         );
         Arc::new(client_core::backup::BackupManager::new(
             app.config.get_backup_dir(),
