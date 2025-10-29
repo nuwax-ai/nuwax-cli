@@ -8,11 +8,11 @@ use chrono::Utc;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use std::{fs::File, sync::Arc};
 use std::path::{Path, PathBuf};
+use std::{fs::File, sync::Arc};
 use tar::Archive;
 use tar::Builder;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
 /// 备份管理器
@@ -306,11 +306,73 @@ impl BackupManager {
             let dir_path = docker_dir.join(dir_name);
             if dir_path.exists() {
                 info!("清理数据目录: {}", dir_path.display());
-                tokio::fs::remove_dir_all(&dir_path).await?;
+                self.force_remove_directory(&dir_path).await?;
             }
         }
 
         info!("数据目录清理完成，配置文件已保留");
+        Ok(())
+    }
+
+    /// 强制删除目录，处理悬挂符号链接和其他特殊情况
+    async fn force_remove_directory(&self, path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+
+        info!("🧹 强制清理目录: {}", path.display());
+
+        // 先处理符号链接
+        if path.is_symlink() {
+            info!("🔗 删除符号链接: {}", path.display());
+            tokio::fs::remove_file(path).await?;
+            return Ok(());
+        }
+
+        // 递归删除目录内容
+        let mut entries = match tokio::fs::read_dir(path).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                warn!("⚠️ 读取目录失败: {} - {}", path.display(), e);
+                // 如果读取失败，尝试直接删除整个目录
+                return tokio::fs::remove_dir_all(path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("删除目录失败: {} - {}", path.display(), e));
+            }
+        };
+
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_path = entry.path();
+
+            if entry_path.is_symlink() {
+                info!("🔗 删除符号链接: {}", entry_path.display());
+                tokio::fs::remove_file(&entry_path).await?;
+            } else if entry_path.is_dir() {
+                // 递归删除子目录
+                Box::pin(self.force_remove_directory(&entry_path)).await?;
+
+                // 尝试删除空目录（忽略"不存在"的错误）
+                if let Err(e) = tokio::fs::remove_dir(&entry_path).await {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!("📁 删除空目录失败: {} - {}", entry_path.display(), e);
+                    }
+                }
+            } else {
+                if let Err(e) = tokio::fs::remove_file(&entry_path).await {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!("📄 删除文件失败: {} - {}", entry_path.display(), e);
+                    }
+                }
+            }
+        }
+
+        // 尝试删除根目录（忽略"不存在"的错误）
+        if let Err(e) = tokio::fs::remove_dir(path).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("📁 删除根目录失败: {} - {}", path.display(), e);
+            }
+        }
+
         Ok(())
     }
 
