@@ -1,0 +1,31 @@
+WARN 📁 删除空目录失败: docker/data - Directory not empty (os error 66)
+ INFO 🧹 尝试强制清理目录内容: docker/backups
+ INFO 📁 跳过目录: docker/upload
+ INFO ✅ 成功安全删除目录: docker
+ INFO ✅ docker目录清理完成
+ INFO 📦 开始解压Docker服务包...
+ INFO 📦 找到Docker服务包: ./cacheDuckData/download/0.0.30/full/docker-aarch64.zip
+ INFO 📦 开始解压Docker服务包: ./cacheDuckData/download/0.0.30/full/docker-aarch64.zip
+ INFO ✅ ZIP文件打开成功，包含 624 个文件
+ INFO 🧹 安全清理 docker 目录（保留 upload 目录）: docker
+ INFO 🗑️ 删除文件: docker/.DS_Store
+ INFO 🗑️ 删除目录: docker/data
+ERROR ❌ Docker服务包解压失败: Directory not empty (os error 66)
+ INFO 🔄 解压失败，从最新完整备份恢复数据 (备份ID: 1)
+ INFO 开始数据回滚操作...
+ INFO 🛡️ 使用智能数据回滚模式
+ INFO    📁 将恢复: data/, app/ 目录
+ INFO    🔧 将保留: docker-compose.yml, .env 等配置文件
+ INFO    不恢复的目录:[]
+ INFO 开始智能数据恢复: ./backups/backup_manual_v0.0.27.0_2025-10-29_06-58-08.tar.gz
+ INFO 目标目录: ./docker
+ INFO 正在停止服务...
+ INFO 🔍 开始检查Docker环境先决条件...
+ WARN ❌ Docker Compose 文件不存在: ./docker/docker-compose.yml
+ERROR ❌ 数据恢复失败: Docker Compose 文件不存在: ./docker/docker-compose.yml
+ WARN 💡 建议操作:
+ WARN    1. 检查备份文件是否存在且完整
+ WARN    2. 确保有足够的磁盘空间
+ WARN    3. 手动启动服务: nuwax-cli docker-service start
+ERROR ❌ 操作失败: Docker Compose 文件不存在: ./docker/docker-compose.yml
+soddy@soddy nuwac-cli-test1 %

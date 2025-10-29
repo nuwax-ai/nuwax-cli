@@ -211,7 +211,7 @@ fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError>
                 nullable = false;
             }
             sqlparser::ast::ColumnOption::Default(expr) => {
-                default_value = Some(format!("{expr}"));
+                default_value = Some(format_default_value(expr));
             }
             sqlparser::ast::ColumnOption::Comment(c) => {
                 comment = Some(c.clone());
@@ -297,6 +297,67 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
     }
 }
 
+/// 格式化默认值（特别处理函数类型的默认值）
+fn format_default_value(expr: &sqlparser::ast::Expr) -> String {
+    debug!("🔍 format_default_value 调用，表达式: {:?}", expr);
+
+    match expr {
+        // 处理函数调用，如 CURRENT_TIMESTAMP
+        sqlparser::ast::Expr::Function(function) => {
+            let function_name = function.name.to_string();
+            debug!("🎯 检测到函数调用: {}", function_name);
+            // 对于 MySQL 的日期时间函数，不需要加引号，直接返回函数名
+            match function_name.to_uppercase().as_str() {
+                "CURRENT_TIMESTAMP" | "NOW" | "CURRENT_DATE" | "CURRENT_TIME"
+                | "LOCALTIMESTAMP" | "LOCALTIME" => {
+                    debug!("✅ 识别为MySQL日期时间函数，返回: {}", function_name);
+                    function_name
+                }
+                _ => {
+                    debug!("⚠️  其他函数，使用默认格式: {}", function_name);
+                    // 其他函数保持原有格式
+                    format!("{expr}")
+                }
+            }
+        }
+
+        // 处理各种值类型
+        sqlparser::ast::Expr::Value(value_with_span) => {
+            debug!("🔢 检测到值类型: {:?}", value_with_span);
+            match &value_with_span.value {
+                sqlparser::ast::Value::SingleQuotedString(s) => {
+                    debug!("💬 字符串值: {} -> '{}'", s, s);
+                    format!("'{}'", s)
+                }
+                sqlparser::ast::Value::Number(_, _) => {
+                    debug!("🔢 数字值");
+                    // 数字类型不需要引号，直接返回表达式格式化结果
+                    format!("{expr}")
+                }
+                sqlparser::ast::Value::Null => {
+                    debug!("⭕ NULL值");
+                    "NULL".to_string()
+                }
+                sqlparser::ast::Value::Boolean(b) => {
+                    debug!("🔘 布尔值: {}", b);
+                    b.to_string()
+                }
+                // 处理其他值类型
+                _ => {
+                    debug!("❓ 其他值类型");
+                    format!("{expr}")
+                }
+            }
+        }
+
+        // 其他情况使用默认格式化
+        _ => {
+            debug!("❓ 其他表达式类型");
+            format!("{expr}")
+        }
+    }
+}
+
 /// 格式化数据类型
 fn format_data_type(data_type: &DataType) -> String {
     match data_type {
@@ -337,6 +398,24 @@ fn format_data_type(data_type: &DataType) -> String {
         DataType::Timestamp(_, _) => "TIMESTAMP".to_string(),
         DataType::Datetime(_) => "DATETIME".to_string(),
         DataType::JSON => "JSON".to_string(),
+        DataType::Enum(variants, _max_length) => {
+            // 正确处理 ENUM 变体
+            let enum_values: Vec<String> = variants
+                .iter()
+                .filter_map(|variant| match variant {
+                    sqlparser::ast::EnumMember::Name(name) => Some(format!("'{}'", name)),
+                    sqlparser::ast::EnumMember::NamedValue(name, _expr) => {
+                        Some(format!("'{}'", name))
+                    }
+                })
+                .collect();
+
+            if enum_values.is_empty() {
+                "ENUM()".to_string()
+            } else {
+                format!("ENUM({})", enum_values.join(","))
+            }
+        }
         _ => format!("{data_type:?}"), // 对于其他类型，使用 Debug 格式
     }
 }

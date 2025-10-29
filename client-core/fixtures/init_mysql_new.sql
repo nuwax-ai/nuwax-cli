@@ -10,7 +10,6 @@ FLUSH PRIVILEGES;
 
 USE agent_platform;
 
-
 create table agent_component_config
 (
     id            bigint auto_increment
@@ -35,6 +34,7 @@ create table agent_config
     id                    bigint auto_increment comment '智能体ID'
         primary key,
     uid                   varchar(64)                                      not null comment 'agent唯一标识',
+    type                  varchar(32)            default 'ChatBot'         not null comment '智能体类型',
     _tenant_id            bigint                 default -1                not null comment '商户ID',
     space_id              bigint                                           null comment '空间ID',
     creator_id            bigint                                           not null comment '创建者ID',
@@ -51,6 +51,8 @@ create table agent_config
     open_scheduled_task   varchar(32)                                      null comment '开启定时任务',
     publish_status        varchar(32)            default 'Developing'      not null comment 'Agent发布状态',
     dev_conversation_id   bigint                                           null,
+    expand_page_area      tinyint                default 0                 not null comment '默认展开页面区域',
+    hide_chat_area        tinyint                default 0                 not null comment '隐藏对话框',
     yn                    tinyint                default 0                 not null comment '逻辑删除，1为删除',
     modified              datetime               default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP comment '更新时间',
     created               datetime               default CURRENT_TIMESTAMP not null comment '创建时间'
@@ -175,6 +177,95 @@ create table custom_field_definition
 
 create index idx_table_id
     on custom_field_definition (table_id);
+
+create table custom_page_build
+(
+    id                   bigint auto_increment comment '主键ID'
+        primary key,
+    project_id           bigint                             not null comment '项目ID',
+    dev_running          tinyint  default -1                not null comment '开发服务器运行标记,1:运行中;-1:未运行',
+    dev_pid              int                                null comment '开发服务器进程ID',
+    dev_port             int                                null comment '开发服务器端口号',
+    dev_time             datetime                           null comment '开发服务器启动时间',
+    last_keep_alive_time datetime                           null comment '最后保活时间',
+    build_running        tinyint  default -1                not null comment '线上运行标记,1:运行中;-1:未运行',
+    build_time           datetime                           null comment '构建发布时间',
+    build_version        int                                null comment '发布的版本号',
+    code_version         int                                not null comment '代码版本',
+    version_info         json                               null comment '版本信息',
+    last_chat_model_id   bigint                             null comment '上次对话模型ID',
+    last_multi_model_id  bigint                             null comment '上次多模态模型ID',
+    _tenant_id           bigint                             not null comment '租户ID',
+    space_id             bigint                             null comment '空间ID',
+    created              datetime default CURRENT_TIMESTAMP not null comment '创建时间',
+    creator_id           bigint                             null comment '创建人ID',
+    creator_name         varchar(64)                        null comment '创建人',
+    modified             datetime default CURRENT_TIMESTAMP null on update CURRENT_TIMESTAMP comment '更新时间',
+    modified_id          bigint                             null comment '最后修改人ID',
+    modified_name        varchar(64)                        null comment '最后修改人',
+    yn                   tinyint  default 1                 not null comment '逻辑标记,1:有效;-1:无效',
+    uid                  varchar(64)                        not null comment '唯一标识'
+)
+    comment '用户项目构建管理';
+
+create index idx_dev_running_yn
+    on custom_page_build (dev_running, yn);
+
+create index idx_project_yn
+    on custom_page_build (project_id, yn);
+
+create table custom_page_config
+(
+    id              bigint auto_increment comment '主键ID'
+        primary key,
+    name            varchar(255)                            not null comment '项目名称',
+    description     varchar(255)                            null comment '项目描述',
+    icon            varchar(500)                            null comment '项目图标',
+    base_path       varchar(255)                            not null comment '项目基础路径',
+    build_running   tinyint                                 not null comment '线上运行标记,1:运行中;-1:未运行',
+    publish_type    enum ('AGENT', 'PAGE')                  null,
+    need_login      tinyint                                 null comment '是否需要登陆,1:需要',
+    dev_agent_id    bigint                                  null comment '开发关联智能体ID',
+    project_type    enum ('ONLINE_DEPLOY', 'REVERSE_PROXY') not null comment '项目类型',
+    proxy_config    json                                    null comment '代理配置',
+    page_arg_config json                                    null comment '路径参数配置',
+    data_sources    json                                    null comment '绑定的数据源',
+    ext             json                                    null comment '扩展参数',
+    _tenant_id      bigint                                  not null comment '租户ID',
+    space_id        bigint                                  null comment '空间ID',
+    created         datetime default CURRENT_TIMESTAMP      not null comment '创建时间',
+    creator_id      bigint                                  null comment '创建人ID',
+    creator_name    varchar(64)                             null comment '创建人',
+    modified        datetime default CURRENT_TIMESTAMP      null on update CURRENT_TIMESTAMP comment '更新时间',
+    modified_id     bigint                                  null comment '最后修改人ID',
+    modified_name   varchar(64)                             null comment '最后修改人',
+    yn              tinyint  default 1                      not null comment '逻辑标记,1:有效;-1:无效',
+    constraint uk_base_path
+        unique (base_path)
+)
+    comment '用户页面配置';
+
+create table custom_page_conversation
+(
+    id            bigint auto_increment comment '主键ID'
+        primary key,
+    project_id    bigint                             not null comment '项目ID',
+    topic         varchar(500)                       null comment '会话主题',
+    content       longtext                           not null comment '会话内容',
+    _tenant_id    bigint                             not null comment '租户ID',
+    space_id      bigint                             null comment '空间ID',
+    created       datetime default CURRENT_TIMESTAMP not null comment '创建时间',
+    creator_id    bigint                             not null comment '创建者ID',
+    creator_name  varchar(255)                       not null comment '创建者名称',
+    modified      datetime default CURRENT_TIMESTAMP null on update CURRENT_TIMESTAMP comment '修改时间',
+    modified_id   bigint                             null comment '修改者ID',
+    modified_name varchar(255)                       null comment '修改者名称',
+    yn            int      default 1                 not null comment '是否有效 1:有效 -1:无效'
+)
+    comment '自定义页面会话记录表';
+
+create index idx_project_yn_created
+    on custom_page_conversation (project_id, yn, created);
 
 create table custom_table_definition
 (
@@ -318,7 +409,8 @@ create table knowledge_config
     modified_name      varchar(64)                                             null comment '最后修改人',
     yn                 tinyint                       default 1                 null comment '逻辑标记,1:有效;-1:无效',
     icon               varchar(255)                                            null comment '图标图片地址',
-    file_size          bigint                        default 0                 null comment '文件大小,单位字节byte'
+    file_size          bigint                        default 0                 null comment '文件大小,单位字节byte',
+    workflow_id        bigint                                                  null comment '工作流id,可选,已工作流的形式,来执行解析文档获取文本的任务'
 )
     comment '知识库表';
 
@@ -474,10 +566,12 @@ create table mcp_config
     _tenant_id      bigint      default 1                 not null comment '租户ID',
     space_id        bigint                                not null comment '空间ID',
     creator_id      bigint                                not null comment '创建用户ID',
+    uid             varchar(64)                           null,
     name            varchar(64)                           not null comment 'MCP名称',
     server_name     varchar(64)                           null,
     description     text                                  null comment 'MCP描述信息',
     icon            varchar(255)                          null comment 'icon图片地址',
+    category        varchar(64)                           null,
     install_type    varchar(64)                           not null comment 'MCP安装类型',
     deploy_status   varchar(64) default 'Initialization'  not null comment '部署状态',
     config          json                                  null comment 'MCP配置',
@@ -486,6 +580,9 @@ create table mcp_config
     modified        datetime    default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP,
     created         datetime    default CURRENT_TIMESTAMP not null
 );
+
+create index idx_uid
+    on mcp_config (uid);
 
 create table model_config
 (
@@ -509,7 +606,8 @@ create table model_config
     strategy        enum ('RoundRobin', 'WeightedRoundRobin', 'LeastConnections', 'WeightedLeastConnections', 'Random', 'ResponseTime') default 'WeightedRoundRobin' not null comment '接口调用策略',
     dimension       int(10)                                                                                                             default 1536                 not null comment '向量维度',
     modified        datetime                                                                                                            default CURRENT_TIMESTAMP    not null on update CURRENT_TIMESTAMP comment '修改时间',
-    created         datetime                                                                                                            default CURRENT_TIMESTAMP    not null comment '创建时间'
+    created         datetime                                                                                                            default CURRENT_TIMESTAMP    not null comment '创建时间',
+    enabled         tinyint                                                                                                                                          null comment '启用状态'
 );
 
 create table notify_message

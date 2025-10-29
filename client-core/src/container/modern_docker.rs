@@ -1,8 +1,10 @@
 use anyhow::Result;
 use bollard::Docker;
-use bollard::container::{Config, CreateContainerOptions, StartContainerOptions};
-use bollard::image::CreateImageOptions;
-use bollard::network::CreateNetworkOptions;
+use bollard::models::{ContainerCreateBody, NetworkCreateRequest};
+use bollard::query_parameters::{
+    CreateImageOptionsBuilder, CreateContainerOptions, StartContainerOptions,
+    ListContainersOptions, StopContainerOptions, RemoveContainerOptions,
+};
 use serde_yaml::Value as YamlValue;
 use std::collections::HashMap;
 use std::path::Path;
@@ -79,9 +81,9 @@ impl ModernDockerManager {
 
                 info!("📡 创建网络: {}", full_name);
 
-                let options = CreateNetworkOptions {
+                let options = NetworkCreateRequest {
                     name: full_name.clone(),
-                    driver: "bridge".to_string(),
+                    driver: Some("bridge".to_string()),
                     ..Default::default()
                 };
 
@@ -112,10 +114,9 @@ impl ModernDockerManager {
                         service_name.as_str().unwrap()
                     );
 
-                    let create_options = CreateImageOptions {
-                        from_image: image,
-                        ..Default::default()
-                    };
+                    let create_options = CreateImageOptionsBuilder::default()
+                        .from_image(image)
+                        .build();
 
                     let mut stream = self.docker.create_image(Some(create_options), None, None);
 
@@ -149,7 +150,7 @@ impl ModernDockerManager {
                 info!("🐳 创建容器: {}", container_name);
 
                 // 构建容器配置
-                let mut config = Config::<String>::default();
+                let mut config = ContainerCreateBody::default();
 
                 // 设置镜像
                 if let Some(image) = service_config.get("image").and_then(|i| i.as_str()) {
@@ -173,8 +174,8 @@ impl ModernDockerManager {
 
                 // 创建容器
                 let options = CreateContainerOptions {
-                    name: container_name.clone(),
-                    platform: None,
+                    name: Some(container_name.clone()),
+                    platform: String::new(),
                 };
 
                 let create_result = self
@@ -191,7 +192,7 @@ impl ModernDockerManager {
                 // 启动容器
                 info!("▶️ 启动容器: {}", container_name);
                 self.docker
-                    .start_container(&create_result.id, None::<StartContainerOptions<String>>)
+                    .start_container(&create_result.id, None::<StartContainerOptions>)
                     .await
                     .map_err(|e| anyhow::anyhow!("启动容器失败: {}", e))?;
 
@@ -277,7 +278,7 @@ impl ModernDockerManager {
         // 获取项目相关的所有容器
         let containers = self
             .docker
-            .list_containers(None::<bollard::container::ListContainersOptions<String>>)
+            .list_containers(None::<ListContainersOptions>)
             .await
             .map_err(|e| anyhow::anyhow!("获取容器列表失败: {}", e))?;
 
@@ -287,8 +288,8 @@ impl ModernDockerManager {
                     if name.contains(&self.project_name) {
                         info!("🛑 停止容器: {}", name);
                         if let Some(id) = &container.id {
-                            let _ = self.docker.stop_container(id, None).await;
-                            let _ = self.docker.remove_container(id, None).await;
+                            let _ = self.docker.stop_container(id, None::<StopContainerOptions>).await;
+                            let _ = self.docker.remove_container(id, None::<RemoveContainerOptions>).await;
                         }
                     }
                 }
@@ -305,7 +306,7 @@ impl ModernDockerManager {
     ) -> Result<Vec<crate::container::types::ServiceInfo>> {
         let containers = self
             .docker
-            .list_containers(None::<bollard::container::ListContainersOptions<String>>)
+            .list_containers(None::<ListContainersOptions>)
             .await
             .map_err(|e| anyhow::anyhow!("获取容器列表失败: {}", e))?;
 
@@ -315,8 +316,12 @@ impl ModernDockerManager {
             if let Some(names) = container.names {
                 for name in names {
                     if name.contains(&self.project_name) {
-                        let status = if container.state.as_deref() == Some("running") {
-                            crate::container::types::ServiceStatus::Running
+                        let status = if let Some(state) = &container.state {
+                            if state.to_string().to_lowercase() == "running" {
+                                crate::container::types::ServiceStatus::Running
+                            } else {
+                                crate::container::types::ServiceStatus::Stopped
+                            }
                         } else {
                             crate::container::types::ServiceStatus::Stopped
                         };

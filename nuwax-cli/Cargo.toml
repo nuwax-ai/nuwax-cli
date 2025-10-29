@@ -1,6 +1,6 @@
 [package]
 name = "nuwax-cli"
-version = "1.0.55"
+version = "1.0.56"
 edition = "2024"
 description = "Docker 服务管理和升级工具"
 authors = ["soddygo"]
@@ -105,7 +105,7 @@ default = []
 
 # 性能测试依赖
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
 tempfile = { workspace = true }
 tokio-test = "0.4"
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
