@@ -969,8 +969,39 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    // 读取差异SQL内容
-    let diff_sql = fs::read_to_string(&diff_sql_path)?;
+    // 🔄 重新生成差异SQL以确保准确性
+    info!("🔄 检测到差异SQL文件，重新生成以确保准确性...");
+    
+    let old_sql_path = temp_sql_dir.join("init_mysql_old.sql");
+    let new_sql_path = temp_sql_dir.join("init_mysql_new.sql");
+    
+    // 读取新旧版本SQL文件内容
+    let diff_sql = if old_sql_path.exists() && new_sql_path.exists() {
+        let old_sql_content = fs::read_to_string(&old_sql_path)?;
+        let new_sql_content = fs::read_to_string(&new_sql_path)?;
+        
+        // 重新生成差异SQL
+        info!("📊 正在基于源文件重新生成SQL差异...");
+        let (regenerated_diff_sql, description) = generate_schema_diff(
+            if old_sql_content.trim().is_empty() { None } else { Some(&old_sql_content) },
+            &new_sql_content,
+            Some("旧版本"),
+            "新版本",
+        )
+        .map_err(|e| anyhow::anyhow!("重新生成SQL差异失败: {}", e))?;
+        
+        info!("📋 差异生成结果: {}", description);
+        
+        // 保存重新生成的差异SQL文件（覆盖旧文件）
+        fs::write(&diff_sql_path, &regenerated_diff_sql)?;
+        info!("💾 已保存重新生成的差异SQL文件: {}", diff_sql_path.display());
+        
+        regenerated_diff_sql
+    } else {
+        // 如果源文件不存在，使用已有的差异文件
+        warn!("⚠️ 缺少源SQL文件，使用已存在的差异SQL文件");
+        fs::read_to_string(&diff_sql_path)?
+    };
 
     // 检查是否有实际的SQL语句需要执行
     let meaningful_lines: Vec<&str> = diff_sql
@@ -982,7 +1013,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         .collect();
 
     if meaningful_lines.is_empty() {
-        info!("📄 差异SQL文件为空，无需执行数据库升级");
+        info!("📄 差异SQL为空，无需执行数据库升级");
         return Ok(());
     }
 
