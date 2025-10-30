@@ -756,6 +756,19 @@ async fn backup_sql_file_before_upgrade() -> Result<()> {
         info!("📁 创建临时SQL目录: {}", temp_sql_dir.display());
     }
 
+    // 🔧 关键修复：如果 upgrade_diff.sql 已存在，则不覆盖 init_mysql_old.sql
+    // 避免重新部署时旧版本SQL被新版本覆盖，导致差异为空
+    let diff_sql_path = temp_sql_dir.join("upgrade_diff.sql");
+    if diff_sql_path.exists() {
+        if old_sql_path.exists() {
+            info!("✅ 检测到已有差异SQL文件和旧版本SQL文件，保持不变");
+            info!("   跳过备份以保护旧版本SQL: {}", old_sql_path.display());
+            return Ok(());
+        } else {
+            warn!("⚠️ 发现差异SQL文件但缺少旧版本SQL文件，将重新备份");
+        }
+    }
+
     // 复制当前SQL文件到临时目录
     // 注意：此函数只在非首次部署时调用，所以SQL文件应该存在
     if current_sql_path.exists() {
@@ -821,6 +834,20 @@ async fn generate_and_save_sql_diff(from_version: &str, to_version: &str) -> Res
 
     if meaningful_lines.is_empty() {
         info!("✅ 数据库架构无变化，无需执行升级脚本");
+        
+        // 🗂️ 重命名空差异文件以保留历史记录
+        if diff_sql_path.exists() {
+            let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
+            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let new_name = format!("diff_sql_empty_{timestamp}.sql");
+            let new_path = parent.join(new_name);
+
+            match fs::rename(&diff_sql_path, &new_path) {
+                Ok(_) => info!("📝 已归档空差异SQL文件: {}", new_path.display()),
+                Err(e) => warn!("⚠️ 归档空差异SQL文件失败: {}", e),
+            }
+        }
+        
         return Ok(());
     }
 
@@ -1014,6 +1041,20 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     if meaningful_lines.is_empty() {
         info!("📄 差异SQL为空，无需执行数据库升级");
+        
+        // 🗂️ 重命名空差异文件以保留历史记录
+        if diff_sql_path.exists() {
+            let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
+            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let new_name = format!("diff_sql_empty_{timestamp}.sql");
+            let new_path = parent.join(new_name);
+
+            match fs::rename(&diff_sql_path, &new_path) {
+                Ok(_) => info!("📝 已归档空差异SQL文件: {}", new_path.display()),
+                Err(e) => warn!("⚠️ 归档空差异SQL文件失败: {}", e),
+            }
+        }
+        
         return Ok(());
     }
 
