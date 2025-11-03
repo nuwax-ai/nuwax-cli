@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::DateTime;
+use client_core::constants::api;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,14 +10,12 @@ use tracing::{error, info, warn};
 pub const GITHUB_OWNER: &str = "soddygo";
 pub const GITHUB_REPO: &str = "duck_client";
 
-/// 外部版本检查服务器配置
-pub const VERSION_API_BASE_URL: &str = "https://api-version.nuwax.com";
 //cli 命令工具请求的地址
 pub const CLI_API_URL_PATH: &str = "/api/v1/cli/versions/latest.json";
 
-/// 获取完整的 CLI API URL
+/// 获取完整的 CLI API URL（环境感知）
 pub fn get_cli_api_url() -> String {
-    format!("{VERSION_API_BASE_URL}{CLI_API_URL_PATH}")
+    format!("{}{CLI_API_URL_PATH}", api::get_base_url())
 }
 
 use crate::cli::CheckUpdateCommand;
