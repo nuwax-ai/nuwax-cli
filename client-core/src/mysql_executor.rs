@@ -1,8 +1,9 @@
 use crate::container::DockerManager;
+use crate::sql_diff::{TableColumn, TableDefinition, TableIndex};
 use anyhow::{Context, Result, anyhow};
 use docker_compose_types as dct;
 use mysql_async::prelude::*;
-use mysql_async::{Opts, Pool, Row, Transaction, TxOpts};
+use mysql_async::{from_row, Opts, Pool, Row, Transaction, TxOpts};
 
 /// MySQL容器异步差异SQL执行器
 /// 专为Duck Client自动升级部署设计
@@ -238,6 +239,51 @@ impl MySqlExecutor {
             println!("{row:?}");
         }
         Ok(())
+    }
+
+    /// 抓取在线数据库架构：通过 SHOW CREATE TABLE 获取真实DDL，再用 sqlparser 解析为内部类型
+    pub async fn fetch_live_schema(
+        &self,
+    ) -> Result<std::collections::HashMap<String, TableDefinition>, anyhow::Error> {
+        use crate::sql_diff::parse_sql_tables;
+
+        let mut conn = self.pool.get_conn().await?;
+
+        // 获取当前数据库所有表名
+        let table_names: Vec<String> = conn
+            .exec(
+                r#"SELECT TABLE_NAME
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_SCHEMA = ?
+                    ORDER BY TABLE_NAME"#,
+                (self.config.database.clone(),),
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                let (name,): (String,) = from_row(row);
+                name
+            })
+            .collect();
+
+        // 拼接所有表的 CREATE 语句
+        let mut create_sqls = String::new();
+        for table in &table_names {
+            let query = format!("SHOW CREATE TABLE `{}`", table);
+            let row: Row = conn.exec_first(query, ()).await?.ok_or_else(|| {
+                anyhow::anyhow!(format!("无法获取表的CREATE语句: {}", table))
+            })?;
+            // MySQL返回两列：Table, Create Table
+            let (_tbl_name, create_stmt): (String, String) = from_row(row);
+            create_sqls.push_str(&create_stmt);
+            create_sqls.push_str("\n\n");
+        }
+
+        // 使用 sqlparser 解析 DDL，严格避免正则
+        let tables = parse_sql_tables(&create_sqls)
+            .map_err(|e| anyhow::anyhow!(format!("解析在线DDL失败: {}", e)))?;
+
+        Ok(tables)
     }
 
     /// 验证执行结果

@@ -7,7 +7,7 @@ use anyhow::Result;
 use client_core::constants::timeout;
 use client_core::container::DockerManager;
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
-use client_core::sql_diff::generate_schema_diff;
+use client_core::sql_diff::{generate_schema_diff, generate_live_schema_diff};
 use client_core::upgrade_strategy::UpgradeStrategy;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -927,90 +927,22 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 连接MySQL容器并执行差异SQL
+/// 连接MySQL容器并执行差异SQL（Live Diff）
 async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     let temp_sql_dir = Path::new("temp_sql");
     let diff_sql_path = temp_sql_dir.join("upgrade_diff.sql");
-
-    // 检查差异SQL文件是否存在
-    if !diff_sql_path.exists() {
-        info!("📄 没有发现SQL差异文件，跳过数据库升级");
-        return Ok(());
-    }
-
-    // 🔄 重新生成差异SQL以确保准确性
-    info!("🔄 检测到差异SQL文件，重新生成以确保准确性...");
-
-    let old_sql_path = temp_sql_dir.join("init_mysql_old.sql");
     let new_sql_path = temp_sql_dir.join("init_mysql_new.sql");
 
-    // 读取新旧版本SQL文件内容
-    let diff_sql = if old_sql_path.exists() && new_sql_path.exists() {
-        let old_sql_content = fs::read_to_string(&old_sql_path)?;
-        let new_sql_content = fs::read_to_string(&new_sql_path)?;
-
-        // 重新生成差异SQL
-        info!("📊 正在基于源文件重新生成SQL差异...");
-        let (regenerated_diff_sql, description) = generate_schema_diff(
-            if old_sql_content.trim().is_empty() {
-                None
-            } else {
-                Some(&old_sql_content)
-            },
-            &new_sql_content,
-            Some("旧版本"),
-            "新版本",
-        )
-        .map_err(|e| anyhow::anyhow!("重新生成SQL差异失败: {}", e))?;
-
-        info!("📋 差异生成结果: {}", description);
-
-        // 保存重新生成的差异SQL文件（覆盖旧文件）
-        fs::write(&diff_sql_path, &regenerated_diff_sql)?;
-        info!(
-            "💾 已保存重新生成的差异SQL文件: {}",
-            diff_sql_path.display()
-        );
-
-        regenerated_diff_sql
-    } else {
-        // 如果源文件不存在，使用已有的差异文件
-        warn!("⚠️ 缺少源SQL文件，使用已存在的差异SQL文件");
-        fs::read_to_string(&diff_sql_path)?
-    };
-
-    // 检查是否有实际的SQL语句需要执行
-    let meaningful_lines: Vec<&str> = diff_sql
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.is_empty() && !trimmed.starts_with("--") && !trimmed.starts_with("/*")
-        })
-        .collect();
-
-    if meaningful_lines.is_empty() {
-        info!("📄 差异SQL为空，无需执行数据库升级");
-
-        // 🗂️ 重命名空差异文件以保留历史记录
-        if diff_sql_path.exists() {
-            let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
-            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-            let new_name = format!("diff_sql_empty_{timestamp}.sql");
-            let new_path = parent.join(new_name);
-
-            match fs::rename(&diff_sql_path, &new_path) {
-                Ok(_) => info!("📝 已归档空差异SQL文件: {}", new_path.display()),
-                Err(e) => warn!("⚠️ 归档空差异SQL文件失败: {}", e),
-            }
-        }
-
-        return Ok(());
+    // 读取模板SQL（严格失败策略）
+    if !new_sql_path.exists() {
+        return Err(anyhow::anyhow!(
+            "未找到模板SQL文件: {}",
+            new_sql_path.display()
+        ));
     }
+    let new_sql_content = fs::read_to_string(&new_sql_path)?;
 
-    info!("🔄 开始执行数据库升级...");
-    info!("📋 即将执行 {} 行SQL语句", meaningful_lines.len());
-
-    //从App配置中动态获取MySQL端口
+    // 从App配置中动态获取MySQL端口并建立连接
     let compose_file = get_compose_file_path(&config_file);
     let env_file = client_core::constants::docker::get_env_file_path();
     let compose_file_str = compose_file
@@ -1030,6 +962,47 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         return Err(e.into());
     }
 
+    // 基于在线架构与模板生成差异SQL
+    info!("📊 正在基于在线架构生成SQL差异...");
+    let (diff_sql, description) = generate_live_schema_diff(&executor, &new_sql_content, "目标版本")
+        .await
+        .map_err(|e| anyhow::anyhow!("生成在线差异SQL失败: {}", e))?;
+    info!("📋 差异生成结果: {}", description);
+
+    // 检查是否有实际的SQL语句需要执行
+    let meaningful_lines: Vec<&str> = diff_sql
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with("--") && !trimmed.starts_with("/*")
+        })
+        .collect();
+
+    if meaningful_lines.is_empty() {
+        info!("📄 差异SQL为空，无需执行数据库升级");
+
+        // 保存并归档空差异文件
+        fs::write(&diff_sql_path, &diff_sql)?;
+        let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let new_name = format!("diff_sql_empty_{timestamp}.sql");
+        let new_path = parent.join(new_name);
+        match fs::rename(&diff_sql_path, &new_path) {
+            Ok(_) => info!("📝 已归档空差异SQL文件: {}", new_path.display()),
+            Err(e) => warn!("⚠️ 归档空差异SQL文件失败: {}", e),
+        }
+
+        return Ok(());
+    }
+
+    info!("🔄 开始执行数据库升级...");
+    info!("📋 即将执行 {} 行SQL语句", meaningful_lines.len());
+
+    // （连接已建立并生成差异）
+
+    // 保存差异SQL文件
+    fs::write(&diff_sql_path, &diff_sql)?;
+    info!("📄 已保存SQL差异文件: {}", diff_sql_path.display());
     info!("🚀 开始执行差异SQL...");
     match executor.execute_diff_sql_with_retry(&diff_sql, 3).await {
         Ok(results) => {
