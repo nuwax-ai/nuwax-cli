@@ -1,13 +1,13 @@
 use crate::app::CliApp;
 use crate::cli::AutoUpgradeDeployCommand;
-use crate::commands::{auto_backup, backup, check_update, docker_service, update};
+use crate::commands::{backup, docker_service, update};
 use crate::docker_service::health_check::HealthChecker;
 use crate::{DockerService, docker_utils};
 use anyhow::Result;
 use client_core::constants::timeout;
 use client_core::container::DockerManager;
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
-use client_core::sql_diff::{generate_schema_diff, generate_live_schema_diff};
+use client_core::sql_diff::{generate_live_schema_diff, generate_schema_diff};
 use client_core::upgrade_strategy::UpgradeStrategy;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -964,9 +964,10 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     // 基于在线架构与模板生成差异SQL
     info!("📊 正在基于在线架构生成SQL差异...");
-    let (diff_sql, description) = generate_live_schema_diff(&executor, &new_sql_content, "目标版本")
-        .await
-        .map_err(|e| anyhow::anyhow!("生成在线差异SQL失败: {}", e))?;
+    let (diff_sql, description) =
+        generate_live_schema_diff(&executor, &new_sql_content, "目标版本")
+            .await
+            .map_err(|e| anyhow::anyhow!("生成在线差异SQL失败: {}", e))?;
     info!("📋 差异生成结果: {}", description);
 
     // 检查是否有实际的SQL语句需要执行

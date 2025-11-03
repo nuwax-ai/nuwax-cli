@@ -1,12 +1,31 @@
 use clap::Parser;
-use client_core::DuckError;
+use client_core::{DuckError, environment::Environment};
 use nuwax_cli::{Cli, CliApp, Commands, run_diff_sql, run_init, setup_logging};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() {
     // 解析命令行参数
     let cli = Cli::parse();
+
+    // 检测环境并显示提示
+    let environment = Environment::from_env();
+    if environment.is_testing() {
+        warn!("⚠️  RUNNING IN TESTING MODE");
+        warn!("   Environment: {}", environment.display_name());
+        warn!(
+            "   API Endpoint: {}",
+            client_core::constants::api::get_base_url()
+        );
+        warn!("   Configuration: config-test.toml (if exists)");
+        warn!("   Use Ctrl+C to cancel if this is not intended");
+        warn!("   Waiting 2 seconds...");
+
+        // 给用户时间看到警告
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        warn!("🚀 Starting in Testing Environment...");
+    }
 
     // 设置日志记录
     setup_logging(cli.verbose);
