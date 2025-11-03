@@ -1,6 +1,6 @@
 use crate::app::CliApp;
 use crate::cli::AutoUpgradeDeployCommand;
-use crate::commands::{auto_backup, backup, docker_service, update};
+use crate::commands::{auto_backup, backup, check_update, docker_service, update};
 use crate::docker_service::health_check::HealthChecker;
 use crate::{DockerService, docker_utils};
 use anyhow::Result;
@@ -64,6 +64,17 @@ pub async fn run_auto_upgrade_deploy(
         info!("📄 自定义docker-compose配置文件: {}", config_path.display());
     }
 
+    // 0. 🔍 检查并安装 nuwax-cli 更新（如果需要）
+    info!("🔍 检查 nuwax-cli 版本更新...");
+    if let Err(e) = check_and_install_nuwax_cli_update().await {
+        error!("❌ 检查 nuwax-cli 更新失败: {}", e);
+        error!("   升级部署需要确保使用最新版本的 nuwax-cli");
+        error!("   请检查网络连接或手动运行: nuwax-cli check-update install");
+        return Err(e);
+    }
+
+    info!("✅ nuwax-cli 版本检查完成，继续执行升级部署流程");
+
     // 1. 获取最新版本信息并下载
     info!("📥 正在下载最新的Docker服务版本...");
 
@@ -94,31 +105,11 @@ pub async fn run_auto_upgrade_deploy(
 
     // 2. 🔍 检查部署类型：第一次部署 vs 升级部署
     let is_first_deployment = is_first_deployment().await;
-    let latest_backup_id: Option<i64>; // 在外层作用域声明
 
     if is_first_deployment {
-        info!("🆕 检测到第一次部署，但检查是否有历史备份可恢复...");
-
-        // 🔧 即使是首次部署，也检查是否有备份数据可以恢复
-        latest_backup_id = match get_latest_backup_id(app).await {
-            Ok(Some(backup_id)) => {
-                info!(
-                    "✅ 发现历史备份数据 (ID: {})，将在部署后自动恢复",
-                    backup_id
-                );
-                Some(backup_id)
-            }
-            Ok(None) => {
-                info!("📁 未发现历史备份，使用全新初始化");
-                None
-            }
-            Err(e) => {
-                warn!("⚠️ 检查历史备份失败: {}，使用全新初始化", e);
-                None
-            }
-        };
+        info!("🆕 检测到第一次部署，使用全新初始化");
     } else {
-        info!("🔄 检测到升级部署，需要先停止服务并备份数据");
+        info!("🔄 检测到升级部署，需要先停止服务");
 
         // 3. 🛑 先检查并停止服务
         info!("🔍 检查Docker服务状态...");
@@ -168,47 +159,12 @@ pub async fn run_auto_upgrade_deploy(
             info!("ℹ️ Docker服务未运行，跳过停止步骤");
         }
 
-        // 4. 💾 执行数据备份（在服务停止后）
-        let need_backup = check_docker_files_exist().await?;
-        latest_backup_id = if need_backup {
-            info!("💾 正在创建数据备份...");
-            // 🔧 复用backup.rs的成熟备份逻辑
-            auto_backup::run_auto_backup_with_upgrade_strategy(app, upgrade_strategy.clone())
-                .await?;
-
-            // 获取刚创建的最新备份ID
-            match get_latest_backup_id(app).await {
-                Ok(Some(backup_id)) => {
-                    info!("✅ 数据备份完成，备份ID: {}", backup_id);
-                    Some(backup_id)
-                }
-                Ok(None) => {
-                    warn!("⚠️ 未找到刚创建的备份记录");
-                    None
-                }
-                Err(e) => {
-                    warn!("⚠️ 获取备份ID失败: {}", e);
-                    None
-                }
-            }
-        } else {
-            info!("⏭️ 跳过备份步骤，没有需要备份的重要文件");
-            None
-        };
-
-        // 5. 📄 备份当前版本的SQL文件（用于后续差异比较）
+        // 4. 📄 备份当前版本的SQL文件（用于后续差异比较）
         backup_sql_file_before_upgrade().await?;
     }
 
-    // 5. 📦 解压新的Docker服务包（在服务停止和备份完成后）
+    // 5. 📦 解压新的Docker服务包（在服务停止后）
     info!("📦 正在解压Docker服务包...");
-
-    // 🛡️ 数据保护：只在升级部署时备份现有的数据目录
-    let temp_data_backup = if is_first_deployment {
-        None
-    } else {
-        backup_data_before_cleanup().await?
-    };
 
     // 清理现有的docker目录以避免路径冲突
     let docker_dir = std::path::Path::new("docker");
@@ -300,20 +256,6 @@ pub async fn run_auto_upgrade_deploy(
         }
         Err(e) => {
             error!("❌ Docker服务包解压失败: {}", e);
-            // 解压失败时，恢复备份的数据（仅在升级部署时）
-            if !is_first_deployment {
-                if let Some(backup_id) = latest_backup_id {
-                    info!(
-                        "🔄 解压失败，从最新完整备份恢复数据 (备份ID: {})",
-                        backup_id
-                    );
-                    // data 目录也会被恢复
-                    backup::run_rollback(app, Some(backup_id), true, false, false, true).await?;
-                } else {
-                    info!("⚠️ 解压失败，使用临时备份恢复");
-                    restore_data_after_cleanup(&temp_data_backup).await?;
-                }
-            }
             return Err(e);
         }
     }
@@ -834,7 +776,7 @@ async fn generate_and_save_sql_diff(from_version: &str, to_version: &str) -> Res
 
     if meaningful_lines.is_empty() {
         info!("✅ 数据库架构无变化，无需执行升级脚本");
-        
+
         // 🗂️ 重命名空差异文件以保留历史记录
         if diff_sql_path.exists() {
             let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
@@ -847,7 +789,7 @@ async fn generate_and_save_sql_diff(from_version: &str, to_version: &str) -> Res
                 Err(e) => warn!("⚠️ 归档空差异SQL文件失败: {}", e),
             }
         }
-        
+
         return Ok(());
     }
 
@@ -998,31 +940,38 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     // 🔄 重新生成差异SQL以确保准确性
     info!("🔄 检测到差异SQL文件，重新生成以确保准确性...");
-    
+
     let old_sql_path = temp_sql_dir.join("init_mysql_old.sql");
     let new_sql_path = temp_sql_dir.join("init_mysql_new.sql");
-    
+
     // 读取新旧版本SQL文件内容
     let diff_sql = if old_sql_path.exists() && new_sql_path.exists() {
         let old_sql_content = fs::read_to_string(&old_sql_path)?;
         let new_sql_content = fs::read_to_string(&new_sql_path)?;
-        
+
         // 重新生成差异SQL
         info!("📊 正在基于源文件重新生成SQL差异...");
         let (regenerated_diff_sql, description) = generate_schema_diff(
-            if old_sql_content.trim().is_empty() { None } else { Some(&old_sql_content) },
+            if old_sql_content.trim().is_empty() {
+                None
+            } else {
+                Some(&old_sql_content)
+            },
             &new_sql_content,
             Some("旧版本"),
             "新版本",
         )
         .map_err(|e| anyhow::anyhow!("重新生成SQL差异失败: {}", e))?;
-        
+
         info!("📋 差异生成结果: {}", description);
-        
+
         // 保存重新生成的差异SQL文件（覆盖旧文件）
         fs::write(&diff_sql_path, &regenerated_diff_sql)?;
-        info!("💾 已保存重新生成的差异SQL文件: {}", diff_sql_path.display());
-        
+        info!(
+            "💾 已保存重新生成的差异SQL文件: {}",
+            diff_sql_path.display()
+        );
+
         regenerated_diff_sql
     } else {
         // 如果源文件不存在，使用已有的差异文件
@@ -1041,7 +990,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     if meaningful_lines.is_empty() {
         info!("📄 差异SQL为空，无需执行数据库升级");
-        
+
         // 🗂️ 重命名空差异文件以保留历史记录
         if diff_sql_path.exists() {
             let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
@@ -1054,7 +1003,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
                 Err(e) => warn!("⚠️ 归档空差异SQL文件失败: {}", e),
             }
         }
-        
+
         return Ok(());
     }
 
@@ -1230,6 +1179,66 @@ async fn get_latest_backup_id(app: &CliApp) -> Result<Option<i64>> {
         Err(e) => {
             error!("❌ 获取备份列表失败: {}", e);
             Err(e)
+        }
+    }
+}
+
+/// 检查并安装 nuwax-cli 更新
+///
+/// 此函数直接使用现有的 check-update install 逻辑来检查和安装更新
+/// 如果发现新版本，会自动下载安装并使用 self-replace 库替换当前进程
+async fn check_and_install_nuwax_cli_update() -> Result<()> {
+    use crate::commands::check_update::{check_for_updates, install_release};
+
+    // 检查是否有可用更新
+    match check_for_updates().await {
+        Ok(version_info) => {
+            if !version_info.is_update_available {
+                info!(
+                    "✅ nuwax-cli 已是最新版本: {}",
+                    version_info.current_version
+                );
+                return Ok(());
+            }
+
+            info!("🆕 发现新版本可用:");
+            info!("   当前版本: {}", version_info.current_version);
+            info!("   最新版本: {}", version_info.latest_version);
+
+            if let Some(download_url) = &version_info.download_url {
+                info!("   下载地址: {}", download_url);
+
+                // 执行自动安装
+                info!(
+                    "🚀 开始自动安装 nuwax-cli {}...",
+                    version_info.latest_version
+                );
+
+                match install_release(download_url, &version_info.latest_version).await {
+                    Ok(_) => {
+                        info!("✅ nuwax-cli 安装完成！");
+                        info!("🔄 self-replace 库将自动重启进程以使用新版本...");
+
+                        // install_release 函数内部的 self_replace::self_replace()
+                        // 会自动处理进程替换，这里不需要额外处理
+                        // 但为了确保调用者知道发生了什么，我们返回一个特殊错误
+                        return Err(anyhow::anyhow!("nuwax-cli 已更新并自动重启"));
+                    }
+                    Err(e) => {
+                        error!("❌ nuwax-cli 自动安装失败: {}", e);
+                        error!("   请手动运行: nuwax-cli check-update install");
+                        return Err(e);
+                    }
+                }
+            } else {
+                warn!("⚠️ 未找到适合当前平台的下载包");
+                warn!("   请访问 GitHub Releases 页面手动下载");
+                return Err(anyhow::anyhow!("未找到适合当前平台的下载包"));
+            }
+        }
+        Err(e) => {
+            error!("❌ 检查 nuwax-cli 更新失败: {}", e);
+            return Err(e);
         }
     }
 }
