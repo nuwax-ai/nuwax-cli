@@ -914,8 +914,12 @@ async fn run_data_directory_only_rollback(
         // 获取对应的 .env 文件路径
         let env_file = config_path.with_file_name(".env");
         let custom_docker_manager = Arc::new(
-            client_core::container::DockerManager::new(config_path.clone(), env_file.clone())
-                .map_err(|e| anyhow::anyhow!("创建自定义DockerManager失败: {}", e))?,
+            client_core::container::DockerManager::with_project(
+                config_path.clone(),
+                env_file.clone(),
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("创建自定义DockerManager失败: {}", e))?,
         );
         Arc::new(client_core::backup::BackupManager::new(
             app.config.get_backup_dir(),

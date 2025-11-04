@@ -1,22 +1,21 @@
 use anyhow::{Context, Result};
 use chrono::DateTime;
+use client_core::constants::api;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// GitHub 仓库常量配置
 pub const GITHUB_OWNER: &str = "soddygo";
 pub const GITHUB_REPO: &str = "duck_client";
 
-/// 外部版本检查服务器配置
-pub const VERSION_API_BASE_URL: &str = "https://api-version.nuwax.com";
 //cli 命令工具请求的地址
 pub const CLI_API_URL_PATH: &str = "/api/v1/cli/versions/latest.json";
 
-/// 获取完整的 CLI API URL
+/// 获取完整的 CLI API URL（环境感知）
 pub fn get_cli_api_url() -> String {
-    format!("{VERSION_API_BASE_URL}{CLI_API_URL_PATH}")
+    format!("{}{CLI_API_URL_PATH}", api::get_base_url())
 }
 
 use crate::cli::CheckUpdateCommand;
@@ -335,24 +334,57 @@ pub fn compare_versions(current: &str, latest: &str) -> std::cmp::Ordering {
 
 /// 检查更新
 pub async fn check_for_updates() -> Result<VersionInfo> {
-    let current_version = get_current_version();
-    let latest_release = fetch_latest_version_multi_source().await?;
+    // 添加详细的调试日志
+    info!("🔍 开始检查 nuwax-cli 更新...");
 
+    let current_version = get_current_version();
+    info!("📋 当前检测到的版本: {}", current_version);
+    info!("🌐 正在获取最新版本信息...");
+
+    let latest_release = fetch_latest_version_multi_source().await?;
     let latest_version = latest_release.tag_name.clone();
-    let is_update_available =
-        compare_versions(&current_version, &latest_version) == std::cmp::Ordering::Less;
+    info!("📋 服务器最新版本: {}", latest_version);
+
+    // 版本比较
+    let comparison = compare_versions(&current_version, &latest_version);
+    info!(
+        "📊 版本比较结果: {:?} ({} vs {})",
+        comparison, current_version, latest_version
+    );
+
+    let is_update_available = comparison == std::cmp::Ordering::Less;
+    if is_update_available {
+        info!(
+            "✅ 发现新版本可用! 需要从 {} 升级到 {}",
+            current_version, latest_version
+        );
+    } else {
+        info!(
+            "✅ 当前版本已是最新: {} = {}",
+            current_version, latest_version
+        );
+    }
 
     // 查找适合当前平台的下载链接
+    debug!("🔍 查找适合当前平台的下载包...");
     let download_url = find_platform_asset(&latest_release.assets);
+    if let Some(url) = &download_url {
+        debug!("📦 找到适合的下载包: {}", url);
+    } else {
+        warn!("⚠️ 未找到适合当前平台的下载包");
+    }
 
-    Ok(VersionInfo {
+    let version_info = VersionInfo {
         current_version,
         latest_version,
         is_update_available,
         release_notes: latest_release.body,
         download_url,
         published_at: latest_release.published_at,
-    })
+    };
+
+    info!("✅ 版本检查完成，结果: 更新可用={}", is_update_available);
+    Ok(version_info)
 }
 
 /// 查找适合当前平台的资源
@@ -362,7 +394,8 @@ fn find_platform_asset(assets: &[GitHubAsset]) -> Option<String> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
 
-    debug!("平台检测: os={}, arch={}", os, arch);
+    info!("🖥️ 检测到平台: OS={}, ARCH={}", os, arch);
+    info!("📦 可用资产数量: {}", assets.len());
 
     // 构建目标平台键（兼容 Tauri updater 格式）
     let target_platform = match (os, arch) {
@@ -375,18 +408,18 @@ fn find_platform_asset(assets: &[GitHubAsset]) -> Option<String> {
         _ => return None,
     };
 
-    debug!("目标平台键: {}", target_platform);
+    info!("🎯 目标平台键: {}", target_platform);
 
     // 首先尝试精确匹配平台键
-    for asset in assets {
-        debug!(
-            "检查资产: name={}, url={}",
-            asset.name, asset.browser_download_url
+    for (index, asset) in assets.iter().enumerate() {
+        info!(
+            "📋 检查资产[{}]: name={}, size={}, url={}",
+            index, asset.name, asset.size, asset.browser_download_url
         );
 
         // 检查是否包含平台键
         if asset.name.contains(target_platform) {
-            debug!("找到精确匹配的平台资产: {}", asset.name);
+            info!("✅ 找到精确匹配的平台资产: {}", asset.name);
             return Some(asset.browser_download_url.clone());
         }
     }
@@ -408,16 +441,16 @@ fn find_platform_asset(assets: &[GitHubAsset]) -> Option<String> {
         _ => vec![os, arch],
     };
 
-    debug!("平台匹配模式: {:?}", platform_patterns);
+    info!("🎯 平台匹配模式: {:?}", platform_patterns);
 
     // 查找匹配的资源
-    for asset in assets {
+    for (index, asset) in assets.iter().enumerate() {
         let name_lower = asset.name.to_lowercase();
         let url_lower = asset.browser_download_url.to_lowercase();
 
-        debug!(
-            "检查资产匹配: name_lower={}, url_lower={}",
-            name_lower, url_lower
+        info!(
+            "🔍 模式匹配检查[{}]: name={}, url={}",
+            index, asset.name, asset.browser_download_url
         );
 
         // 检查名称或URL是否包含平台模式
@@ -425,7 +458,7 @@ fn find_platform_asset(assets: &[GitHubAsset]) -> Option<String> {
             .iter()
             .any(|pattern| name_lower.contains(pattern) || url_lower.contains(pattern))
         {
-            debug!("找到模式匹配的资产: {}", asset.name);
+            info!("✅ 找到模式匹配的资产: {}", asset.name);
             // 优先选择可执行文件
             if name_lower.contains("nuwax-cli")
                 || name_lower.ends_with(".exe")
@@ -433,25 +466,35 @@ fn find_platform_asset(assets: &[GitHubAsset]) -> Option<String> {
                 || name_lower.ends_with(".msi")
                 || name_lower.ends_with(".appimage")
             {
-                debug!("选择的资产: {}", asset.name);
+                info!("🎯 选择的资产: {}", asset.name);
                 return Some(asset.browser_download_url.clone());
             }
         }
     }
 
-    debug!("没有找到匹配的资产，使用第一个可执行文件");
+    warn!("⚠️ 没有找到匹配的资产，尝试查找可执行文件...");
     // 如果没找到精确匹配，返回第一个看起来像可执行文件的资源
-    assets
-        .iter()
-        .find(|asset| {
-            let name = asset.name.to_lowercase();
-            name.contains("nuwax-cli")
-                || name.ends_with(".exe")
-                || name.ends_with(".tar.gz")
-                || name.ends_with(".msi")
-                || name.ends_with(".appimage")
-        })
-        .map(|asset| asset.browser_download_url.clone())
+    for (index, asset) in assets.iter().enumerate() {
+        let name = asset.name.to_lowercase();
+        let is_executable = name.contains("nuwax-cli")
+            || name.ends_with(".exe")
+            || name.ends_with(".tar.gz")
+            || name.ends_with(".msi")
+            || name.ends_with(".appimage");
+
+        info!(
+            "🔍 检查可执行文件[{}]: {} -> 可执行: {}",
+            index, asset.name, is_executable
+        );
+
+        if is_executable {
+            info!("✅ 找到可执行文件: {}", asset.name);
+            return Some(asset.browser_download_url.clone());
+        }
+    }
+
+    warn!("❌ 没有找到任何可执行文件");
+    None
 }
 
 /// 显示版本检查结果

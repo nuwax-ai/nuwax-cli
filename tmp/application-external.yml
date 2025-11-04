@@ -1,0 +1,105 @@
+spring:
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+  datasource:
+    sql-generator:
+      type: mysql
+    dynamic:
+      primary: master
+      strict: false
+      p6spy: false
+      seata: false
+      datasource:
+        master:
+          url: jdbc:mysql://mysql:${MYSQL_PORT:3306}/${MYSQL_DATABASE:agent_platform}?serverTimezone=Asia/Shanghai&characterEncoding=utf-8&allowMultiQueries=true&socketTimeout=300000&useSSL=false
+          driver-class-name: com.mysql.cj.jdbc.Driver
+          username: ${MYSQL_USER:agent_platform}
+          password: ${MYSQL_PASSWORD:admin123}
+        doris:
+          url: jdbc:mysql://mysql:${MYSQL_PORT:3306}/${DORIS_DB:agent_custom_table}?serverTimezone=Asia/Shanghai&characterEncoding=utf-8&allowMultiQueries=true&socketTimeout=300000&useSSL=false
+          driver-class-name: com.mysql.cj.jdbc.Driver
+          username: ${MYSQL_USER:agent_platform}
+          password: ${MYSQL_PASSWORD:admin123}
+          table:
+            replication-num: 1
+            bucket-num: 10
+            duplicate-key: id
+            distributed-key: id
+
+  data:
+    redis:
+      host: redis
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:123456}
+      database: 0
+# milvus 配置,需要和 .env 里的配置,保持同步
+milvus:
+  uri: http://milvus:${MILVUS_PORT}
+  user: root
+  password: Milvus
+
+code:
+  execute:
+  # 使用 mcp 容器的端口来执行代码
+    url: http://mcp-proxy:8089/api/run_code_with_log 
+
+# jwt 配置,第一次启动部署,要修改这个 secretKey 值
+jwt:
+  secretKey: ${JWT_SECRET_KEY}
+
+# 文件上传配置,这里需要和 docker-compose.yml 里的挂载路径保持一致
+file:
+  uploadFolder: /app/upload
+storage:
+  type: file
+
+# 日志模块配置
+log-module:
+  log:
+    rust-service:
+      # Rust 日志服务的基础 URL
+      base-url: http://log_platform:8097
+      # 连接超时时间（秒）
+      connect-timeout-seconds: 10
+      # 写入超时时间（秒）
+      write-timeout-seconds: 30
+      # 读取超时时间（秒）
+      read-timeout-seconds: 30
+      # 是否启用连接池
+      enable-connection-pool: true
+      # 最大空闲连接数
+      max-idle-connections: 5
+      # 连接保持存活时间（分钟）
+      keep-alive-duration-minutes: 5
+
+
+# 生态市场模块配置
+eco-market:
+  # 服务端配置
+  server:
+    # 远程server端的 ip端口配置
+    base-url: https://agent-market-api.xspaceagi.com
+  client:
+    # 客户端配置
+    retry:
+      #自动注册客户端到 server端, 重试间隔时间，单位：秒;
+      interval: 300
+
+mcp:
+  proxy-base-url: http://mcp-proxy:8089
+
+# 标识，区分客户端是通过 nuwax-cli 一键部署启动的本地部署用户，推送消息会做区分
+installation-source: nuwax-cli
+
+custom-page:
+  dev-server-host: http://rcoder
+  prod-server-host: http://rcoder
+  build-server:
+    base-url: http://rcoder:60000/api
+  ai-agent:
+    base-url: http://rcoder:8086
+  docker-proxy:
+    enable: true
+    base-url: http://rcoder:8088

@@ -7,6 +7,18 @@ use sqlparser::parser::Parser;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
+/// 移除标识符中的反引号
+#[inline]
+fn strip_backticks(s: &str) -> String {
+    s.trim_matches('`').to_string()
+}
+
+/// 将 sqlparser 的标识符转换为字符串（移除反引号）
+#[inline]
+fn ident_to_string<T: ToString>(ident: &T) -> String {
+    strip_backticks(&ident.to_string())
+}
+
 /// 解析SQL文件中的表结构
 pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefinition>, DuckError> {
     let mut tables = HashMap::new();
@@ -23,7 +35,8 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
             Ok(statements) => {
                 for statement in statements {
                     if let Statement::CreateTable(create_table) = statement {
-                        let table_name = create_table.name.to_string();
+                        // 移除表名中的反引号，确保表名统一
+                        let table_name = ident_to_string(&create_table.name);
                         debug!("解析表: {}", table_name);
 
                         let mut table_columns = Vec::new();
@@ -36,7 +49,7 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
 
                             // 检查是否是列级别的主键
                             if is_column_primary_key(column) {
-                                primary_key_columns.push(column.name.to_string());
+                                primary_key_columns.push(ident_to_string(&column.name));
                             }
 
                             table_columns.push(column_def);
@@ -77,6 +90,9 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
             }
         }
     }
+
+    // 🔧 新增：解析独立的 CREATE INDEX 语句
+    parse_standalone_indexes(sql_content, &mut tables)?;
 
     info!("成功解析 {} 个表", tables.len());
     Ok(tables)
@@ -196,7 +212,7 @@ fn extract_create_table_statements_from_content(content: &str) -> Result<Vec<Str
 
 /// 解析列定义
 fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError> {
-    let column_name = column.name.to_string();
+    let column_name = ident_to_string(&column.name);
     let data_type = format_data_type(&column.data_type);
 
     let mut nullable = true;
@@ -251,7 +267,7 @@ fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError>
 fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIndex>, DuckError> {
     match constraint {
         TableConstraint::PrimaryKey { columns, .. } => {
-            let column_names: Vec<String> = columns.iter().map(|col| col.to_string()).collect();
+            let column_names: Vec<String> = columns.iter().map(ident_to_string).collect();
 
             Ok(Some(TableIndex {
                 name: "PRIMARY".to_string(),
@@ -262,11 +278,10 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
             }))
         }
         TableConstraint::Unique { columns, name, .. } => {
-            let column_names: Vec<String> = columns.iter().map(|col| col.to_string()).collect();
-
+            let column_names: Vec<String> = columns.iter().map(ident_to_string).collect();
             let index_name = name
                 .as_ref()
-                .map(|n| n.to_string())
+                .map(ident_to_string)
                 .unwrap_or_else(|| format!("unique_{}", column_names.join("_")));
 
             Ok(Some(TableIndex {
@@ -278,11 +293,10 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
             }))
         }
         TableConstraint::Index { name, columns, .. } => {
-            let column_names: Vec<String> = columns.iter().map(|col| col.to_string()).collect();
-
+            let column_names: Vec<String> = columns.iter().map(ident_to_string).collect();
             let index_name = name
                 .as_ref()
-                .map(|n| n.to_string())
+                .map(ident_to_string)
                 .unwrap_or_else(|| format!("idx_{}", column_names.join("_")));
 
             Ok(Some(TableIndex {
@@ -444,11 +458,11 @@ fn is_primary_key_column(column: &ColumnDef, constraints: &[TableConstraint]) ->
     }
 
     // 然后检查表级别的主键约束
-    let column_name = column.name.to_string();
+    let column_name = ident_to_string(&column.name);
     for constraint in constraints {
         if let TableConstraint::PrimaryKey { columns, .. } = constraint {
             for pk_column in columns {
-                if pk_column.to_string() == column_name {
+                if ident_to_string(pk_column) == column_name {
                     return true;
                 }
             }
@@ -456,4 +470,174 @@ fn is_primary_key_column(column: &ColumnDef, constraints: &[TableConstraint]) ->
     }
 
     false
+}
+
+/// 从 IndexColumn 列表中提取列名
+/// 
+/// 处理三种情况：
+/// 1. 简单列名：`column_name`
+/// 2. 复合标识符：`table.column` (只取最后一部分)
+/// 3. 复杂表达式：函数索引等 (使用 Display)
+fn extract_index_columns(index_columns: &[sqlparser::ast::IndexColumn]) -> Vec<String> {
+    index_columns
+        .iter()
+        .filter_map(|index_col| {
+            match &index_col.column.expr {
+                sqlparser::ast::Expr::Identifier(ident) => {
+                    Some(strip_backticks(&ident.value))
+                }
+                sqlparser::ast::Expr::CompoundIdentifier(idents) => {
+                    // 处理 table.column 格式，只取最后一个部分
+                    idents.last().map(|id| strip_backticks(&id.value))
+                }
+                _ => {
+                    // 对于函数索引等复杂表达式，使用 Display
+                    Some(strip_backticks(&index_col.column.to_string()))
+                }
+            }
+        })
+        .collect()
+}
+
+/// 解析独立的 CREATE INDEX 语句并添加到表定义中
+/// 
+/// 使用 sqlparser 库正确解析 SQL 语法
+/// 
+/// 格式示例：
+/// ```sql
+/// create index idx_space_id
+///     on agent_config (space_id);
+/// 
+/// create unique index uk_name
+///     on users (username);
+/// ```
+fn parse_standalone_indexes(
+    sql_content: &str,
+    tables: &mut HashMap<String, TableDefinition>,
+) -> Result<(), DuckError> {
+    let dialect = MySqlDialect {};
+    let mut index_count = 0;
+
+    // 提取所有 CREATE INDEX 语句
+    let index_statements = extract_create_index_statements(sql_content)?;
+
+    for index_sql in index_statements {
+        debug!("解析 CREATE INDEX 语句: {}", index_sql);
+
+        match Parser::parse_sql(&dialect, &index_sql) {
+            Ok(statements) => {
+                for statement in statements {
+                    if let Statement::CreateIndex(create_index) = statement {
+                        // 提取索引名称
+                        let index_name = create_index
+                            .name
+                            .as_ref()
+                            .map(ident_to_string)
+                            .unwrap_or_else(|| "unnamed_index".to_string());
+
+                        // 提取表名
+                        let table_name = ident_to_string(&create_index.table_name);
+
+                        // 提取列名列表
+                        let columns = extract_index_columns(&create_index.columns);
+
+                        if columns.is_empty() {
+                            warn!("索引 {} 没有列定义，跳过", index_name);
+                            continue;
+                        }
+
+                        // 检查是否是 UNIQUE 索引
+                        let is_unique = create_index.unique;
+
+                        // 查找对应的表
+                        if let Some(table_def) = tables.get_mut(&table_name) {
+                            // 检查是否已经存在同名索引
+                            if table_def.indexes.iter().any(|idx| idx.name == index_name) {
+                                debug!("索引 {} 已存在于表 {}，跳过", index_name, table_name);
+                                continue;
+                            }
+
+                            // 添加索引到表定义
+                            table_def.indexes.push(TableIndex {
+                                name: index_name.clone(),
+                                columns: columns.clone(),
+                                is_primary: false,
+                                is_unique,
+                                index_type: if is_unique {
+                                    Some("UNIQUE".to_string())
+                                } else {
+                                    Some("INDEX".to_string())
+                                },
+                            });
+
+                            index_count += 1;
+                            debug!(
+                                "添加独立索引: {} 到表 {} (列: {:?}, unique: {})",
+                                index_name, table_name, columns, is_unique
+                            );
+                        } else {
+                            warn!("索引 {} 引用的表 {} 不存在，跳过", index_name, table_name);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("解析 CREATE INDEX 语句失败: {} - 错误: {}", index_sql, e);
+            }
+        }
+    }
+
+    if index_count > 0 {
+        info!("成功解析 {} 个独立的 CREATE INDEX 语句", index_count);
+    }
+
+    Ok(())
+}
+
+/// 提取所有 CREATE INDEX 语句
+/// 
+/// 使用简单的状态机来识别完整的 CREATE INDEX 语句
+fn extract_create_index_statements(sql_content: &str) -> Result<Vec<String>, DuckError> {
+    let mut statements = Vec::new();
+    let mut current_statement = String::new();
+    let mut in_create_index = false;
+
+    // 正则表达式只用于识别语句开始，不用于解析
+    let create_index_regex = Regex::new(r"(?i)^\s*CREATE\s+(UNIQUE\s+)?INDEX")
+        .map_err(|e| DuckError::custom(format!("正则表达式编译失败: {}", e)))?;
+
+    for line in sql_content.lines() {
+        let trimmed = line.trim();
+
+        // 跳过空行和注释
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
+
+        // 检查是否是 CREATE INDEX 语句的开始
+        if !in_create_index && create_index_regex.is_match(line) {
+            in_create_index = true;
+            current_statement.clear();
+        }
+
+        if in_create_index {
+            current_statement.push_str(line);
+            current_statement.push(' ');
+
+            // 检查是否遇到分号（语句结束）
+            if trimmed.ends_with(';') {
+                statements.push(current_statement.trim().to_string());
+                current_statement.clear();
+                in_create_index = false;
+            }
+        }
+    }
+
+    // 处理可能没有分号结尾的语句
+    if in_create_index && !current_statement.trim().is_empty() {
+        statements.push(current_statement.trim().to_string());
+    }
+
+    debug!("提取到 {} 个 CREATE INDEX 语句", statements.len());
+    Ok(statements)
 }

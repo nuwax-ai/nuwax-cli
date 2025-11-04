@@ -12,10 +12,13 @@ mod utils;
 // 通过 pub use 精确控制对外暴露的接口
 pub use app::CliApp;
 pub use cli::{Cli, Commands};
-pub use commands::{run_diff_sql, run_status_details, show_client_version}; // 导出status相关函数和diff-sql函数
+pub use commands::{
+    auto_upgrade_deploy::check_and_install_nuwax_cli_update_early, run_diff_sql,
+    run_status_details, show_client_version,
+}; // 导出status相关函数和diff-sql函数
 pub use docker_service::{
     ContainerStatus, DockerService, DockerServiceManager, get_architecture_suffix,
-    get_system_architecture, health_check
+    get_system_architecture, health_check,
 };
 pub use init::run_init;
 pub use utils::{extract_docker_service, setup_logging}; // 导出解压函数和匹配器

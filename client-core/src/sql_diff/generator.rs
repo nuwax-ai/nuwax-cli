@@ -2,6 +2,7 @@ use super::differ::generate_mysql_diff;
 use super::parser::parse_sql_tables;
 use super::types::{TableColumn, TableDefinition, TableIndex};
 use crate::error::DuckError;
+use crate::mysql_executor::MySqlExecutor;
 use tracing::info;
 
 /// 生成SQL架构差异
@@ -101,6 +102,73 @@ pub fn generate_schema_diff(
             Ok((diff_sql, description))
         }
     }
+}
+
+/// 基于在线数据库架构与模板SQL生成差异（Live Diff）
+/// 返回：(差异SQL, 描述, 在线架构原始SQL)
+pub async fn generate_live_schema_diff(
+    executor: &MySqlExecutor,
+    to_sql: &str,
+    to_version: &str,
+) -> Result<(String, String, String), DuckError> {
+    info!("开始生成在线架构到 {} 的SQL差异", to_version);
+
+    // 解析目标模板
+    let to_tables = parse_sql_tables(to_sql)?;
+
+    // 抓取在线架构并生成差异（同时获取原始 SQL）
+    let (live_tables, live_sql) = executor
+        .fetch_live_schema_with_sql()
+        .await
+        .map_err(|e| DuckError::custom(format!("抓取在线架构失败: {e}")))?;
+
+    let diff_sql = generate_mysql_diff(&live_tables, &to_tables)?;
+
+    let description = if diff_sql.trim().is_empty() {
+        format!("在线架构到 {to_version}: 无实际架构差异")
+    } else {
+        let lines_count = diff_sql
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with("--"))
+            .count();
+
+        let mut change_types = Vec::new();
+        if diff_sql.contains("CREATE TABLE") {
+            change_types.push("新增表");
+        }
+        if diff_sql.contains("DROP TABLE") {
+            change_types.push("删除表");
+        }
+        if diff_sql.contains("ALTER TABLE") && diff_sql.contains("ADD COLUMN") {
+            change_types.push("新增列");
+        }
+        if diff_sql.contains("ALTER TABLE") && diff_sql.contains("DROP COLUMN") {
+            change_types.push("删除列");
+        }
+        if diff_sql.contains("ALTER TABLE") && diff_sql.contains("MODIFY COLUMN") {
+            change_types.push("修改列");
+        }
+        if diff_sql.contains("ALTER TABLE") && diff_sql.contains("ADD KEY") {
+            change_types.push("新增索引");
+        }
+        if diff_sql.contains("ALTER TABLE") && diff_sql.contains("DROP KEY") {
+            change_types.push("删除索引");
+        }
+
+        let change_summary = if change_types.is_empty() {
+            "架构变更".to_string()
+        } else {
+            change_types.join("、")
+        };
+
+        format!(
+            "在线架构到 {}: {} - 生成 {} 行可执行的差异SQL",
+            to_version, change_summary, lines_count
+        )
+    };
+
+    info!("Live Diff 完成: {}", description);
+    Ok((diff_sql, description, live_sql))
 }
 
 /// 格式化默认值用于SQL输出，正确处理不同类型的值

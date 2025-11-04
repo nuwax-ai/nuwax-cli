@@ -1,31 +1,71 @@
-WARN 📁 删除空目录失败: docker/data - Directory not empty (os error 66)
- INFO 🧹 尝试强制清理目录内容: docker/backups
- INFO 📁 跳过目录: docker/upload
- INFO ✅ 成功安全删除目录: docker
- INFO ✅ docker目录清理完成
- INFO 📦 开始解压Docker服务包...
- INFO 📦 找到Docker服务包: ./cacheDuckData/download/0.0.30/full/docker-aarch64.zip
- INFO 📦 开始解压Docker服务包: ./cacheDuckData/download/0.0.30/full/docker-aarch64.zip
- INFO ✅ ZIP文件打开成功，包含 624 个文件
- INFO 🧹 安全清理 docker 目录（保留 upload 目录）: docker
- INFO 🗑️ 删除文件: docker/.DS_Store
- INFO 🗑️ 删除目录: docker/data
-ERROR ❌ Docker服务包解压失败: Directory not empty (os error 66)
- INFO 🔄 解压失败，从最新完整备份恢复数据 (备份ID: 1)
- INFO 开始数据回滚操作...
- INFO 🛡️ 使用智能数据回滚模式
- INFO    📁 将恢复: data/, app/ 目录
- INFO    🔧 将保留: docker-compose.yml, .env 等配置文件
- INFO    不恢复的目录:[]
- INFO 开始智能数据恢复: ./backups/backup_manual_v0.0.27.0_2025-10-29_06-58-08.tar.gz
- INFO 目标目录: ./docker
- INFO 正在停止服务...
- INFO 🔍 开始检查Docker环境先决条件...
- WARN ❌ Docker Compose 文件不存在: ./docker/docker-compose.yml
-ERROR ❌ 数据恢复失败: Docker Compose 文件不存在: ./docker/docker-compose.yml
- WARN 💡 建议操作:
- WARN    1. 检查备份文件是否存在且完整
- WARN    2. 确保有足够的磁盘空间
- WARN    3. 手动启动服务: nuwax-cli docker-service start
-ERROR ❌ 操作失败: Docker Compose 文件不存在: ./docker/docker-compose.yml
-soddy@soddy nuwac-cli-test1 %
+INFO 🔌 正在连接到MySQL数据库...
+ INFO 📊 正在基于在线架构生成SQL差异...
+ INFO 开始生成在线架构到 目标版本 的SQL差异
+ INFO 成功解析 44 个表
+ INFO 成功解析 41 个表
+ INFO 发现新增表: custom_page_config
+ INFO 发现新增表: custom_page_build
+ INFO 发现新增表: custom_page_conversation
+ INFO 发现表结构变化: custom_table_definition
+ INFO 发现表结构变化: knowledge_qa_segment
+ INFO 发现表结构变化: user_access_key
+ INFO 发现表结构变化: knowledge_raw_segment
+ INFO 发现表结构变化: knowledge_task_history
+ INFO 发现表结构变化: mcp_config
+ INFO 发现表结构变化: custom_field_definition
+ INFO 发现表结构变化: published
+ INFO 发现表结构变化: user_agent_sort
+ INFO 发现表结构变化: knowledge_task
+ INFO 发现表结构变化: user_target_relation
+ INFO 发现表结构变化: knowledge_document
+ INFO 发现表结构变化: space
+ INFO 发现表结构变化: conversation
+ INFO 发现表结构变化: pf_retry_data
+ INFO 发现表结构变化: agent_config
+ INFO 发现表结构变化: notify_message_user
+ INFO 发现表结构变化: schedule_task
+ INFO 发现表结构变化: user
+ INFO Live Diff 完成: 在线架构到 目标版本: 新增表、删除索引 - 生成 94 行可执行的差异SQL
+ INFO 📋 差异生成结果: 在线架构到 目标版本: 新增表、删除索引 - 生成 94 行可执行的差异SQL
+ INFO 📄 已保存在线架构SQL文件: temp_sql/init_mysql_old.sql
+ INFO 🔄 开始执行数据库升级...
+ INFO 📋 即将执行 94 行SQL语句
+ INFO 📄 已保存SQL差异文件: temp_sql/upgrade_diff.sql
+ INFO 🚀 开始执行差异SQL...
+ INFO   ✅ 差异SQL执行成功
+ INFO   [1] ✅ CREATE TABLE `custom_page_config` (  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID', `name` VARCHAR(255) NOT NULL COMMENT '项目名称', `description` VARCHAR(255) COMMENT '项目描述', `icon` VARCHAR(500) COMMENT '项目图标', `base_path` VARCHAR(255) NOT NULL COMMENT '项目基础路径', `build_running` TINYINT NOT NULL COMMENT '线上运行标记,1:运行中;-1:未运行', `publish_type` VARCHAR(100), `need_login` TINYINT COMMENT '是否需要登陆,1:需要', `dev_agent_id` BIGINT COMMENT '开发关联智能体ID', `project_type` VARCHAR(100) NOT NULL COMMENT '项目类型', `proxy_config` JSON COMMENT '代理配置', `page_arg_config` JSON COMMENT '路径参数配置', `data_sources` JSON COMMENT '绑定的数据源', `ext` JSON COMMENT '扩展参数', `_tenant_id` BIGINT NOT NULL COMMENT '租户ID', `space_id` BIGINT COMMENT '空间ID', `created` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间', `creator_id` BIGINT COMMENT '创建人ID', `creator_name` VARCHAR(64) COMMENT '创建人', `modified` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '更新时间', `modified_id` BIGINT COMMENT '最后修改人ID', `modified_name` VARCHAR(64) COMMENT '最后修改人', `yn` TINYINT NOT NULL DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效', PRIMARY KEY (`id`), UNIQUE KEY `uk_base_path` (`base_path`) );
+ INFO   [2] ✅ CREATE TABLE `custom_page_build` (  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID', `project_id` BIGINT NOT NULL COMMENT '项目ID', `dev_running` TINYINT NOT NULL DEFAULT -1 COMMENT '开发服务器运行标记,1:运行中;-1:未运行', `dev_pid` INT COMMENT '开发服务器进程ID', `dev_port` INT COMMENT '开发服务器端口号', `last_keep_alive_time` DATETIME COMMENT '最后保活时间', `build_running` TINYINT NOT NULL DEFAULT -1 COMMENT '线上运行标记,1:运行中;-1:未运行', `build_time` DATETIME COMMENT '构建发布时间', `build_version` INT COMMENT '发布的版本号', `code_version` INT NOT NULL COMMENT '代码版本', `version_info` JSON COMMENT '版本信息', `last_chat_model_id` BIGINT COMMENT '上次对话模型ID', `last_multi_model_id` BIGINT COMMENT '上次多模态模型ID', `_tenant_id` BIGINT NOT NULL COMMENT '租户ID', `space_id` BIGINT COMMENT '空间ID', `created` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间', `creator_id` BIGINT COMMENT '创建人ID', `creator_name` VARCHAR(64) COMMENT '创建人', `modified` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '更新时间', `modified_id` BIGINT COMMENT '最后修改人ID', `modified_name` VARCHAR(64) COMMENT '最后修改人', `yn` TINYINT NOT NULL DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效', PRIMARY KEY (`id`) );
+ INFO   [3] ✅ CREATE TABLE `custom_page_conversation` (  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID', `project_id` BIGINT NOT NULL COMMENT '项目ID', `topic` VARCHAR(500) COMMENT '会话主题', `content` LongText NOT NULL COMMENT '会话内容', `_tenant_id` BIGINT NOT NULL COMMENT '租户ID', `space_id` BIGINT COMMENT '空间ID', `created` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间', `creator_id` BIGINT COMMENT '创建者ID', `creator_name` VARCHAR(255) COMMENT '创建者名称', `modified` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '修改时间', `modified_id` BIGINT COMMENT '修改者ID', `modified_name` VARCHAR(255) COMMENT '修改者名称', `yn` INT NOT NULL DEFAULT 1 COMMENT '是否有效 1:有效 -1:无效', PRIMARY KEY (`id`) );
+ INFO   [4] ✅ ALTER TABLE `custom_table_definition` DROP KEY `idx_table_name`;
+ INFO   [5] ✅ ALTER TABLE `knowledge_qa_segment` DROP KEY `idx_doc_id`;
+ INFO   [6] ✅ ALTER TABLE `knowledge_qa_segment` DROP KEY `idx_kb_id_space_id_doc_id_index`;
+ INFO   [7] ✅ ALTER TABLE `user_access_key` DROP KEY `idx_access_key`;
+ INFO   [8] ✅ ALTER TABLE `user_access_key` DROP KEY `idx_user_id`;
+ INFO   [9] ✅ ALTER TABLE `knowledge_raw_segment` DROP KEY `idx_kb_id`;
+ INFO   [10] ✅ ALTER TABLE `knowledge_raw_segment` DROP KEY `idx_space_id_kb_id_doc_id_index`;
+ INFO   [11] ✅ ALTER TABLE `knowledge_raw_segment` DROP KEY `idx_doc_id`;
+ INFO   [12] ✅ ALTER TABLE `knowledge_task_history` DROP KEY `idx_status_kb_id_doc_id`;
+ INFO   [13] ✅ ALTER TABLE `mcp_config` DROP KEY `idx_uid`;
+ INFO   [14] ✅ ALTER TABLE `custom_field_definition` DROP KEY `idx_table_id`;
+ INFO   [15] ✅ ALTER TABLE `published` DROP KEY `target_id`;
+ INFO   [16] ✅ ALTER TABLE `user_agent_sort` DROP KEY `idx_user_id`;
+ INFO   [17] ✅ ALTER TABLE `knowledge_task` DROP KEY `idx_status_kb_id_doc_id`;
+ INFO   [18] ✅ ALTER TABLE `knowledge_task` DROP KEY `idx_doc_id`;
+ INFO   [19] ✅ ALTER TABLE `user_target_relation` DROP KEY `idx_user_id`;
+ INFO   [20] ✅ ALTER TABLE `knowledge_document` DROP KEY `idx_kb_id`;
+ INFO   [21] ✅ ALTER TABLE `knowledge_document` DROP KEY `idx_id_kb_id_index`;
+ INFO   [22] ✅ ALTER TABLE `space` DROP KEY `idx_tenant_id`;
+ INFO   [23] ✅ ALTER TABLE `conversation` DROP KEY `idx_uid`;
+ INFO   [24] ✅ ALTER TABLE `conversation` DROP KEY `idx_user_id`;
+ INFO   [25] ✅ ALTER TABLE `pf_retry_data` DROP KEY `idx_project_app_bean_method`;
+ INFO   [26] ✅ ALTER TABLE `agent_config` DROP KEY `idx_space_id`;
+ INFO   [27] ✅ ALTER TABLE `notify_message_user` DROP KEY `idx_user_notify`;
+ INFO   [28] ✅ ALTER TABLE `schedule_task` DROP KEY `idx_user_status`;
+ INFO   [29] ✅ ALTER TABLE `schedule_task` DROP KEY `status`;
+ INFO   [30] ✅ ALTER TABLE `schedule_task` DROP KEY `task_id`;
+ INFO   [31] ✅ ALTER TABLE `user` DROP KEY `idx_phone`;
+ INFO   [32] ✅ ALTER TABLE `user` DROP KEY `idx_uid`;
+ INFO ✅ Renamed diff SQL file to: temp_sql/diff_sql_executed_20251104_191744.sql
+ INFO ✅ 数据库升级成功
+ INFO 🎉 自动升级部署流程成功完成
+soddy@soddy 20251031-docker %

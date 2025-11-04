@@ -2,6 +2,9 @@ pub mod api;
 pub mod api_config;
 pub mod api_types;
 
+// 环境检测模块
+pub mod environment;
+
 // 重新导出 api_types 中的主要类型以保持向后兼容
 pub use api_types::*;
 pub mod architecture;
