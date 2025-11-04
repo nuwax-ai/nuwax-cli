@@ -96,11 +96,29 @@ services:
       - agent-network
 
   # MySQL权限修复容器（一次性运行）
+  # 
+  # 为什么需要这个容器？
+  # ==================
+  # Docker 卷挂载通过 UID/GID 数值进行权限映射：
+  # 
+  # 问题场景：
+  #   1. Rust 程序在宿主机创建 data/mysql/，owner 是当前用户（如 UID 1000）
+  #   2. MySQL 容器内进程以 mysql:999 (UID 999) 运行
+  #   3. 容器看到 /var/lib/mysql/ 的 owner 是 UID 1000
+  #   4. UID 999 无权限写入 UID 1000 的目录 ❌
+  # 
+  # 解决方案：
+  #   使用 init 容器以 root 身份运行 chown，将目录所有权改为 UID 999
+  #   这样 MySQL 容器启动时就有权限了 ✅
+  # 
+  # 注意：
+  #   - chmod (权限模式) 在 WSL2 可能失败，但通常不影响
+  #   - chown (所有权) 必须成功，否则容器无法写入！
   mysql-permission-fix:
     image: busybox:1.36-uclibc  # 使用稳定版本而非latest
     labels:
       - "com.docker.compose.project=mysql-permission-fix"
-      - "description=MySQL权限修复初始化容器"
+      - "description=MySQL权限修复初始化容器 - 解决 Docker UID 映射问题"
     deploy:
       resources:
         limits:
@@ -115,7 +133,7 @@ services:
     volumes:
       - ./data/mysql:/var/lib/mysql
       - ./logs/mysql:/var/log/mysql
-      - ./config/mysql.cnf:/tmp/mysql.cnf:rw  # 挂载配置文件用于权限检查和修复
+      # 注意：不挂载 mysql.cnf，配置文件权限由 Rust 程序在宿主机处理
     command: |
       sh -c "
       set -e
@@ -128,32 +146,12 @@ services:
       mkdir -p /var/lib/mysql /var/log/mysql
       
       # 设置数据目录权限给mysql用户(999)
+      # 注意：只修改数据和日志目录，不修改配置文件
       echo '🔑 设置数据目录权限...'
       chown -R ${MYSQL_UID:-999}:${MYSQL_GID:-999} /var/lib/mysql /var/log/mysql
       chmod -R 755 /var/lib/mysql /var/log/mysql
       
-      # 检查和修复配置文件权限
-      echo '🔒 检查配置文件权限...'
-      if [ -f '/tmp/mysql.cnf' ]; then
-        CURRENT_PERM=\$$(stat -c '%a' /tmp/mysql.cnf 2>/dev/null || stat -f '%Lp' /tmp/mysql.cnf 2>/dev/null)
-        echo '📄 当前配置文件权限: '\$${CURRENT_PERM}
-        
-        # 检查是否为组写入或全局写入权限（会被MySQL忽略）
-        if [ \"\$${CURRENT_PERM}\" = '775' ] || [ \"\$${CURRENT_PERM}\" = '777' ] || [ \"\$${CURRENT_PERM}\" = '664' ]; then
-          echo '⚠️  配置文件权限不安全，MySQL会忽略此配置文件'
-          echo '🔧 修复配置文件权限为644...'
-          chmod 644 /tmp/mysql.cnf
-          echo '✅ 配置文件权限已修复为644'
-        else
-          echo '✅ 配置文件权限正常'
-        fi
-        
-        # 显示修复后的权限
-        FIXED_PERM=\$$(stat -c '%a' /tmp/mysql.cnf 2>/dev/null || stat -f '%Lp' /tmp/mysql.cnf 2>/dev/null)
-        echo '📄 修复后配置文件权限: '\$${FIXED_PERM}
-      else
-        echo '⚠️  配置文件 /tmp/mysql.cnf 不存在'
-      fi
+      echo '� 配置配文件权限由宿主机 Rust 程序处理（必须是 644）'
       
       # 验证权限设置
       echo '🔍 验证权限设置...'
@@ -171,7 +169,7 @@ services:
       echo '🎯 摘要:'
       echo '   • 数据目录: /var/lib/mysql (755, ${MYSQL_UID:-999}:${MYSQL_GID:-999})'
       echo '   • 日志目录: /var/log/mysql (755, ${MYSQL_UID:-999}:${MYSQL_GID:-999})'
-      echo '   • 配置文件: mysql.cnf (644, 安全权限)'
+      echo '   • 配置文件: 由宿主机处理，必须保持 644 权限'
       "
     restart: "no"
     networks:
