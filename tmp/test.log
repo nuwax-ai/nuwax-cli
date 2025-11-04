@@ -1,31 +1,352 @@
-WARN 📁 删除空目录失败: docker/data - Directory not empty (os error 66)
- INFO 🧹 尝试强制清理目录内容: docker/backups
- INFO 📁 跳过目录: docker/upload
- INFO ✅ 成功安全删除目录: docker
- INFO ✅ docker目录清理完成
- INFO 📦 开始解压Docker服务包...
- INFO 📦 找到Docker服务包: ./cacheDuckData/download/0.0.30/full/docker-aarch64.zip
- INFO 📦 开始解压Docker服务包: ./cacheDuckData/download/0.0.30/full/docker-aarch64.zip
- INFO ✅ ZIP文件打开成功，包含 624 个文件
- INFO 🧹 安全清理 docker 目录（保留 upload 目录）: docker
- INFO 🗑️ 删除文件: docker/.DS_Store
- INFO 🗑️ 删除目录: docker/data
-ERROR ❌ Docker服务包解压失败: Directory not empty (os error 66)
- INFO 🔄 解压失败，从最新完整备份恢复数据 (备份ID: 1)
- INFO 开始数据回滚操作...
- INFO 🛡️ 使用智能数据回滚模式
- INFO    📁 将恢复: data/, app/ 目录
- INFO    🔧 将保留: docker-compose.yml, .env 等配置文件
- INFO    不恢复的目录:[]
- INFO 开始智能数据恢复: ./backups/backup_manual_v0.0.27.0_2025-10-29_06-58-08.tar.gz
- INFO 目标目录: ./docker
- INFO 正在停止服务...
- INFO 🔍 开始检查Docker环境先决条件...
- WARN ❌ Docker Compose 文件不存在: ./docker/docker-compose.yml
-ERROR ❌ 数据恢复失败: Docker Compose 文件不存在: ./docker/docker-compose.yml
- WARN 💡 建议操作:
- WARN    1. 检查备份文件是否存在且完整
- WARN    2. 确保有足够的磁盘空间
- WARN    3. 手动启动服务: nuwax-cli docker-service start
-ERROR ❌ 操作失败: Docker Compose 文件不存在: ./docker/docker-compose.yml
-soddy@soddy nuwac-cli-test1 %
+INFO 指定的Docker服务已启动
+ INFO ✅ 自动升级部署完成，服务已成功启动
+ INFO Found 12 services:
+ INFO   - Service: frontend, Image: registry.yichamao.com/agent-platform-front:latest
+ INFO   - Service: backend, Image: registry.yichamao.com/agent-platform-backend:latest
+ INFO   - Service: mcp-proxy, Image: registry.yichamao.com/mcp-proxy:latest
+ INFO   - Service: mysql-permission-fix, Image: busybox:1.36-uclibc
+ INFO   - Service: mysql, Image: mysql:8.0
+ INFO   - Service: redis, Image: redis:7.0
+ INFO   - Service: milvus, Image: milvusdb/milvus:v2.5.8
+ INFO   - Service: minio, Image: minio/minio:latest
+ INFO   - Service: minio-init, Image: minio/mc:latest
+ INFO   - Service: log_platform, Image: registry.yichamao.com/log-platform:latest
+ INFO   - Service: quickwit, Image: quickwit/quickwit:latest
+ INFO   - Service: rcoder, Image: registry.yichamao.com/rcoder:latest
+ INFO 🔌 正在连接到MySQL数据库...
+ INFO 📊 正在基于在线架构生成SQL差异...
+ INFO 开始生成在线架构到 目标版本 的SQL差异
+ INFO 成功解析 44 个表
+ INFO 成功解析 44 个表
+ INFO 发现表结构变化: workflow_config
+ INFO 发现表结构变化: published_statistics
+ INFO 发现表结构变化: schedule_task
+ INFO 发现表结构变化: agent_component_config
+ INFO 发现表结构变化: custom_table_definition
+ INFO 发现表结构变化: eco_market_client_config
+ INFO 发现表结构变化: space_user
+ INFO 发现表结构变化: config_history
+ INFO 发现表结构变化: sys_operator_log
+ INFO 发现表结构变化: eco_market_client_secret
+ INFO 发现表结构变化: knowledge_config
+ INFO 发现表结构变化: knowledge_qa_segment
+ INFO 发现表结构变化: user_agent_sort
+ INFO 发现表结构变化: card
+ INFO 发现表结构变化: mcp_config
+ INFO 发现表结构变化: tool
+ INFO 发现表结构变化: knowledge_raw_segment
+ INFO 发现表结构变化: knowledge_task
+ INFO 发现表结构变化: custom_page_config
+ INFO 发现表结构变化: conversation
+ INFO 发现表结构变化: model_config
+ INFO 发现表结构变化: pf_retry_data
+ INFO 发现表结构变化: published
+ INFO 发现表结构变化: notify_message
+ INFO 发现表结构变化: knowledge_document
+ INFO 发现表结构变化: publish_apply
+ INFO 发现表结构变化: space
+ INFO 发现表结构变化: workflow_node_config
+ INFO 发现表结构变化: user
+ INFO 发现表结构变化: custom_field_definition
+ INFO 发现表结构变化: user_access_key
+ INFO 发现表结构变化: agent_config
+ INFO 发现表结构变化: eco_market_client_publish_config
+ INFO 发现表结构变化: custom_page_conversation
+ INFO 发现表结构变化: plugin_config
+ INFO 发现表结构变化: custom_page_build
+ INFO 发现表结构变化: notify_message_user
+ INFO 发现表结构变化: system_config
+ INFO 发现表结构变化: knowledge_task_history
+ INFO 发现表结构变化: agent_temp_chat
+ INFO 发现表结构变化: tenant_config
+ INFO Live Diff 完成: 在线架构到 目标版本: 修改列 - 生成 279 行可执行的差异SQL
+ INFO 📋 差异生成结果: 在线架构到 目标版本: 修改列 - 生成 279 行可执行的差异SQL
+ INFO 📄 已保存在线架构SQL文件: temp_sql/init_mysql_old.sql
+ INFO 🔄 开始执行数据库升级...
+ INFO 📋 即将执行 279 行SQL语句
+ INFO 📄 已保存SQL差异文件: temp_sql/upgrade_diff.sql
+ INFO 🚀 开始执行差异SQL...
+ INFO   ✅ 差异SQL执行成功
+ INFO   [1] ✅ ALTER TABLE `workflow_config` MODIFY COLUMN `icon` VARCHAR(255) COMMENT 'icon图片地址';
+ INFO   [2] ✅ ALTER TABLE `workflow_config` MODIFY COLUMN `start_node_id` BIGINT COMMENT '起始节点ID';
+ INFO   [3] ✅ ALTER TABLE `workflow_config` MODIFY COLUMN `end_node_id` BIGINT COMMENT '结束节点ID';
+ INFO   [4] ✅ ALTER TABLE `workflow_config` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID';
+ INFO   [5] ✅ ALTER TABLE `workflow_config` MODIFY COLUMN `ext` JSON;
+ INFO   [6] ✅ ALTER TABLE `published_statistics` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT -1 COMMENT '商户ID';
+ INFO   [7] ✅ ALTER TABLE `published_statistics` MODIFY COLUMN `value` BIGINT NOT NULL DEFAULT 0 COMMENT '统计值';
+ INFO   [8] ✅ ALTER TABLE `schedule_task` MODIFY COLUMN `exec_times` BIGINT NOT NULL DEFAULT 0 COMMENT '已执行次数';
+ INFO   [9] ✅ ALTER TABLE `schedule_task` MODIFY COLUMN `params` JSON COMMENT '附加参数';
+ INFO   [10] ✅ ALTER TABLE `agent_component_config` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '商户ID';
+ INFO   [11] ✅ ALTER TABLE `agent_component_config` MODIFY COLUMN `name` VARCHAR(64) COMMENT '节点名称';
+ INFO   [12] ✅ ALTER TABLE `agent_component_config` MODIFY COLUMN `agent_id` BIGINT COMMENT 'AgentID';
+ INFO   [13] ✅ ALTER TABLE `agent_component_config` MODIFY COLUMN `bind_config` JSON COMMENT '组件绑定配置';
+ INFO   [14] ✅ ALTER TABLE `agent_component_config` MODIFY COLUMN `target_id` BIGINT COMMENT '关联的组件ID';
+ INFO   [15] ✅ ALTER TABLE `agent_component_config` MODIFY COLUMN `icon` VARCHAR(255) COMMENT '组件图标';
+ INFO   [16] ✅ ALTER TABLE `agent_component_config` MODIFY COLUMN `exception_out` TINYINT NOT NULL DEFAULT 0 COMMENT '异常是否抛出，中断主要流程';
+ INFO   [17] ✅ ALTER TABLE `custom_table_definition` MODIFY COLUMN `icon` VARCHAR(255) COMMENT '图标图片地址';
+ INFO   [18] ✅ ALTER TABLE `custom_table_definition` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [19] ✅ ALTER TABLE `custom_table_definition` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [20] ✅ ALTER TABLE `custom_table_definition` MODIFY COLUMN `modified_name` VARCHAR(64) COMMENT '最后修改人';
+ INFO   [21] ✅ ALTER TABLE `custom_table_definition` MODIFY COLUMN `status` TINYINT NOT NULL DEFAULT 1 COMMENT '状态：1-启用 -1-禁用';
+ INFO   [22] ✅ ALTER TABLE `custom_table_definition` MODIFY COLUMN `modified_id` BIGINT COMMENT '最后修改人id';
+ INFO   [23] ✅ ALTER TABLE `custom_table_definition` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [24] ✅ ALTER TABLE `custom_table_definition` MODIFY COLUMN `table_description` VARCHAR(256) COMMENT '表描述';
+ INFO   [25] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `share_status` TINYINT NOT NULL DEFAULT 1 COMMENT '分享状态,1:草稿;2:审核中;3:已发布;4:已下线;5:驳回';
+ INFO   [26] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `version_number` BIGINT NOT NULL DEFAULT 1 COMMENT '版本号,自增,发布一次增加1,初始值为1';
+ INFO   [27] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `author` VARCHAR(256) COMMENT '作者信息';
+ INFO   [28] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [29] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `use_status` TINYINT NOT NULL DEFAULT 2 COMMENT '使用状态,1:启用;2:禁用;';
+ INFO   [30] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `data_type` TINYINT NOT NULL DEFAULT 1 COMMENT '市场类型,默认插件,1:插件;2:模板;3:MCP';
+ INFO   [31] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [32] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [33] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `modified_id` BIGINT COMMENT '最后修改人id';
+ INFO   [34] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `modified_name` VARCHAR(64) COMMENT '最后修改人';
+ INFO   [35] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `category_code` VARCHAR(128) COMMENT '分类编码,商业服务等,通过接口获取';
+ INFO   [36] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `category_name` VARCHAR(128) COMMENT '分类名称,商业服务等,通过接口获取';
+ INFO   [37] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `publish_time` DATETIME COMMENT '发布时间';
+ INFO   [38] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `offline_time` DATETIME COMMENT '下线时间';
+ INFO   [39] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `config_json` JSON COMMENT '配置json,存储插件的配置信息如果有其他额外的信息保存放这里';
+ INFO   [40] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `approve_message` VARCHAR(256) COMMENT '审批原因';
+ INFO   [41] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `config_param_json` JSON COMMENT '请求参数配置json';
+ INFO   [42] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `tenant_enabled` TINYINT DEFAULT 0 COMMENT '是否租户自动启用插件,1:租户自动启用;0:非租户自动启用;默认:0';
+ INFO   [43] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `icon` VARCHAR(255) COMMENT '图标图片地址';
+ INFO   [44] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `owned_flag` TINYINT NOT NULL DEFAULT 0 COMMENT '是否我的分享,0:否(生态市场获取的);1:是(我的分享)';
+ INFO   [45] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `target_id` BIGINT COMMENT '具体目标的id,可以智能体,工作流,插件,还有mcp等';
+ INFO   [46] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `target_type` VARCHAR(64) COMMENT '细分类型,比如: 插件,智能体,工作流';
+ INFO   [47] ✅ ALTER TABLE `eco_market_client_config` MODIFY COLUMN `description` VARCHAR(256) COMMENT '描述';
+ INFO   [48] ✅ ALTER TABLE `space_user` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '商户ID';
+ INFO   [49] ✅ ALTER TABLE `config_history` MODIFY COLUMN `op_user_id` BIGINT COMMENT '操作用户';
+ INFO   [50] ✅ ALTER TABLE `config_history` MODIFY COLUMN `config` JSON COMMENT '当时的配置';
+ INFO   [51] ✅ ALTER TABLE `config_history` MODIFY COLUMN `description` VARCHAR(255) COMMENT '变更描述';
+ INFO   [52] ✅ ALTER TABLE `sys_operator_log` MODIFY COLUMN `system_code` VARCHAR(64) COMMENT '系统编码';
+ INFO   [53] ✅ ALTER TABLE `sys_operator_log` MODIFY COLUMN `yn` TINYINT NOT NULL DEFAULT 1 COMMENT '是否有效；1：有效，-1：无效';
+ INFO   [54] ✅ ALTER TABLE `sys_operator_log` MODIFY COLUMN `operate_content` VARCHAR(256) COMMENT '操作内容,比如评估页面';
+ INFO   [55] ✅ ALTER TABLE `eco_market_client_secret` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [56] ✅ ALTER TABLE `eco_market_client_secret` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [57] ✅ ALTER TABLE `eco_market_client_secret` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [58] ✅ ALTER TABLE `eco_market_client_secret` MODIFY COLUMN `description` VARCHAR(256) COMMENT '描述';
+ INFO   [59] ✅ ALTER TABLE `eco_market_client_secret` MODIFY COLUMN `client_secret` VARCHAR(256) COMMENT '客户端密钥';
+ INFO   [60] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `description` VARCHAR(256) COMMENT '知识库描述';
+ INFO   [61] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `chat_model_id` INT COMMENT '知识库的生成Q&A模型ID';
+ INFO   [62] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `icon` VARCHAR(255) COMMENT '图标图片地址';
+ INFO   [63] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `data_type` TINYINT NOT NULL DEFAULT 1 COMMENT '数据类型,默认文本,1:文本;2:表格';
+ INFO   [64] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `modified_id` BIGINT COMMENT '最后修改人id';
+ INFO   [65] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `file_size` BIGINT DEFAULT 0 COMMENT '文件大小,单位字节byte';
+ INFO   [66] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [67] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `embedding_model_id` INT COMMENT '知识库的嵌入模型ID';
+ INFO   [68] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [69] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `workflow_id` BIGINT COMMENT '工作流id,可选,已工作流的形式,来执行解析文档获取文本的任务';
+ INFO   [70] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [71] ✅ ALTER TABLE `knowledge_config` MODIFY COLUMN `modified_name` VARCHAR(64) COMMENT '最后修改人';
+ INFO   [72] ✅ ALTER TABLE `knowledge_qa_segment` MODIFY COLUMN `modified_id` BIGINT COMMENT '最后修改人id';
+ INFO   [73] ✅ ALTER TABLE `knowledge_qa_segment` MODIFY COLUMN `modified_name` VARCHAR(64) COMMENT '最后修改人';
+ INFO   [74] ✅ ALTER TABLE `knowledge_qa_segment` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [75] ✅ ALTER TABLE `knowledge_qa_segment` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [76] ✅ ALTER TABLE `knowledge_qa_segment` MODIFY COLUMN `has_embedding` TINYINT NOT NULL DEFAULT 0 COMMENT '是否已经完成嵌入';
+ INFO   [77] ✅ ALTER TABLE `knowledge_qa_segment` MODIFY COLUMN `raw_id` BIGINT COMMENT '所属原始分段ID,前端手动新增的没有归属分段内容';
+ INFO   [78] ✅ ALTER TABLE `knowledge_qa_segment` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [79] ✅ ALTER TABLE `user_agent_sort` MODIFY COLUMN `agent_sort_config` JSON COMMENT '分类下智能体排序配置';
+ INFO   [80] ✅ ALTER TABLE `card` MODIFY COLUMN `args` JSON COMMENT '卡片参数';
+ INFO   [81] ✅ ALTER TABLE `card` MODIFY COLUMN `image_url` VARCHAR(255) COMMENT '卡片示例图片地址';
+ INFO   [82] ✅ ALTER TABLE `mcp_config` MODIFY COLUMN `icon` VARCHAR(255) COMMENT 'icon图片地址';
+ INFO   [83] ✅ ALTER TABLE `mcp_config` MODIFY COLUMN `category` VARCHAR(64);
+ INFO   [84] ✅ ALTER TABLE `mcp_config` MODIFY COLUMN `server_name` VARCHAR(64);
+ INFO   [85] ✅ ALTER TABLE `mcp_config` MODIFY COLUMN `uid` VARCHAR(64);
+ INFO   [86] ✅ ALTER TABLE `mcp_config` MODIFY COLUMN `deployed_config` JSON COMMENT 'MCP已发布的配置';
+ INFO   [87] ✅ ALTER TABLE `mcp_config` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID';
+ INFO   [88] ✅ ALTER TABLE `mcp_config` MODIFY COLUMN `config` JSON COMMENT 'MCP配置';
+ INFO   [89] ✅ ALTER TABLE `mcp_config` MODIFY COLUMN `deployed` DATETIME COMMENT '部署时间';
+ INFO   [90] ✅ ALTER TABLE `tool` MODIFY COLUMN `icon_url` VARCHAR(255) COMMENT '图标地址';
+ INFO   [91] ✅ ALTER TABLE `tool` MODIFY COLUMN `handler_clazz` VARCHAR(255) COMMENT '处理类';
+ INFO   [92] ✅ ALTER TABLE `knowledge_raw_segment` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [93] ✅ ALTER TABLE `knowledge_raw_segment` MODIFY COLUMN `modified_id` BIGINT COMMENT '最后修改人id';
+ INFO   [94] ✅ ALTER TABLE `knowledge_raw_segment` MODIFY COLUMN `qa_status` TINYINT DEFAULT -1 COMMENT '-1:待生成问答;1:已生成问答;';
+ INFO   [95] ✅ ALTER TABLE `knowledge_raw_segment` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [96] ✅ ALTER TABLE `knowledge_raw_segment` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [97] ✅ ALTER TABLE `knowledge_raw_segment` MODIFY COLUMN `modified_name` VARCHAR(64) COMMENT '最后修改人';
+ INFO   [98] ✅ ALTER TABLE `knowledge_task` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [99] ✅ ALTER TABLE `knowledge_task` MODIFY COLUMN `retry_cnt` INT NOT NULL DEFAULT 0 COMMENT '已重试次数';
+ INFO   [100] ✅ ALTER TABLE `knowledge_task` MODIFY COLUMN `max_retry_cnt` INT NOT NULL DEFAULT 5 COMMENT '最大重试次数';
+ INFO   [101] ✅ ALTER TABLE `knowledge_task` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [102] ✅ ALTER TABLE `knowledge_task` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [103] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `ext` JSON COMMENT '扩展参数';
+ INFO   [104] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `page_arg_config` JSON COMMENT '路径参数配置';
+ INFO   [105] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `proxy_config` JSON COMMENT '代理配置';
+ INFO   [106] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `modified_name` VARCHAR(64) COMMENT '最后修改人';
+ INFO   [107] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `space_id` BIGINT COMMENT '空间ID';
+ INFO   [108] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `modified_id` BIGINT COMMENT '最后修改人ID';
+ INFO   [109] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [110] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `need_login` TINYINT COMMENT '是否需要登陆,1:需要';
+ INFO   [111] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `publish_type` VARCHAR(100);
+ INFO   [112] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `icon` VARCHAR(500) COMMENT '项目图标';
+ INFO   [113] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `dev_agent_id` BIGINT COMMENT '开发关联智能体ID';
+ INFO   [114] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `data_sources` JSON COMMENT '绑定的数据源';
+ INFO   [115] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `yn` TINYINT NOT NULL DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [116] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `description` VARCHAR(255) COMMENT '项目描述';
+ INFO   [117] ✅ ALTER TABLE `custom_page_config` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人ID';
+ INFO   [118] ✅ ALTER TABLE `conversation` MODIFY COLUMN `task_id` VARCHAR(64) COMMENT '对应的任务ID';
+ INFO   [119] ✅ ALTER TABLE `conversation` MODIFY COLUMN `task_cron` VARCHAR(32) COMMENT '任务配置';
+ INFO   [120] ✅ ALTER TABLE `conversation` MODIFY COLUMN `dev_mode` TINYINT NOT NULL DEFAULT 0;
+ INFO   [121] ✅ ALTER TABLE `conversation` MODIFY COLUMN `task_status` VARCHAR(32) COMMENT '任务状态';
+ INFO   [122] ✅ ALTER TABLE `conversation` MODIFY COLUMN `topic_updated` TINYINT NOT NULL DEFAULT 0;
+ INFO   [123] ✅ ALTER TABLE `conversation` MODIFY COLUMN `variables` JSON COMMENT '用户输入的变量值';
+ INFO   [124] ✅ ALTER TABLE `model_config` MODIFY COLUMN `model` VARCHAR(128) COMMENT '模型标识';
+ INFO   [125] ✅ ALTER TABLE `model_config` MODIFY COLUMN `type` VARCHAR(64) COMMENT '模型类型';
+ INFO   [126] ✅ ALTER TABLE `model_config` MODIFY COLUMN `is_reason_model` INT NOT NULL DEFAULT 0 COMMENT '是否为深度思考模型';
+ INFO   [127] ✅ ALTER TABLE `model_config` MODIFY COLUMN `space_id` BIGINT COMMENT '空间ID';
+ INFO   [128] ✅ ALTER TABLE `model_config` MODIFY COLUMN `enabled` TINYINT DEFAULT 1 COMMENT '启用状态';
+ INFO   [129] ✅ ALTER TABLE `model_config` MODIFY COLUMN `dimension` INT NOT NULL DEFAULT 1536 COMMENT '向量维度';
+ INFO   [130] ✅ ALTER TABLE `model_config` MODIFY COLUMN `max_tokens` INT NOT NULL DEFAULT 4096 COMMENT '请求token上限';
+ INFO   [131] ✅ ALTER TABLE `model_config` MODIFY COLUMN `nat_info` JSON COMMENT '网络配置信息（内网模式使用）';
+ INFO   [132] ✅ ALTER TABLE `model_config` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '商户ID';
+ INFO   [133] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `modifier_name` VARCHAR(100) COMMENT '编辑人名称';
+ INFO   [134] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `status` TINYINT NOT NULL DEFAULT 1 COMMENT '状态，1待重试，2重试成功，3重试失败，4禁止重试';
+ INFO   [135] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `retry_cnt` INT NOT NULL DEFAULT 0 COMMENT '已重试次数';
+ INFO   [136] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `modifier_id` BIGINT COMMENT '编辑人ID';
+ INFO   [137] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `lock_time` DATETIME COMMENT '锁定至时间';
+ INFO   [138] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `yn` TINYINT NOT NULL DEFAULT 1 COMMENT '是否有效';
+ INFO   [139] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `max_retry_cnt` INT NOT NULL DEFAULT 5 COMMENT '最大重试次数';
+ INFO   [140] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `creator_id` BIGINT COMMENT '操作人ID';
+ INFO   [141] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT -1;
+ INFO   [142] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `arg_class_names` VARCHAR(600) COMMENT '参数类型名称组';
+ INFO   [143] ✅ ALTER TABLE `pf_retry_data` MODIFY COLUMN `creator_name` VARCHAR(100) COMMENT '操作人名称';
+ INFO   [144] ✅ ALTER TABLE `published` MODIFY COLUMN `icon` VARCHAR(255) COMMENT '图标';
+ INFO   [145] ✅ ALTER TABLE `published` MODIFY COLUMN `only_template` TINYINT NOT NULL DEFAULT 0 COMMENT '仅展示模板';
+ INFO   [146] ✅ ALTER TABLE `published` MODIFY COLUMN `user_id` BIGINT COMMENT '发布者ID';
+ INFO   [147] ✅ ALTER TABLE `published` MODIFY COLUMN `allow_copy` TINYINT NOT NULL DEFAULT 0 COMMENT '是否允许复制';
+ INFO   [148] ✅ ALTER TABLE `published` MODIFY COLUMN `space_id` BIGINT COMMENT '空间ID';
+ INFO   [149] ✅ ALTER TABLE `notify_message` MODIFY COLUMN `sender_id` BIGINT COMMENT '发送用户';
+ INFO   [150] ✅ ALTER TABLE `notify_message` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '商户ID';
+ INFO   [151] ✅ ALTER TABLE `knowledge_document` MODIFY COLUMN `modified_name` VARCHAR(64) COMMENT '最后修改人';
+ INFO   [152] ✅ ALTER TABLE `knowledge_document` MODIFY COLUMN `modified_id` BIGINT COMMENT '最后修改人id';
+ INFO   [153] ✅ ALTER TABLE `knowledge_document` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [154] ✅ ALTER TABLE `knowledge_document` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [155] ✅ ALTER TABLE `knowledge_document` MODIFY COLUMN `has_qa` TINYINT NOT NULL DEFAULT 0 COMMENT '是否已经生成Q&A';
+ INFO   [156] ✅ ALTER TABLE `knowledge_document` MODIFY COLUMN `segment` JSON COMMENT '文档分段方式（需要记录分段方式，基于字符数量或换行，Q&A字段等）。如果为空，表示还没有进行分段';
+ INFO   [157] ✅ ALTER TABLE `knowledge_document` MODIFY COLUMN `has_embedding` TINYINT NOT NULL DEFAULT 0 COMMENT '是否已经完成嵌入';
+ INFO   [158] ✅ ALTER TABLE `knowledge_document` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [159] ✅ ALTER TABLE `knowledge_document` MODIFY COLUMN `data_type` TINYINT NOT NULL DEFAULT 1 COMMENT '文件类型,1:URL访问文件;2:自定义文本内容';
+ INFO   [160] ✅ ALTER TABLE `knowledge_document` MODIFY COLUMN `file_size` BIGINT DEFAULT 0 COMMENT '文件大小,单位字节byte';
+ INFO   [161] ✅ ALTER TABLE `publish_apply` MODIFY COLUMN `allow_copy` TINYINT NOT NULL DEFAULT 0 COMMENT '是否允许复制';
+ INFO   [162] ✅ ALTER TABLE `publish_apply` MODIFY COLUMN `only_template` TINYINT NOT NULL DEFAULT 0 COMMENT '仅展示模板';
+ INFO   [163] ✅ ALTER TABLE `publish_apply` MODIFY COLUMN `channel` JSON COMMENT '发布渠道：Square 广场；System 系统发布';
+ INFO   [164] ✅ ALTER TABLE `publish_apply` MODIFY COLUMN `space_id` BIGINT COMMENT '空间ID';
+ INFO   [165] ✅ ALTER TABLE `publish_apply` MODIFY COLUMN `icon` VARCHAR(255) COMMENT '图标';
+ INFO   [166] ✅ ALTER TABLE `space` MODIFY COLUMN `yn` TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除，1为删除';
+ INFO   [167] ✅ ALTER TABLE `space` MODIFY COLUMN `description` VARCHAR(255) COMMENT '空间介绍';
+ INFO   [168] ✅ ALTER TABLE `space` MODIFY COLUMN `receive_publish` TINYINT NOT NULL DEFAULT 1 COMMENT '是否允许来自外部空间的发布';
+ INFO   [169] ✅ ALTER TABLE `space` MODIFY COLUMN `icon` VARCHAR(255) COMMENT '空间图标';
+ INFO   [170] ✅ ALTER TABLE `space` MODIFY COLUMN `allow_develop` TINYINT NOT NULL DEFAULT 1 COMMENT '是否开启开发者功能';
+ INFO   [171] ✅ ALTER TABLE `space` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '商户ID';
+ INFO   [172] ✅ ALTER TABLE `workflow_node_config` MODIFY COLUMN `inner_start_node_id` BIGINT COMMENT '循环节点内部开始节点';
+ INFO   [173] ✅ ALTER TABLE `workflow_node_config` MODIFY COLUMN `inner_end_node_id` BIGINT COMMENT '循环节点内部结束节点';
+ INFO   [174] ✅ ALTER TABLE `workflow_node_config` MODIFY COLUMN `inner_node_Ids` JSON COMMENT '循环节点的内部节点';
+ INFO   [175] ✅ ALTER TABLE `workflow_node_config` MODIFY COLUMN `workflow_id` BIGINT COMMENT '工作流ID';
+ INFO   [176] ✅ ALTER TABLE `workflow_node_config` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '商户ID';
+ INFO   [177] ✅ ALTER TABLE `workflow_node_config` MODIFY COLUMN `next_node_ids` JSON COMMENT '下级节点ID列表';
+ INFO   [178] ✅ ALTER TABLE `workflow_node_config` MODIFY COLUMN `loop_node_id` BIGINT COMMENT '循环体中各节点记录循环节点ID';
+ INFO   [179] ✅ ALTER TABLE `workflow_node_config` MODIFY COLUMN `name` VARCHAR(100) COMMENT '节点名称';
+ INFO   [180] ✅ ALTER TABLE `workflow_node_config` MODIFY COLUMN `icon` VARCHAR(255) COMMENT '图标';
+ INFO   [181] ✅ ALTER TABLE `workflow_node_config` MODIFY COLUMN `config` JSON COMMENT '详细配置';
+ INFO   [182] ✅ ALTER TABLE `user` MODIFY COLUMN `reset_pass` TINYINT NOT NULL DEFAULT 0 COMMENT '是否设置过密码';
+ INFO   [183] ✅ ALTER TABLE `user` MODIFY COLUMN `uid` VARCHAR(128) COMMENT '用户唯一标识';
+ INFO   [184] ✅ ALTER TABLE `user` MODIFY COLUMN `phone` VARCHAR(64) COMMENT '电话号码';
+ INFO   [185] ✅ ALTER TABLE `user` MODIFY COLUMN `nick_name` VARCHAR(64) COMMENT '用户昵称';
+ INFO   [186] ✅ ALTER TABLE `user` MODIFY COLUMN `last_login_time` DATETIME COMMENT '最后登录时间';
+ INFO   [187] ✅ ALTER TABLE `user` MODIFY COLUMN `user_name` VARCHAR(64) COMMENT '用户姓名';
+ INFO   [188] ✅ ALTER TABLE `user` MODIFY COLUMN `avatar` VARCHAR(255) COMMENT '用户头像';
+ INFO   [189] ✅ ALTER TABLE `user` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '商户ID';
+ INFO   [190] ✅ ALTER TABLE `user` MODIFY COLUMN `email` VARCHAR(255) COMMENT '管理员邮箱';
+ INFO   [191] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `modified_id` BIGINT COMMENT '最后修改人id';
+ INFO   [192] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `unique_flag` TINYINT NOT NULL DEFAULT -1 COMMENT '是否唯一：1-唯一 -1-非唯一';
+ INFO   [193] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `enabled_flag` TINYINT NOT NULL DEFAULT 1 COMMENT '是否启用：1-启用 -1-禁用';
+ INFO   [194] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `field_str_len` INT COMMENT '字符串字段长度,可空,比如字符串,可以指定长度使用';
+ INFO   [195] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `nullable_flag` TINYINT NOT NULL DEFAULT 1 COMMENT '是否可为空：1-可空 -1-非空';
+ INFO   [196] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `field_description` VARCHAR(200) COMMENT '字段描述';
+ INFO   [197] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `modified_name` VARCHAR(64) COMMENT '最后修改人';
+ INFO   [198] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `default_value` VARCHAR(255) COMMENT '默认值';
+ INFO   [199] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [200] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `system_field_flag` TINYINT NOT NULL DEFAULT -1 COMMENT '是否系统字段;1:系统字段;-1:否';
+ INFO   [201] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [202] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `field_type` TINYINT NOT NULL DEFAULT 1 COMMENT '字段类型：1:String;2:Integer;3:Number;4:Boolean;5:Date';
+ INFO   [203] ✅ ALTER TABLE `custom_field_definition` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [204] ✅ ALTER TABLE `user_access_key` MODIFY COLUMN `target_id` VARCHAR(64) COMMENT '目标业务ID';
+ INFO   [205] ✅ ALTER TABLE `user_access_key` MODIFY COLUMN `config` JSON COMMENT '其他配置';
+ INFO   [206] ✅ ALTER TABLE `user_access_key` MODIFY COLUMN `access_key` VARCHAR(255) COMMENT '访问密钥';
+ INFO   [207] ✅ ALTER TABLE `agent_config` MODIFY COLUMN `hide_chat_area` TINYINT NOT NULL DEFAULT 0 COMMENT '隐藏对话框';
+ INFO   [208] ✅ ALTER TABLE `agent_config` MODIFY COLUMN `expand_page_area` TINYINT NOT NULL DEFAULT 0 COMMENT '默认展开页面区域';
+ INFO   [209] ✅ ALTER TABLE `agent_config` MODIFY COLUMN `yn` TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除，1为删除';
+ INFO   [210] ✅ ALTER TABLE `agent_config` MODIFY COLUMN `open_scheduled_task` VARCHAR(32) COMMENT '开启定时任务';
+ INFO   [211] ✅ ALTER TABLE `agent_config` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT -1 COMMENT '商户ID';
+ INFO   [212] ✅ ALTER TABLE `agent_config` MODIFY COLUMN `space_id` BIGINT COMMENT '空间ID';
+ INFO   [213] ✅ ALTER TABLE `agent_config` MODIFY COLUMN `opening_guid_question` JSON COMMENT '开场引导问题';
+ INFO   [214] ✅ ALTER TABLE `agent_config` MODIFY COLUMN `dev_conversation_id` BIGINT;
+ INFO   [215] ✅ ALTER TABLE `agent_config` MODIFY COLUMN `icon` VARCHAR(255) COMMENT '图标地址';
+ INFO   [216] ✅ ALTER TABLE `agent_config` MODIFY COLUMN `description` VARCHAR(2000) COMMENT 'Agent描述';
+ INFO   [217] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `owned_flag` TINYINT NOT NULL DEFAULT 0 COMMENT '是否我的分享,0:否(生态市场获取的);1:是(我的分享)';
+ INFO   [218] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `publish_time` DATETIME COMMENT '发布时间';
+ INFO   [219] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `modified_name` VARCHAR(64) COMMENT '最后修改人';
+ INFO   [220] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `category_code` VARCHAR(128) COMMENT '分类编码,商业服务等,通过接口获取';
+ INFO   [221] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [222] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `offline_time` DATETIME COMMENT '下线时间';
+ INFO   [223] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `data_type` TINYINT NOT NULL DEFAULT 1 COMMENT '市场类型,默认插件,1:插件;2:模板;3:MCP';
+ INFO   [224] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `author` VARCHAR(256) COMMENT '作者信息';
+ INFO   [225] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `icon` VARCHAR(255) COMMENT '图标图片地址';
+ INFO   [226] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `config_param_json` JSON COMMENT '请求参数配置json';
+ INFO   [227] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `target_id` BIGINT COMMENT '具体目标的id,可以智能体,工作流,插件,还有mcp等';
+ INFO   [228] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `use_status` TINYINT NOT NULL DEFAULT 1 COMMENT '使用状态,1:启用;2:禁用;';
+ INFO   [229] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `modified_id` BIGINT COMMENT '最后修改人id';
+ INFO   [230] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `config_json` JSON COMMENT '配置json,存储插件的配置信息如果有其他额外的信息保存放这里';
+ INFO   [231] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `target_type` VARCHAR(64) COMMENT '细分类型,比如: 插件,智能体,工作流';
+ INFO   [232] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [233] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `category_name` VARCHAR(128) COMMENT '分类名称,商业服务等,通过接口获取';
+ INFO   [234] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `share_status` TINYINT NOT NULL DEFAULT 1 COMMENT '分享状态,1:草稿;2:审核中;3:已发布;4:已下线;5:驳回';
+ INFO   [235] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [236] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `version_number` BIGINT NOT NULL DEFAULT 1 COMMENT '版本号,自增,发布一次增加1,初始值为1';
+ INFO   [237] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `approve_message` VARCHAR(256) COMMENT '审批原因';
+ INFO   [238] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `tenant_enabled` TINYINT DEFAULT 0 COMMENT '是否租户自动启用插件,1:租户自动启用;0:非租户自动启用;默认:0';
+ INFO   [239] ✅ ALTER TABLE `eco_market_client_publish_config` MODIFY COLUMN `description` VARCHAR(256) COMMENT '描述';
+ INFO   [240] ✅ ALTER TABLE `custom_page_conversation` MODIFY COLUMN `topic` VARCHAR(500) COMMENT '会话主题';
+ INFO   [241] ✅ ALTER TABLE `custom_page_conversation` MODIFY COLUMN `space_id` BIGINT COMMENT '空间ID';
+ INFO   [242] ✅ ALTER TABLE `custom_page_conversation` MODIFY COLUMN `yn` INT NOT NULL DEFAULT 1 COMMENT '是否有效 1:有效 -1:无效';
+ INFO   [243] ✅ ALTER TABLE `custom_page_conversation` MODIFY COLUMN `modified_name` VARCHAR(255) COMMENT '修改者名称';
+ INFO   [244] ✅ ALTER TABLE `custom_page_conversation` MODIFY COLUMN `creator_name` VARCHAR(255) COMMENT '创建者名称';
+ INFO   [245] ✅ ALTER TABLE `custom_page_conversation` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建者ID';
+ INFO   [246] ✅ ALTER TABLE `custom_page_conversation` MODIFY COLUMN `modified_id` BIGINT COMMENT '修改者ID';
+ INFO   [247] ✅ ALTER TABLE `plugin_config` MODIFY COLUMN `icon` VARCHAR(255) COMMENT 'icon图片地址';
+ INFO   [248] ✅ ALTER TABLE `plugin_config` MODIFY COLUMN `code_lang` VARCHAR(64) COMMENT '插件类型为代码时，该字段填写代码语言js、python';
+ INFO   [249] ✅ ALTER TABLE `plugin_config` MODIFY COLUMN `config` JSON COMMENT '插件配置';
+ INFO   [250] ✅ ALTER TABLE `plugin_config` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID';
+ INFO   [251] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `dev_running` TINYINT NOT NULL DEFAULT -1 COMMENT '开发服务器运行标记,1:运行中;-1:未运行';
+ INFO   [252] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `last_chat_model_id` BIGINT COMMENT '上次对话模型ID';
+ INFO   [253] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `space_id` BIGINT COMMENT '空间ID';
+ INFO   [254] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `build_running` TINYINT NOT NULL DEFAULT -1 COMMENT '线上运行标记,1:运行中;-1:未运行';
+ INFO   [255] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `modified_id` BIGINT COMMENT '最后修改人ID';
+ INFO   [256] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `build_version` INT COMMENT '发布的版本号';
+ INFO   [257] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `modified_name` VARCHAR(64) COMMENT '最后修改人';
+ INFO   [258] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `last_multi_model_id` BIGINT COMMENT '上次多模态模型ID';
+ INFO   [259] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `dev_pid` INT COMMENT '开发服务器进程ID';
+ INFO   [260] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人ID';
+ INFO   [261] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `yn` TINYINT NOT NULL DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [262] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `build_time` DATETIME COMMENT '构建发布时间';
+ INFO   [263] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `last_keep_alive_time` DATETIME COMMENT '最后保活时间';
+ INFO   [264] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `version_info` JSON COMMENT '版本信息';
+ INFO   [265] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [266] ✅ ALTER TABLE `custom_page_build` MODIFY COLUMN `dev_port` INT COMMENT '开发服务器端口号';
+ INFO   [267] ✅ ALTER TABLE `notify_message_user` MODIFY COLUMN `_tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '商户ID';
+ INFO   [268] ✅ ALTER TABLE `notify_message_user` MODIFY COLUMN `notify_id` BIGINT COMMENT '通知消息ID';
+ INFO   [269] ✅ ALTER TABLE `notify_message_user` MODIFY COLUMN `user_id` BIGINT COMMENT '接收用户，广播消息user_id=-1';
+ INFO   [270] ✅ ALTER TABLE `system_config` MODIFY COLUMN `input_type` VARCHAR(16);
+ INFO   [271] ✅ ALTER TABLE `knowledge_task_history` MODIFY COLUMN `max_retry_cnt` INT NOT NULL DEFAULT 5 COMMENT '最大重试次数';
+ INFO   [272] ✅ ALTER TABLE `knowledge_task_history` MODIFY COLUMN `retry_cnt` INT NOT NULL DEFAULT 0 COMMENT '已重试次数';
+ INFO   [273] ✅ ALTER TABLE `knowledge_task_history` MODIFY COLUMN `creator_id` BIGINT COMMENT '创建人id';
+ INFO   [274] ✅ ALTER TABLE `knowledge_task_history` MODIFY COLUMN `creator_name` VARCHAR(64) COMMENT '创建人';
+ INFO   [275] ✅ ALTER TABLE `knowledge_task_history` MODIFY COLUMN `yn` TINYINT DEFAULT 1 COMMENT '逻辑标记,1:有效;-1:无效';
+ INFO   [276] ✅ ALTER TABLE `agent_temp_chat` MODIFY COLUMN `expire` DATETIME;
+ INFO   [277] ✅ ALTER TABLE `agent_temp_chat` MODIFY COLUMN `require_login` TINYINT NOT NULL DEFAULT 1 COMMENT '是否需要登录 1 是，0 否';
+ INFO   [278] ✅ ALTER TABLE `tenant_config` MODIFY COLUMN `min_height` INT;
+ INFO   [279] ✅ ALTER TABLE `tenant_config` MODIFY COLUMN `sort` INT NOT NULL DEFAULT 0;
+ INFO ✅ Renamed diff SQL file to: temp_sql/diff_sql_executed_20251104_162941.sql
+ INFO ✅ 数据库升级成功
+ INFO 🎉 自动升级部署流程成功完成
+soddy@soddy 20251031-docker %

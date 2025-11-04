@@ -933,6 +933,9 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         ));
     }
     let new_sql_content = fs::read_to_string(&new_sql_path)?;
+    
+    // 注意：parse_sql_tables 内部的 extract_create_table_statements_with_regex 
+    // 会自动处理 USE 语句的查找和提取，无需手动处理
 
     // 从App配置中动态获取MySQL端口并建立连接
     let compose_file = get_compose_file_path(&config_file);
@@ -956,11 +959,16 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     // 基于在线架构与模板生成差异SQL
     info!("📊 正在基于在线架构生成SQL差异...");
-    let (diff_sql, description) =
+    let (diff_sql, description, live_sql) =
         generate_live_schema_diff(&executor, &new_sql_content, "目标版本")
             .await
             .map_err(|e| anyhow::anyhow!("生成在线差异SQL失败: {}", e))?;
     info!("📋 差异生成结果: {}", description);
+
+    // 保存从 MySQL 读取的原始 CREATE TABLE 语句到 init_mysql_old.sql
+    let old_sql_path = temp_sql_dir.join("init_mysql_old.sql");
+    fs::write(&old_sql_path, &live_sql)?;
+    info!("📄 已保存在线架构SQL文件: {}", old_sql_path.display());
 
     // 检查是否有实际的SQL语句需要执行
     let meaningful_lines: Vec<&str> = diff_sql

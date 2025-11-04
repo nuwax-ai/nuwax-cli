@@ -105,19 +105,20 @@ pub fn generate_schema_diff(
 }
 
 /// 基于在线数据库架构与模板SQL生成差异（Live Diff）
+/// 返回：(差异SQL, 描述, 在线架构原始SQL)
 pub async fn generate_live_schema_diff(
     executor: &MySqlExecutor,
     to_sql: &str,
     to_version: &str,
-) -> Result<(String, String), DuckError> {
+) -> Result<(String, String, String), DuckError> {
     info!("开始生成在线架构到 {} 的SQL差异", to_version);
 
     // 解析目标模板
     let to_tables = parse_sql_tables(to_sql)?;
 
-    // 抓取在线架构并生成差异
-    let live_tables = executor
-        .fetch_live_schema()
+    // 抓取在线架构并生成差异（同时获取原始 SQL）
+    let (live_tables, live_sql) = executor
+        .fetch_live_schema_with_sql()
         .await
         .map_err(|e| DuckError::custom(format!("抓取在线架构失败: {e}")))?;
 
@@ -167,7 +168,7 @@ pub async fn generate_live_schema_diff(
     };
 
     info!("Live Diff 完成: {}", description);
-    Ok((diff_sql, description))
+    Ok((diff_sql, description, live_sql))
 }
 
 /// 格式化默认值用于SQL输出，正确处理不同类型的值

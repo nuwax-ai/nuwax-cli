@@ -23,7 +23,8 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
             Ok(statements) => {
                 for statement in statements {
                     if let Statement::CreateTable(create_table) = statement {
-                        let table_name = create_table.name.to_string();
+                        // 移除表名中的反引号，确保表名统一
+                        let table_name = create_table.name.to_string().trim_matches('`').to_string();
                         debug!("解析表: {}", table_name);
 
                         let mut table_columns = Vec::new();
@@ -36,7 +37,8 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
 
                             // 检查是否是列级别的主键
                             if is_column_primary_key(column) {
-                                primary_key_columns.push(column.name.to_string());
+                                // 移除列名中的反引号
+                                primary_key_columns.push(column.name.to_string().trim_matches('`').to_string());
                             }
 
                             table_columns.push(column_def);
@@ -196,7 +198,8 @@ fn extract_create_table_statements_from_content(content: &str) -> Result<Vec<Str
 
 /// 解析列定义
 fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError> {
-    let column_name = column.name.to_string();
+    // 移除列名中的反引号，确保列名统一
+    let column_name = column.name.to_string().trim_matches('`').to_string();
     let data_type = format_data_type(&column.data_type);
 
     let mut nullable = true;
@@ -251,7 +254,10 @@ fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError>
 fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIndex>, DuckError> {
     match constraint {
         TableConstraint::PrimaryKey { columns, .. } => {
-            let column_names: Vec<String> = columns.iter().map(|col| col.to_string()).collect();
+            // 移除列名中的反引号
+            let column_names: Vec<String> = columns.iter()
+                .map(|col| col.to_string().trim_matches('`').to_string())
+                .collect();
 
             Ok(Some(TableIndex {
                 name: "PRIMARY".to_string(),
@@ -262,11 +268,15 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
             }))
         }
         TableConstraint::Unique { columns, name, .. } => {
-            let column_names: Vec<String> = columns.iter().map(|col| col.to_string()).collect();
+            // 移除列名中的反引号
+            let column_names: Vec<String> = columns.iter()
+                .map(|col| col.to_string().trim_matches('`').to_string())
+                .collect();
 
+            // 移除索引名中的反引号
             let index_name = name
                 .as_ref()
-                .map(|n| n.to_string())
+                .map(|n| n.to_string().trim_matches('`').to_string())
                 .unwrap_or_else(|| format!("unique_{}", column_names.join("_")));
 
             Ok(Some(TableIndex {
@@ -278,11 +288,15 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
             }))
         }
         TableConstraint::Index { name, columns, .. } => {
-            let column_names: Vec<String> = columns.iter().map(|col| col.to_string()).collect();
+            // 移除列名中的反引号
+            let column_names: Vec<String> = columns.iter()
+                .map(|col| col.to_string().trim_matches('`').to_string())
+                .collect();
 
+            // 移除索引名中的反引号
             let index_name = name
                 .as_ref()
-                .map(|n| n.to_string())
+                .map(|n| n.to_string().trim_matches('`').to_string())
                 .unwrap_or_else(|| format!("idx_{}", column_names.join("_")));
 
             Ok(Some(TableIndex {
@@ -444,11 +458,13 @@ fn is_primary_key_column(column: &ColumnDef, constraints: &[TableConstraint]) ->
     }
 
     // 然后检查表级别的主键约束
-    let column_name = column.name.to_string();
+    // 移除列名中的反引号进行比较
+    let column_name = column.name.to_string().trim_matches('`').to_string();
     for constraint in constraints {
         if let TableConstraint::PrimaryKey { columns, .. } = constraint {
             for pk_column in columns {
-                if pk_column.to_string() == column_name {
+                let pk_col_name = pk_column.to_string().trim_matches('`').to_string();
+                if pk_col_name == column_name {
                     return true;
                 }
             }

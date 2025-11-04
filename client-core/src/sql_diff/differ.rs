@@ -156,9 +156,38 @@ fn generate_index_diffs(old_table: &TableDefinition, new_table: &TableDefinition
         .map(|i| (i.name.clone(), i))
         .collect();
 
+    // 辅助函数：检查两个索引是否在语义上相同（列和类型相同，忽略名称）
+    let indexes_semantically_equal = |idx1: &TableIndex, idx2: &TableIndex| -> bool {
+        idx1.is_primary == idx2.is_primary
+            && idx1.is_unique == idx2.is_unique
+            && idx1.columns == idx2.columns
+    };
+
+    // 辅助函数：在旧索引中查找语义上相同的索引
+    let find_semantically_equal_old_index = |new_idx: &TableIndex| -> Option<&TableIndex> {
+        old_table.indexes.iter().find(|old_idx| indexes_semantically_equal(old_idx, new_idx))
+    };
+
     // 检查新增的索引
     for (idx_name, idx_def) in &new_indexes {
-        if !old_indexes.contains_key(idx_name) {
+        // 先检查是否有同名索引
+        if old_indexes.contains_key(idx_name) {
+            continue; // 同名索引存在，稍后在"修改"部分处理
+        }
+        
+        // 检查是否有语义上相同的索引（列相同但名字不同）
+        if let Some(old_idx) = find_semantically_equal_old_index(idx_def) {
+            // 找到了语义上相同的索引，这是索引重命名
+            // 我们选择保留旧索引名，不做任何操作
+            tracing::debug!(
+                "索引重命名检测: 表 {} 的索引 '{}' 在数据库中名为 '{}', 列相同，跳过操作",
+                table_name, idx_name, old_idx.name
+            );
+            continue;
+        }
+        
+        // 真正的新索引
+        if idx_def.is_primary {
             if idx_def.is_primary {
                 diffs.push(format!(
                     "ALTER TABLE `{}` ADD PRIMARY KEY ({});",
@@ -198,14 +227,34 @@ fn generate_index_diffs(old_table: &TableDefinition, new_table: &TableDefinition
         }
     }
 
+    // 辅助函数：在新索引中查找语义上相同的索引
+    let find_semantically_equal_new_index = |old_idx: &TableIndex| -> Option<&TableIndex> {
+        new_table.indexes.iter().find(|new_idx| indexes_semantically_equal(old_idx, new_idx))
+    };
+
     // 检查删除的索引
     for (idx_name, idx_def) in &old_indexes {
-        if !new_indexes.contains_key(idx_name) {
-            if idx_def.is_primary {
-                diffs.push(format!("ALTER TABLE `{table_name}` DROP PRIMARY KEY;"));
-            } else {
-                diffs.push(format!("ALTER TABLE `{table_name}` DROP KEY `{idx_name}`;"));
-            }
+        // 先检查是否有同名索引
+        if new_indexes.contains_key(idx_name) {
+            continue; // 同名索引存在，稍后在"修改"部分处理
+        }
+        
+        // 检查是否有语义上相同的索引（列相同但名字不同）
+        if find_semantically_equal_new_index(idx_def).is_some() {
+            // 找到了语义上相同的索引，这是索引重命名
+            // 我们选择保留旧索引名，不做任何操作
+            tracing::debug!(
+                "索引重命名检测: 表 {} 的索引 '{}' 在目标中有不同名称但列相同，跳过删除",
+                table_name, idx_name
+            );
+            continue;
+        }
+        
+        // 真正需要删除的索引
+        if idx_def.is_primary {
+            diffs.push(format!("ALTER TABLE `{table_name}` DROP PRIMARY KEY;"));
+        } else {
+            diffs.push(format!("ALTER TABLE `{table_name}` DROP KEY `{idx_name}`;"));
         }
     }
 
