@@ -64,16 +64,8 @@ pub async fn run_auto_upgrade_deploy(
         info!("📄 自定义docker-compose配置文件: {}", config_path.display());
     }
 
-    // 0. 🔍 检查并安装 nuwax-cli 更新（如果需要）
-    info!("🔍 检查 nuwax-cli 版本更新...");
-    if let Err(e) = check_and_install_nuwax_cli_update().await {
-        error!("❌ 检查 nuwax-cli 更新失败: {}", e);
-        error!("   升级部署需要确保使用最新版本的 nuwax-cli");
-        error!("   请检查网络连接或手动运行: nuwax-cli check-update install");
-        return Err(e);
-    }
-
-    info!("✅ nuwax-cli 版本检查完成，继续执行升级部署流程");
+    // 注意：CLI版本检查已经在 main.rs 中优先处理，这里不再重复检查
+    info!("✅ CLI 版本已完成预检查，开始执行升级部署流程");
 
     // 1. 获取最新版本信息并下载
     info!("📥 正在下载最新的Docker服务版本...");
@@ -1161,7 +1153,72 @@ async fn get_latest_backup_id(app: &CliApp) -> Result<Option<i64>> {
 ///
 /// 此函数直接使用现有的 check-update install 逻辑来检查和安装更新
 /// 如果发现新版本，会自动下载安装并使用 self-replace 库替换当前进程
-async fn check_and_install_nuwax_cli_update() -> Result<()> {
+#[derive(Debug)]
+enum CliUpdateResult {
+    /// 没有更新可用
+    NoUpdate,
+    /// 更新成功并自动重启
+    UpdatedAndRestarted,
+}
+
+/// 检查并安装 nuwax-cli 更新（独立函数，用于早期检查）
+/// 这个函数可以在数据库初始化之前调用，避免数据库锁冲突
+pub async fn check_and_install_nuwax_cli_update_early() -> Result<()> {
+    use crate::commands::check_update::{check_for_updates, install_release};
+
+    info!("🔍 优先检查 nuwax-cli 版本更新（在任何数据库初始化之前）...");
+
+    // 检查更新
+    let version_info = match check_for_updates().await {
+        Ok(info) => {
+            info!(
+                "✅ 版本检查完成: 当前={}, 最新={}",
+                info.current_version, info.latest_version
+            );
+            info
+        }
+        Err(e) => {
+            error!("❌ 检查更新失败: {}", e);
+            return Err(e);
+        }
+    };
+
+    // 如果有更新，进行安装
+    if version_info.is_update_available {
+        info!(
+            "🚀 发现 nuwax-cli 新版本: {} -> {}",
+            version_info.current_version, version_info.latest_version
+        );
+        info!("📥 开始自动安装更新...");
+
+        match install_release(
+            &version_info.download_url.unwrap_or_default(),
+            &version_info.latest_version,
+        )
+        .await
+        {
+            Ok(_) => {
+                info!("✅ nuwax-cli 更新成功！程序将重启以使用新版本");
+                info!(
+                    "🔄 如果更新后出现问题，可以回滚到: {}",
+                    version_info.current_version
+                );
+                std::process::exit(0);
+            }
+            Err(e) => {
+                error!("❌ nuwax-cli 自动更新失败: {}", e);
+                error!("请检查网络连接或手动运行: nuwax-cli check-update install");
+                return Err(e);
+            }
+        }
+    } else {
+        info!("✅ nuwax-cli 已是最新版本，无需更新");
+    }
+
+    Ok(())
+}
+
+async fn check_and_install_nuwax_cli_update() -> Result<CliUpdateResult> {
     use crate::commands::check_update::{check_for_updates, install_release};
 
     // 检查是否有可用更新
@@ -1172,7 +1229,7 @@ async fn check_and_install_nuwax_cli_update() -> Result<()> {
                     "✅ nuwax-cli 已是最新版本: {}",
                     version_info.current_version
                 );
-                return Ok(());
+                return Ok(CliUpdateResult::NoUpdate);
             }
 
             info!("🆕 发现新版本可用:");
@@ -1194,9 +1251,8 @@ async fn check_and_install_nuwax_cli_update() -> Result<()> {
                         info!("🔄 self-replace 库将自动重启进程以使用新版本...");
 
                         // install_release 函数内部的 self_replace::self_replace()
-                        // 会自动处理进程替换，这里不需要额外处理
-                        // 但为了确保调用者知道发生了什么，我们返回一个特殊错误
-                        return Err(anyhow::anyhow!("nuwax-cli 已更新并自动重启"));
+                        // 会自动处理进程替换，这里返回成功结果
+                        return Ok(CliUpdateResult::UpdatedAndRestarted);
                     }
                     Err(e) => {
                         error!("❌ nuwax-cli 自动安装失败: {}", e);
