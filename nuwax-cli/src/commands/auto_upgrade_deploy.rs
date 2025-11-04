@@ -545,7 +545,7 @@ fn format_duration(duration: Duration) -> String {
 async fn is_first_deployment() -> bool {
     let docker_dir = std::path::Path::new("docker");
     let docker_compose_file = docker_dir.join("docker-compose.yml");
-    let docker_data_dir = docker_dir.join("data");
+    let docker_data_dir = docker_dir.join("data/mysql");
 
     // 如果docker目录不存在，肯定是第一次部署
     if !docker_dir.exists() {
