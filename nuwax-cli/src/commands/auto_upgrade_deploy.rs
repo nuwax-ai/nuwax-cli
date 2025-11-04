@@ -155,7 +155,34 @@ pub async fn run_auto_upgrade_deploy(
         backup_sql_file_before_upgrade().await?;
     }
 
-    // 5. 📦 解压新的Docker服务包（在服务停止后）
+    // 5. 🔍 提前检查并创建挂载目录（重要：Windows Podman Desktop 需要）
+    info!("🔍 检查并创建挂载目录...");
+
+    let docker_manager = Arc::new(DockerManager::with_project(
+        get_compose_file_path(&config_file),
+        client_core::constants::docker::get_env_file_path(),
+        project_name.clone(),
+    )?);
+
+    // 使用新的环境检测机制
+    let runtime_env = docker_manager.get_runtime_environment();
+
+    if runtime_env.needs_special_handling() {
+        info!("⚠️ 检测到 Windows Podman Desktop 环境，提前创建挂载目录");
+        info!("   环境信息: {}", runtime_env.summary());
+        info!("   Podman Desktop 不会自动创建挂载目录，需要手动创建");
+
+        if let Err(e) = docker_manager.ensure_host_volumes_exist().await {
+            warn!("⚠️ 挂载目录检查/创建失败: {}", e);
+            warn!("   继续执行，但可能会遇到容器启动失败");
+        } else {
+            info!("✅ 挂载目录检查完成");
+        }
+    } else {
+        info!("ℹ️ 当前环境: {} (无需特殊处理)", runtime_env.summary());
+    }
+
+    // 6. 📦 解压新的Docker服务包（在服务停止后）
     info!("📦 正在解压Docker服务包...");
 
     // 清理现有的docker目录以避免路径冲突
@@ -933,8 +960,8 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         ));
     }
     let new_sql_content = fs::read_to_string(&new_sql_path)?;
-    
-    // 注意：parse_sql_tables 内部的 extract_create_table_statements_with_regex 
+
+    // 注意：parse_sql_tables 内部的 extract_create_table_statements_with_regex
     // 会自动处理 USE 语句的查找和提取，无需手动处理
 
     // 从App配置中动态获取MySQL端口并建立连接

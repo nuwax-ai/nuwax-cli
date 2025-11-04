@@ -3,7 +3,7 @@ use crate::sql_diff::{TableColumn, TableDefinition, TableIndex};
 use anyhow::{Context, Result, anyhow};
 use docker_compose_types as dct;
 use mysql_async::prelude::*;
-use mysql_async::{from_row, Opts, Pool, Row, Transaction, TxOpts};
+use mysql_async::{Opts, Pool, Row, Transaction, TxOpts, from_row};
 
 /// MySQL容器异步差异SQL执行器
 /// 专为Duck Client自动升级部署设计
@@ -26,8 +26,12 @@ impl MySqlConfig {
     /// 通过解析 docker-compose.yml 文件为容器环境适配配置
     pub async fn for_container(compose_file: Option<&str>, env_file: Option<&str>) -> Result<Self> {
         let docker_manager = match (compose_file, env_file) {
-            (Some(c), Some(e)) => DockerManager::new(c, e)?,
-            _ => return Err(anyhow!("未提供 docker-compose.yml 和 .env 文件路径,无法加载解析 Docker Compose 配置")),
+            (Some(c), Some(e)) => DockerManager::with_project(c, e, None)?,
+            _ => {
+                return Err(anyhow!(
+                    "未提供 docker-compose.yml 和 .env 文件路径,无法加载解析 Docker Compose 配置"
+                ));
+            }
         };
         let compose_config = docker_manager
             .load_compose_config()
@@ -279,13 +283,14 @@ impl MySqlExecutor {
         let mut create_sqls = String::new();
         for table in &table_names {
             let query = format!("SHOW CREATE TABLE `{}`", table);
-            let row: Row = conn.exec_first(query, ()).await?.ok_or_else(|| {
-                anyhow::anyhow!(format!("无法获取表的CREATE语句: {}", table))
-            })?;
+            let row: Row = conn
+                .exec_first(query, ())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!(format!("无法获取表的CREATE语句: {}", table)))?;
             // MySQL返回两列：Table, Create Table
             let (_tbl_name, create_stmt): (String, String) = from_row(row);
             create_sqls.push_str(&create_stmt);
-            
+
             // 确保每个 CREATE TABLE 语句以分号结尾
             if !create_stmt.trim().ends_with(';') {
                 create_sqls.push(';');
@@ -440,63 +445,76 @@ mod tests {
     fn test_table_name_normalization() {
         // 测试表名标准化：确保带反引号和不带反引号的表名被识别为同一个表
         use crate::sql_diff::parse_sql_tables;
-        
+
         // SQL 1: 带反引号的表名
         let sql_with_backticks = "CREATE TABLE `test_table` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;";
-        
+
         // SQL 2: 不带反引号的表名
         let sql_without_backticks = "CREATE TABLE test_table (\n  id int NOT NULL AUTO_INCREMENT,\n  PRIMARY KEY (id)\n) ENGINE=InnoDB;";
-        
+
         let tables1 = parse_sql_tables(sql_with_backticks).expect("解析带反引号的 SQL 失败");
         let tables2 = parse_sql_tables(sql_without_backticks).expect("解析不带反引号的 SQL 失败");
-        
+
         // 两种情况都应该解析出相同的表名（不带反引号）
-        assert!(tables1.contains_key("test_table"), "带反引号的表名应该被标准化为 test_table");
-        assert!(tables2.contains_key("test_table"), "不带反引号的表名应该是 test_table");
-        
+        assert!(
+            tables1.contains_key("test_table"),
+            "带反引号的表名应该被标准化为 test_table"
+        );
+        assert!(
+            tables2.contains_key("test_table"),
+            "不带反引号的表名应该是 test_table"
+        );
+
         // 确保不会有带反引号的 key
-        assert!(!tables1.contains_key("`test_table`"), "不应该有带反引号的表名作为 key");
-        assert!(!tables2.contains_key("`test_table`"), "不应该有带反引号的表名作为 key");
-        
+        assert!(
+            !tables1.contains_key("`test_table`"),
+            "不应该有带反引号的表名作为 key"
+        );
+        assert!(
+            !tables2.contains_key("`test_table`"),
+            "不应该有带反引号的表名作为 key"
+        );
+
         println!("✅ 表名标准化测试通过");
     }
 
     #[test]
     fn test_sql_diff_with_same_tables() {
         // 测试 SQL diff：模拟从 MySQL 读取的表（带反引号）与文件中的表（不带反引号）
-        use crate::sql_diff::{parse_sql_tables, generate_schema_diff};
-        
+        use crate::sql_diff::{generate_schema_diff, parse_sql_tables};
+
         // 模拟从 MySQL SHOW CREATE TABLE 返回的 SQL（带反引号）
         let mysql_sql = "CREATE TABLE `custom_page_config` (\n  `id` bigint NOT NULL AUTO_INCREMENT,\n  `name` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;";
-        
+
         // 模拟从文件读取的 SQL（不带反引号）
         let file_sql = "CREATE TABLE custom_page_config (\n  id bigint NOT NULL AUTO_INCREMENT,\n  name varchar(255) NOT NULL,\n  PRIMARY KEY (id)\n) ENGINE=InnoDB;";
-        
+
         let mysql_tables = parse_sql_tables(mysql_sql).expect("解析 MySQL SQL 失败");
         let file_tables = parse_sql_tables(file_sql).expect("解析文件 SQL 失败");
-        
+
         println!("MySQL 表: {:?}", mysql_tables.keys().collect::<Vec<_>>());
         println!("文件表: {:?}", file_tables.keys().collect::<Vec<_>>());
-        
+
         // 生成差异 SQL（使用 SQL 字符串作为参数）
-        let (diff_sql, description) = generate_schema_diff(
-            Some(mysql_sql),
-            file_sql,
-            Some("在线架构"),
-            "目标版本"
-        ).expect("生成差异 SQL 失败");
-        
+        let (diff_sql, description) =
+            generate_schema_diff(Some(mysql_sql), file_sql, Some("在线架构"), "目标版本")
+                .expect("生成差异 SQL 失败");
+
         println!("差异描述: {}", description);
         println!("差异 SQL:\n{}", diff_sql);
-        
+
         // 由于两个表结构相同，不应该有任何差异
         let meaningful_lines: Vec<&str> = diff_sql
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.trim().starts_with("--"))
             .collect();
-        
-        assert!(meaningful_lines.is_empty(), "相同的表不应该产生差异 SQL，但生成了: {:?}", meaningful_lines);
-        
+
+        assert!(
+            meaningful_lines.is_empty(),
+            "相同的表不应该产生差异 SQL，但生成了: {:?}",
+            meaningful_lines
+        );
+
         println!("✅ SQL diff 测试通过：相同的表没有产生差异");
     }
 
@@ -504,54 +522,74 @@ mod tests {
     fn test_create_table_concatenation_with_semicolons() {
         // 模拟从 MySQL SHOW CREATE TABLE 返回的多个语句（没有分号）
         let mut create_sqls = String::new();
-        
+
         // 模拟第一个表的 CREATE 语句（没有分号）
         let stmt1 = "CREATE TABLE `agent_config` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB";
         create_sqls.push_str(stmt1);
-        
+
         // 添加分号（这是我们的修复）
         if !stmt1.trim().ends_with(';') {
             create_sqls.push(';');
         }
         create_sqls.push_str("\n\n");
-        
+
         // 模拟第二个表的 CREATE 语句（没有分号）
         let stmt2 = "CREATE TABLE `agent_component_config` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB";
         create_sqls.push_str(stmt2);
-        
+
         // 添加分号
         if !stmt2.trim().ends_with(';') {
             create_sqls.push(';');
         }
         create_sqls.push_str("\n\n");
-        
+
         println!("拼接后的 SQL:\n{}", create_sqls);
-        
+
         // 验证结果：每个 CREATE TABLE 语句都应该以分号结尾
-        assert!(create_sqls.contains("ENGINE=InnoDB;"), "第一个表的语句应该以分号结尾");
-        assert!(create_sqls.matches("ENGINE=InnoDB;").count() == 2, "两个表的语句都应该以分号结尾");
-        
+        assert!(
+            create_sqls.contains("ENGINE=InnoDB;"),
+            "第一个表的语句应该以分号结尾"
+        );
+        assert!(
+            create_sqls.matches("ENGINE=InnoDB;").count() == 2,
+            "两个表的语句都应该以分号结尾"
+        );
+
         // 验证可以被 sqlparser 正确解析
         use crate::sql_diff::parse_sql_tables;
         let result = parse_sql_tables(&create_sqls);
-        
+
         if let Err(ref e) = result {
             println!("解析错误: {}", e);
         }
-        
-        assert!(result.is_ok(), "拼接后的 SQL 应该可以被正确解析: {:?}", result.err());
-        
+
+        assert!(
+            result.is_ok(),
+            "拼接后的 SQL 应该可以被正确解析: {:?}",
+            result.err()
+        );
+
         let tables = result.unwrap();
         println!("解析出的表: {:?}", tables.keys().collect::<Vec<_>>());
-        assert_eq!(tables.len(), 2, "应该解析出 2 个表，实际解析出 {} 个", tables.len());
-        
+        assert_eq!(
+            tables.len(),
+            2,
+            "应该解析出 2 个表，实际解析出 {} 个",
+            tables.len()
+        );
+
         // 表名可能带反引号，所以检查两种情况
-        let has_agent_config = tables.contains_key("agent_config") || tables.contains_key("`agent_config`");
-        let has_agent_component_config = tables.contains_key("agent_component_config") || tables.contains_key("`agent_component_config`");
-        
+        let has_agent_config =
+            tables.contains_key("agent_config") || tables.contains_key("`agent_config`");
+        let has_agent_component_config = tables.contains_key("agent_component_config")
+            || tables.contains_key("`agent_component_config`");
+
         assert!(has_agent_config, "应该包含 agent_config 表");
-        assert!(has_agent_component_config, "应该包含 agent_component_config 表");
-        
+        assert!(
+            has_agent_component_config,
+            "应该包含 agent_component_config 表"
+        );
+
         println!("✅ CREATE TABLE 语句拼接测试通过");
     }
 }

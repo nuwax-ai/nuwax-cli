@@ -151,6 +151,14 @@ impl DockerServiceManager {
             )));
         }
 
+        // 环境信息提示（新增）
+        let runtime_env = self.docker_manager.get_runtime_environment();
+        if runtime_env.needs_special_handling() {
+            info!("   环境: {} - 需要特殊处理", runtime_env.summary());
+        } else {
+            info!("   环境: {}", runtime_env.summary());
+        }
+
         info!("环境检查通过");
         Ok(())
     }
@@ -158,6 +166,14 @@ impl DockerServiceManager {
     /// 检查并创建 docker-compose.yml 中所有挂载的目录
     pub async fn ensure_compose_mount_directories(&self) -> DockerServiceResult<()> {
         info!("🔍 检查并创建docker-compose.yml中的挂载目录...");
+
+        // 使用新的环境检测机制
+        let runtime_env = self.docker_manager.get_runtime_environment();
+
+        if runtime_env.needs_special_handling() {
+            info!("⚠️ 检测到 Windows Podman Desktop 环境");
+            info!("   Podman Desktop 不会自动创建挂载目录，将主动创建");
+        }
 
         // 设置必要目录
         self.docker_manager
@@ -779,7 +795,7 @@ impl DockerServiceManager {
 
         match self
             .port_manager
-            .smart_check_compose_port_conflicts(&compose_file,&env_file)
+            .smart_check_compose_port_conflicts(&compose_file, &env_file)
             .await
         {
             Ok(report) => {

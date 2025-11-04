@@ -74,9 +74,10 @@ impl CliApp {
         ));
 
         // 创建其他管理器
-        let docker_manager = Arc::new(DockerManager::new(
+        let docker_manager = Arc::new(DockerManager::with_project(
             PathBuf::from(&config.docker.compose_file),
             PathBuf::from(&config.docker.env_file),
+            None,
         )?);
 
         let backup_manager = Arc::new(BackupManager::new(

@@ -1,5 +1,6 @@
 use super::types::DockerManager;
 use crate::DuckError;
+use crate::container::path_utils::{PathProcessor, PathUtilsError};
 use anyhow::Result;
 use docker_compose_types as dct;
 use std::path::Path;
@@ -74,8 +75,14 @@ impl DockerManager {
                         let is_bind = self.is_bind_mount_path(host_path);
 
                         if is_bind {
-                            // 规范化路径：移除多余的 ./ 和 //
-                            let normalized_host_path = self.normalize_path(host_path);
+                            // 规范化路径（返回 Result）
+                            let normalized_host_path = match self.normalize_path(host_path) {
+                                Ok(path) => path,
+                                Err(e) => {
+                                    warn!("路径规范化失败: {}", e);
+                                    return None;
+                                }
+                            };
 
                             // 将相对路径转换为相对于compose文件所在目录的绝对路径
                             let host_path_buf = std::path::PathBuf::from(&normalized_host_path);
@@ -84,7 +91,7 @@ impl DockerManager {
                             } else {
                                 match self.get_working_directory() {
                                     Some(compose_dir) => compose_dir
-                                        .join(normalized_host_path)
+                                        .join(&normalized_host_path)
                                         .to_string_lossy()
                                         .to_string(),
                                     None => {
@@ -112,8 +119,14 @@ impl DockerManager {
 
                     if is_bind {
                         let container_path = &volume_def.target;
-                        // 规范化路径：移除多余的 ./ 和 //
-                        let normalized_source = self.normalize_path(source);
+                        // 规范化路径（返回 Result）
+                        let normalized_source = match self.normalize_path(source) {
+                            Ok(path) => path,
+                            Err(e) => {
+                                warn!("路径规范化失败: {}", e);
+                                return None;
+                            }
+                        };
 
                         // 将相对路径转换为相对于compose文件所在目录的绝对路径
                         let source_path_buf = std::path::PathBuf::from(&normalized_source);
@@ -122,7 +135,7 @@ impl DockerManager {
                         } else {
                             match self.get_working_directory() {
                                 Some(compose_dir) => compose_dir
-                                    .join(normalized_source)
+                                    .join(&normalized_source)
                                     .to_string_lossy()
                                     .to_string(),
                                 None => {
@@ -143,57 +156,22 @@ impl DockerManager {
         }
     }
 
-    /// 规范化路径，移除多余的 ./ 和 //
-    fn normalize_path(&self, path: &str) -> String {
-        use std::path::PathBuf;
-
-        let path_buf = PathBuf::from(path);
-        let mut components = Vec::new();
-
-        for component in path_buf.components() {
-            match component {
-                std::path::Component::CurDir => {
-                    // 跳过当前目录 .
-                    continue;
-                }
-                std::path::Component::ParentDir => {
-                    // 处理父目录 ..
-                    if let Some(last) = components.last() {
-                        if last != &std::path::Component::RootDir {
-                            components.pop();
-                        }
-                    }
-                }
-                _ => {
-                    components.push(component);
-                }
-            }
-        }
-
-        let normalized = components
-            .iter()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(std::path::MAIN_SEPARATOR_STR);
-
-        // 确保空路径返回 "."
-        if normalized.is_empty() {
-            ".".to_string()
-        } else {
-            normalized
-        }
+    /// 规范化路径（使用新的路径处理器）
+    fn normalize_path(&self, path: &str) -> Result<String, PathUtilsError> {
+        let path_processor = PathProcessor::new(
+            self.runtime_env.host_os.clone(),
+            self.runtime_env.path_format.clone(),
+        );
+        path_processor.normalize_path(path)
     }
 
-    /// 判断是否为bind mount路径
+    /// 判断是否为bind mount路径（使用新的路径处理器）
     fn is_bind_mount_path(&self, path: &str) -> bool {
-        // 判断是否为bind mount路径（宿主机绝对路径或相对路径）
-        // 排除命名卷（不包含路径分隔符且不是绝对路径）
-        !path.is_empty()
-            && (std::path::PathBuf::from(path).is_absolute()
-                || path.starts_with("./")
-                || path.starts_with("../")
-                || (path.contains(std::path::MAIN_SEPARATOR)
-                    && !std::path::PathBuf::from(path).is_absolute())) // 相对文件路径，排除命名卷
+        let path_processor = PathProcessor::new(
+            self.runtime_env.host_os.clone(),
+            self.runtime_env.path_format.clone(),
+        );
+        path_processor.is_bind_mount_path(path)
     }
 
     /// 创建宿主机目录（如果不存在）

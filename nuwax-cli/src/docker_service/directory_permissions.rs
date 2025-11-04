@@ -38,6 +38,13 @@ impl DirectoryPermissionManager {
     }
 
     /// 设置目录权限（跨平台兼容）
+    /// 
+    /// 注意：在某些环境下权限设置可能失败但不影响容器运行：
+    /// - WSL2 挂载的 Windows 分区（/mnt/c/）
+    /// - 某些网络文件系统（NFS、CIFS）
+    /// - Docker Desktop 的卷挂载
+    /// 
+    /// 因此这个函数采用"尽力而为"策略，失败时只记录警告
     fn set_directory_permission(&self, path: &Path, mode: u32) -> DockerServiceResult<()> {
         #[cfg(unix)]
         {
@@ -49,26 +56,50 @@ impl DirectoryPermissionManager {
             let mut permissions = metadata.permissions();
             permissions.set_mode(mode);
 
-            fs::set_permissions(path, permissions)
-                .map_err(|e| DockerServiceError::FileSystem(format!("设置权限失败: {e}")))?;
+            match fs::set_permissions(path, permissions) {
+                Ok(_) => {
+                    debug!("权限设置成功: {} (mode: {:o})", path.display(), mode);
+                }
+                Err(e) => {
+                    // 权限设置失败通常不影响容器运行，因为：
+                    // 1. Docker 有自己的用户映射机制
+                    // 2. WSL2/网络文件系统可能不支持标准 Unix 权限
+                    // 3. 容器内的用户可能与宿主机不同
+                    warn!(
+                        "权限设置失败: {} (mode: {:o}), 错误: {} - 这通常不影响容器运行",
+                        path.display(),
+                        mode,
+                        e
+                    );
+                }
+            }
         }
 
         #[cfg(windows)]
         {
-            // Windows上尝试使用PowerShell设置权限
+            // Windows 上尝试设置权限，失败也不影响容器运行
             if let Err(e) = self.set_windows_permission(path, mode) {
-                tracing::warn!(
-                    "Windows权限设置失败: {} (mode: {:o}), 错误: {}",
+                warn!(
+                    "Windows权限设置失败: {} (mode: {:o}), 错误: {} - 这通常不影响容器运行",
                     path.display(),
                     mode,
                     e
                 );
             } else {
-                tracing::debug!("Windows权限设置成功: {} (mode: {:o})", path.display(), mode);
+                debug!("Windows权限设置成功: {} (mode: {:o})", path.display(), mode);
             }
         }
 
         Ok(())
+    }
+
+    /// 检测当前路径是否在 WSL2 的 Windows 挂载点上
+    /// 
+    /// WSL2 挂载的 Windows 分区（如 /mnt/c/）通常不支持标准 Unix 权限
+    #[cfg(unix)]
+    fn is_wsl2_windows_mount(&self, path: &Path) -> bool {
+        // 检查路径是否以 /mnt/ 开头（WSL2 的 Windows 分区挂载点）
+        path.starts_with("/mnt/")
     }
 
     /// Windows系统上的权限设置（通过PowerShell）

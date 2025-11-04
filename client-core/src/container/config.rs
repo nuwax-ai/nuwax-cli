@@ -1,5 +1,6 @@
 use super::types::{DockerManager, ServiceConfig};
 use crate::DuckError;
+use crate::container::environment::detect_runtime_environment;
 use anyhow::Result;
 use docker_compose_types as dct;
 use quick_cache::sync::Cache;
@@ -26,15 +27,16 @@ static COMPOSE_CACHE: once_cell::sync::Lazy<Cache<(String, String), CacheEntry>>
     });
 
 impl DockerManager {
-    /// 创建新的 Docker 管理器
-    pub fn new<P: AsRef<Path>>(compose_file: P, env_file: P) -> Result<Self> {
-        Self::with_project(compose_file, env_file, None)
-    }
-
     /// 创建新的 Docker 管理器（指定项目名称）
-    pub fn with_project<P: AsRef<Path>>(compose_file: P, env_file: P, project_name: Option<String>) -> Result<Self> {
+    pub fn with_project<P: AsRef<Path>>(
+        compose_file: P,
+        env_file: P,
+        project_name: Option<String>,
+    ) -> Result<Self> {
         let compose_file = compose_file.as_ref().to_path_buf();
         let env_file = env_file.as_ref().to_path_buf();
+
+        let runtime_env = detect_runtime_environment();
 
         // 如果compose文件不存在，使用默认配置；否则正常加载配置
         let compose_config = if compose_file.exists() {
@@ -52,6 +54,7 @@ impl DockerManager {
             env_file,
             compose_config,
             project_name,
+            runtime_env,
         })
     }
 
@@ -70,10 +73,6 @@ impl DockerManager {
         &self.env_file
     }
 
-    /// 获取 Docker Compose 工作目录
-    pub fn get_working_directory(&self) -> Option<&Path> {
-        self.env_file.parent()
-    }
     /// 使用实例中配置的路径加载 docker-compose.yml 文件并解析
     /// 结果会缓存30秒，避免重复解析
     pub fn load_compose_config(&self) -> Result<dct::Compose> {

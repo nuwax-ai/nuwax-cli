@@ -120,8 +120,11 @@ async fn check_docker_services_status(
     compose_file_path: &std::path::Path,
     env_file_path: &std::path::Path,
 ) -> Result<()> {
-    let docker_manager =
-        DockerManager::new(compose_file_path.to_path_buf(), env_file_path.to_path_buf())?;
+    let docker_manager = DockerManager::with_project(
+        compose_file_path.to_path_buf(),
+        env_file_path.to_path_buf(),
+        None,
+    )?;
 
     let health_checker = HealthChecker::new(Arc::new(docker_manager));
     let report = health_checker.health_check().await?;
