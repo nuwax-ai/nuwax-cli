@@ -1,1 +1,0 @@
-#parser.rs  再执行命令: nuwax-cli auto-upgrade-deploy run  ,会自动升级部署docker服务,再服务最后的时候,检查mysql数据库的库表有无升级,如果有的话,通过新老sql文件来对比出差异, 但这个是有缺陷的,我想的方式,连接到mysql数据库,获取当前数据库里的所有库表结构信息,然后和最新的库表结构sql进行对比,然后生成对应的差异sql,然后执行mysql数据库的库表结构的升级,更新到最新的数据库库表结构.   #cli.rs 我之前的sql差异比对的逻辑是: DiffSql 这个命令,可以看下之前的逻辑流程.   注: mysql数据库的连接信息,你可以看下现有的  nuwax-cli auto-upgrade-deploy run 里面连接mysql数据库,是怎么链接的数据库
