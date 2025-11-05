@@ -232,14 +232,79 @@ pub mod docker {
             BACKUPS_DIR_NAME,
         ]
     }
+
+    /// 升级时需要保留的目录列表（不会被删除或覆盖）
+    ///
+    /// 这些目录包含用户数据或运行时生成的重要文件，在升级过程中必须保护：
+    /// - `upload`: 用户上传的文件
+    /// - `project_workspace`: 项目工作空间
+    /// - `project_zips`: 项目压缩包
+    /// - `project_nginx`: Nginx配置
+    /// - `project_init`: 项目初始化文件
+    /// - `uv_cache`: UV缓存目录
+    /// - `data`: 数据库和持久化数据
+    pub const EXCLUDE_DIRS: [&str; 7] = [
+        "upload",
+        "project_workspace",
+        "project_zips",
+        "project_nginx",
+        "project_init",
+        "uv_cache",
+        "data",
+    ];
 }
 
 /// API服务相关常量
 pub mod api {
+    use crate::environment::Environment;
 
-    ///TODO: 默认API服务器地址
-    pub const DEFAULT_BASE_URL: &str = "https://api-version.nuwax.com";
-    // pub const DEFAULT_BASE_URL: &str = "http://192.168.2.244:3000";
+    /// 生产环境API服务器地址
+    const PRODUCTION_BASE_URL: &str = "https://api-version.nuwax.com";
+
+    /// 测试环境API服务器地址
+    const TESTING_BASE_URL: &str = "http://192.168.1.6:3000";
+
+    /// 获取当前环境的API基础URL
+    ///
+    /// 根据环境变量 NUWAX_CLI_ENV 返回对应的API地址：
+    /// - Production (默认): https://api-version.nuwax.com
+    /// - Testing: http://192.168.2.244:3000
+    ///
+    /// # Examples
+    /// ```
+    /// use client_core::constants::api::get_base_url;
+    ///
+    /// // 生产环境（默认）
+    /// let url = get_base_url(); // "https://api-version.nuwax.com"
+    ///
+    /// // 测试环境（需要设置环境变量）
+    /// std::env::set_var("NUWAX_CLI_ENV", "testing");
+    /// let url = get_base_url(); // "http://192.168.2.244:3000"
+    /// ```
+    pub fn get_base_url() -> &'static str {
+        match Environment::from_env() {
+            Environment::Test => TESTING_BASE_URL,
+            Environment::Production => PRODUCTION_BASE_URL,
+        }
+    }
+
+    /// 获取当前环境的API基础URL（动态分配）
+    ///
+    /// 与 `get_base_url()` 不同，此函数返回 String 类型，
+    /// 适合需要动态构造URL的场景
+    pub fn get_base_url_dynamic() -> String {
+        get_base_url().to_string()
+    }
+
+    /// 获取生产环境API基础URL（用于特殊场景）
+    pub const fn get_production_base_url() -> &'static str {
+        PRODUCTION_BASE_URL
+    }
+
+    /// 获取测试环境API基础URL（用于特殊场景）
+    pub const fn get_testing_base_url() -> &'static str {
+        TESTING_BASE_URL
+    }
 
     /// API版本前缀
     pub const VERSION_PREFIX: &str = "/api/v1";
@@ -404,6 +469,33 @@ pub mod timeout {
     pub const SERVICE_VERIFY_WAIT: u64 = 5;
 }
 
+/// SQL 相关常量
+pub mod sql {
+    /// SQL 差异执行默认重试次数
+    pub const DEFAULT_RETRY_COUNT: u8 = 3;
+
+    /// MySQL 容器默认映射端口
+    pub const DEFAULT_MYSQL_CONTAINER_PORT: u16 = 13306;
+
+    /// 临时 SQL 目录名
+    pub const TEMP_SQL_DIR: &str = "temp_sql";
+
+    /// 旧版本 SQL 文件名
+    pub const OLD_SQL_FILE: &str = "init_mysql_old.sql";
+
+    /// 新版本 SQL 文件名
+    pub const NEW_SQL_FILE: &str = "init_mysql_new.sql";
+
+    /// 差异 SQL 文件名
+    pub const DIFF_SQL_FILE: &str = "upgrade_diff.sql";
+
+    /// 当前 SQL 文件路径
+    pub const CURRENT_SQL_PATH: &str = "docker/config/init_mysql.sql";
+
+    /// 目录清理最大重试次数
+    pub const MAX_CLEANUP_ATTEMPTS: usize = 3;
+}
+
 /// 网络相关常量
 pub mod network {
     /// 本地回环地址
@@ -471,9 +563,43 @@ pub mod config {
         Path::new(".").join(DATA_DIR_NAME).join(CONFIG_FILE_NAME)
     }
 
+    /// 获取当前环境的配置文件路径
+    ///
+    /// 根据环境变量 NUWAX_CLI_ENV 返回对应的配置文件路径：
+    /// - Production: data/config.toml
+    /// - Testing: data/config-test.toml
+    pub fn get_config_file_path_for_env() -> PathBuf {
+        let config_file_name = match crate::environment::Environment::from_env() {
+            crate::environment::Environment::Test => "config-test.toml",
+            crate::environment::Environment::Production => CONFIG_FILE_NAME,
+        };
+        Path::new(".").join(DATA_DIR_NAME).join(config_file_name)
+    }
+
+    /// 获取环境特定的配置文件名
+    pub fn get_config_file_name_for_env() -> &'static str {
+        match crate::environment::Environment::from_env() {
+            crate::environment::Environment::Test => "config-test.toml",
+            crate::environment::Environment::Production => CONFIG_FILE_NAME,
+        }
+    }
+
     /// 获取数据库文件路径（跨平台）
     pub fn get_database_path() -> PathBuf {
         Path::new(".").join(DATA_DIR_NAME).join(DATABASE_FILE_NAME)
+    }
+
+    /// 获取当前环境的数据库文件路径
+    ///
+    /// 根据环境变量 NUWAX_CLI_ENV 返回对应的数据库文件路径：
+    /// - Production: data/duck_client.db
+    /// - Testing: data/duck_client_test.db
+    pub fn get_database_path_for_env() -> PathBuf {
+        let db_file_name = match crate::environment::Environment::from_env() {
+            crate::environment::Environment::Test => "duck_client_test.db",
+            crate::environment::Environment::Production => DATABASE_FILE_NAME,
+        };
+        Path::new(".").join(DATA_DIR_NAME).join(db_file_name)
     }
 
     /// 获取默认缓存目录（跨平台）

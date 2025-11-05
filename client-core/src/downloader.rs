@@ -982,9 +982,9 @@ impl FileDownloader {
                             };
 
                         // 计算下载速度（仅用于显示）
-                        let speed_mbps = if time_since_last.as_secs() > 0 {
+                        let speed_mbps = if time_since_last.as_secs_f64() > 0.0 {
                             (bytes_since_last as f64 / 1024.0 / 1024.0)
-                                / time_since_last.as_secs() as f64
+                                / time_since_last.as_secs_f64()
                         } else {
                             0.0
                         };

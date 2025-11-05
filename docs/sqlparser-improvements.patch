@@ -1,0 +1,115 @@
+diff --git a/src/ast/ddl.rs b/src/ast/ddl.rs
+index 1234567..abcdefg 100644
+--- a/src/ast/ddl.rs
++++ b/src/ast/ddl.rs
+@@ -XXX,6 +XXX,50 @@ impl From<&'a str> for IndexColumn {
+     }
+ }
+ 
++impl IndexColumn {
++    /// 提取简单的列名
++    /// 
++    /// 对于简单的列引用（如 `column_name`），返回列名
++    /// 对于复合标识符（如 `table.column`），返回最后一部分
++    /// 对于复杂表达式（如函数索引），返回 None
++    /// 
++    /// # Examples
++    /// 
++    /// ```
++    /// use sqlparser::ast::*;
++    /// use sqlparser::dialect::MySqlDialect;
++    /// use sqlparser::parser::Parser;
++    /// 
++    /// let dialect = MySqlDialect {};
++    /// let sql = "CREATE INDEX idx ON users (username)";
++    /// let ast = Parser::parse_sql(&dialect, sql).unwrap();
++    /// 
++    /// if let Statement::CreateIndex(create_index) = &ast[0] {
++    ///     let col = &create_index.columns[0];
++    ///     assert_eq!(col.simple_column_name(), Some("username"));
++    /// }
++    /// ```
++    pub fn simple_column_name(&self) -> Option<&str> {
++        match &self.column.expr {
++            crate::ast::Expr::Identifier(ident) => Some(&ident.value),
++            crate::ast::Expr::CompoundIdentifier(idents) => {
++                idents.last().map(|id| id.value.as_str())
++            }
++            _ => None,
++        }
++    }
++
++    /// 获取列名（包括复杂表达式）
++    /// 
++    /// 对于简单列返回列名，对于复杂表达式返回其字符串表示
++    pub fn column_name(&self) -> String {
++        self.simple_column_name()
++            .map(|s| s.to_string())
++            .unwrap_or_else(|| self.column.to_string())
++    }
++}
++
+ impl fmt::Display for IndexColumn {
+     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+         write!(f, "{}", self.column)?;
+@@ -YYY,6 +YYY,60 @@ impl fmt::Display for CreateIndex {
+     }
+ }
+ 
++impl CreateIndex {
++    /// 提取所有简单列名
++    /// 
++    /// 只返回简单的列引用，忽略复杂表达式（如函数索引）
++    /// 
++    /// # Examples
++    /// 
++    /// ```
++    /// use sqlparser::ast::*;
++    /// use sqlparser::dialect::MySqlDialect;
++    /// use sqlparser::parser::Parser;
++    /// 
++    /// let dialect = MySqlDialect {};
++    /// let sql = "CREATE INDEX idx ON posts (user_id, created_at)";
++    /// let ast = Parser::parse_sql(&dialect, sql).unwrap();
++    /// 
++    /// if let Statement::CreateIndex(create_index) = &ast[0] {
++    ///     let names = create_index.simple_column_names();
++    ///     assert_eq!(names, vec!["user_id", "created_at"]);
++    /// }
++    /// ```
++    pub fn simple_column_names(&self) -> Vec<&str> {
++        self.columns
++            .iter()
++            .filter_map(|col| col.simple_column_name())
++            .collect()
++    }
++
++    /// 提取所有列名（包括复杂表达式）
++    /// 
++    /// 对于简单列返回列名，对于复杂表达式返回其字符串表示
++    pub fn column_names(&self) -> Vec<String> {
++        self.columns
++            .iter()
++            .map(|col| col.column_name())
++            .collect()
++    }
++
++    /// 获取索引名称（如果有）
++    pub fn index_name(&self) -> Option<String> {
++        self.name.as_ref().map(|n| n.to_string())
++    }
++
++    /// 获取表名
++    pub fn table_name_str(&self) -> String {
++        self.table_name.to_string()
++    }
++
++    /// 检查是否是唯一索引
++    pub fn is_unique(&self) -> bool {
++        self.unique
++    }
++}
++
+ /// ALTER TABLE operation REPLICA IDENTITY values
+ #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+ #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

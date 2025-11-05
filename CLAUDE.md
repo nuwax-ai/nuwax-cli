@@ -132,3 +132,10 @@ Configuration files are searched in order:
 - Update `client-core/src/database/` modules
 - Ensure backward compatibility with existing DuckDB files
 - Add migration logic if needed
+
+## Performance Considerations
+
+- Use `dashmap` instead of `Arc<RwLock<HashMap>>` for concurrent-safe data structures
+- Leverage Tokio's concurrency for async operations
+- Implement proper resource cleanup with Drop traits
+- Use connection pooling for database operations

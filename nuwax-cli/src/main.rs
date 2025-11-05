@@ -1,12 +1,34 @@
 use clap::Parser;
-use client_core::DuckError;
-use nuwax_cli::{Cli, CliApp, Commands, run_diff_sql, run_init, setup_logging};
-use tracing::{error, info};
+use client_core::{DuckError, environment::Environment};
+use nuwax_cli::{
+    Cli, CliApp, Commands, check_and_install_nuwax_cli_update_early, run_diff_sql, run_init,
+    setup_logging,
+};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() {
     // 解析命令行参数
     let cli = Cli::parse();
+
+    // 检测环境并显示提示
+    let environment = Environment::from_env();
+    if environment.is_testing() {
+        warn!("⚠️  RUNNING IN TESTING MODE");
+        warn!("   Environment: {}", environment.display_name());
+        warn!(
+            "   API Endpoint: {}",
+            client_core::constants::api::get_base_url()
+        );
+        warn!("   Configuration: config-test.toml (if exists)");
+        warn!("   Use Ctrl+C to cancel if this is not intended");
+        warn!("   Waiting 2 seconds...");
+
+        // 给用户时间看到警告
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        warn!("🚀 Starting in Testing Environment...");
+    }
 
     // 设置日志记录
     setup_logging(cli.verbose);
@@ -65,6 +87,17 @@ async fn main() {
             std::process::exit(1);
         }
         return;
+    }
+
+    // 🚀 特殊处理：AutoUpgradeDeploy 命令需要优先检查CLI版本更新（在任何数据库初始化之前）
+    if let Commands::AutoUpgradeDeploy(_) = cli.command {
+        info!("🔍 AutoUpgradeDeploy 命令检测到，优先进行 CLI 版本检查...");
+        if let Err(e) = check_and_install_nuwax_cli_update_early().await {
+            error!("❌ CLI 版本检查失败: {}", e);
+            std::process::exit(1);
+        }
+        // 如果有更新，上面的函数会直接退出进程，不会继续执行到这里
+        info!("✅ CLI 版本检查完成，继续执行 AutoUpgradeDeploy 命令");
     }
 
     // 对于其他所有命令，我们需要加载配置并初始化App

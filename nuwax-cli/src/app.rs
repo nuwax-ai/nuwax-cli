@@ -62,7 +62,7 @@ impl CliApp {
         }
 
         // 创建认证客户端（自动处理注册和认证）
-        let server_base_url = client_core::constants::api::DEFAULT_BASE_URL.to_string();
+        let server_base_url = client_core::constants::api::get_base_url().to_string();
         let authenticated_client =
             Arc::new(AuthenticatedClient::new(database.clone(), server_base_url).await?);
 
@@ -74,9 +74,10 @@ impl CliApp {
         ));
 
         // 创建其他管理器
-        let docker_manager = Arc::new(DockerManager::new(
+        let docker_manager = Arc::new(DockerManager::with_project(
             PathBuf::from(&config.docker.compose_file),
             PathBuf::from(&config.docker.env_file),
+            None,
         )?);
 
         let backup_manager = Arc::new(BackupManager::new(

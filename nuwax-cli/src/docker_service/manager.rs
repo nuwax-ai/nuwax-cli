@@ -72,25 +72,15 @@ impl DockerServiceManager {
         // 1. 环境检查
         self.check_environment().await?;
 
-        // 2. 设置必要目录
+        // 2. 自动检测 docker-compose.yml 并创建所有挂载目录
         self.docker_manager
             .ensure_host_volumes_exist()
             .await
             .map_err(|err| DockerServiceError::DirectorySetup(err.to_string()))?;
 
-        // // 3. 渐进式权限管理（容器以原生用户运行，通过权限设置解决问题）
-        // info!("🔧 应用渐进式权限管理...");
-        // info!("   策略: 容器以原生用户运行，通过目录权限设置确保访问权限");
-        // if let Err(e) = self
-        //     .directory_permission_manager
-        //     .progressive_permission_management()
-        // {
-        //     warn!("渐进式权限管理失败，回退到基础权限: {}", e);
-        //     if let Err(fallback_err) = self.directory_permission_manager.basic_permission_fix() {
-        //         error!("权限设置完全失败: {}", fallback_err);
-        //         return Err(fallback_err);
-        //     }
-        // }
+        // 3. 设置 MySQL 配置文件权限（644）
+        self.directory_permission_manager
+            .ensure_mysql_config_safe()?;
 
         // 4. 检查和修复脚本权限
         self.script_permission_manager
@@ -151,6 +141,14 @@ impl DockerServiceManager {
             )));
         }
 
+        // 环境信息提示（新增）
+        let runtime_env = self.docker_manager.get_runtime_environment();
+        if runtime_env.needs_special_handling() {
+            info!("   环境: {} - 需要特殊处理", runtime_env.summary());
+        } else {
+            info!("   环境: {}", runtime_env.summary());
+        }
+
         info!("环境检查通过");
         Ok(())
     }
@@ -158,6 +156,14 @@ impl DockerServiceManager {
     /// 检查并创建 docker-compose.yml 中所有挂载的目录
     pub async fn ensure_compose_mount_directories(&self) -> DockerServiceResult<()> {
         info!("🔍 检查并创建docker-compose.yml中的挂载目录...");
+
+        // 使用新的环境检测机制
+        let runtime_env = self.docker_manager.get_runtime_environment();
+
+        if runtime_env.needs_special_handling() {
+            info!("⚠️ 检测到 Windows Podman Desktop 环境");
+            info!("   Podman Desktop 不会自动创建挂载目录，将主动创建");
+        }
 
         // 设置必要目录
         self.docker_manager
@@ -244,17 +250,15 @@ impl DockerServiceManager {
             .check_and_fix_script_permissions()
             .await?;
 
-        // // 2. 应用渐进式权限管理（不修改docker-compose.yml）
-        // if let Err(e) = self
-        //     .directory_permission_manager
-        //     .progressive_permission_management()
-        // {
-        //     warn!("渐进式权限管理失败: {}", e);
-        //     // 回退到基础权限修复
-        //     if let Err(e2) = self.directory_permission_manager.basic_permission_fix() {
-        //         warn!("基础权限修复也失败: {}", e2);
-        //     }
-        // }
+        // 2. 自动检测 docker-compose.yml 并创建所有挂载目录
+        self.docker_manager
+            .ensure_host_volumes_exist()
+            .await
+            .map_err(|err| DockerServiceError::DirectorySetup(err.to_string()))?;
+
+        // 3. 设置 MySQL 配置文件权限（644）
+        self.directory_permission_manager
+            .ensure_mysql_config_safe()?;
 
         // 3. 检查端口冲突
         self.check_port_conflicts().await?;
@@ -274,17 +278,6 @@ impl DockerServiceManager {
                 // // 检查并修复MySQL配置文件权限
                 // if let Err(e) = self
                 //     .directory_permission_manager
-                //     .check_and_fix_mysql_config_permissions()
-                // {
-                //     warn!("MySQL配置文件权限检查失败: {}", e);
-                // }
-
-                // if let Ok(initial_report) = self.health_checker.health_check().await {
-                //     if (self.check_and_fix_mysql_if_failed(&initial_report).await).is_err() {
-                //         warn!("MySQL初始权限修复失败，继续监控");
-                //     }
-                // }
-
                 match self
                     .health_checker
                     .wait_for_services_ready(check_interval)
@@ -292,30 +285,10 @@ impl DockerServiceManager {
                 {
                     Ok(report) => {
                         info!("所有服务已成功启动!");
-
-                        // // 执行容器启动后权限维护
-                        // if let Err(e) = self
-                        //     .directory_permission_manager
-                        //     .post_container_start_maintenance()
-                        //     .await
-                        // {
-                        //     warn!("容器启动后权限维护失败: {}", e);
-                        //     // 不终止整个流程，只是记录警告
-                        // }
-
                         self.print_service_status(&report).await;
                     }
                     Err(e) => {
                         warn!("等待服务启动超时或失败: {}", e);
-
-                        // // 即使超时也执行权限维护，可能有助于解决问题
-                        // if let Err(e) = self
-                        //     .directory_permission_manager
-                        //     .post_container_start_maintenance()
-                        //     .await
-                        // {
-                        //     warn!("容器启动后权限维护失败: {}", e);
-                        // }
 
                         // 即使超时也显示当前状态
                         if let Ok(report) = self.health_checker.health_check().await {
@@ -391,12 +364,6 @@ impl DockerServiceManager {
                             }
                         } else {
                             error!("没有发现运行中的容器");
-
-                            // // 如果没有容器运行，特别检查MySQL是否因为权限问题失败
-                            // if (self.check_and_fix_mysql_if_failed(&report).await).is_err() {
-                            //     warn!("MySQL权限修复失败");
-                            // }
-
                             self.print_detailed_error_analysis(&report, &e.to_string())
                                 .await;
                         }
@@ -779,7 +746,7 @@ impl DockerServiceManager {
 
         match self
             .port_manager
-            .smart_check_compose_port_conflicts(&compose_file,&env_file)
+            .smart_check_compose_port_conflicts(&compose_file, &env_file)
             .await
         {
             Ok(report) => {

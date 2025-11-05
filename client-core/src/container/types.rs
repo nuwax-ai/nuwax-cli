@@ -1,6 +1,8 @@
 use crate::constants::docker::{get_compose_file_path, get_env_file_path};
+use crate::container::environment::{RuntimeEnvironment, detect_runtime_environment};
 use docker_compose_types;
-use std::{cell::RefCell, path::PathBuf, sync::Arc};
+use std::path::{Path, PathBuf};
+use std::{cell::RefCell, sync::Arc};
 
 /// Docker 服务状态
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +49,20 @@ pub struct DockerManager {
     pub(crate) env_file: PathBuf,
     pub(crate) compose_config: Option<docker_compose_types::Compose>,
     pub(crate) project_name: Option<String>,
+    /// 运行时环境信息（新增）
+    pub(crate) runtime_env: RuntimeEnvironment,
+}
+
+impl DockerManager {
+    /// 获取运行时环境信息
+    pub fn get_runtime_environment(&self) -> &RuntimeEnvironment {
+        &self.runtime_env
+    }
+
+    /// 获取工作目录（compose 文件所在目录）
+    pub fn get_working_directory(&self) -> Option<&Path> {
+        self.compose_file.parent()
+    }
 }
 
 // impl Default for DockerManager {

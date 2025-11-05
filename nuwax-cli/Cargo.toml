@@ -1,6 +1,6 @@
 [package]
 name = "nuwax-cli"
-version = "1.0.58"
+version = "1.0.59"
 edition = "2024"
 description = "Docker 服务管理和升级工具"
 authors = ["soddygo"]
@@ -21,6 +21,8 @@ categories = ["command-line-utilities", "development-tools"]
 [[bin]]
 name = "nuwax-cli"
 path = "src/main.rs"
+
+
 
 [dependencies]
 # 核心库
