@@ -229,7 +229,6 @@ export const OverviewPage: React.FC = () => {
 
     try {
       await invoke('start_container', {
-        app: window.__TAURI__?.app,
         containerName,
       });
 
@@ -256,7 +255,6 @@ export const OverviewPage: React.FC = () => {
 
     try {
       await invoke('stop_container', {
-        app: window.__TAURI__?.app,
         containerName,
       });
 
@@ -283,7 +281,6 @@ export const OverviewPage: React.FC = () => {
 
     try {
       await invoke('restart_container', {
-        app: window.__TAURI__?.app,
         containerName,
       });
 

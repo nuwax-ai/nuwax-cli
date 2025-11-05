@@ -89,7 +89,6 @@ export const ContainersPage: React.FC = () => {
       });
 
       await invoke('stream_container_logs', {
-        app: window.__TAURI__?.app,
         containerName,
         follow: true,
       });
@@ -124,7 +123,6 @@ export const ContainersPage: React.FC = () => {
 
     try {
       await invoke('start_container', {
-        app: window.__TAURI__?.app,
         containerName,
       });
 
@@ -152,7 +150,6 @@ export const ContainersPage: React.FC = () => {
 
     try {
       await invoke('stop_container', {
-        app: window.__TAURI__?.app,
         containerName,
       });
 
@@ -180,7 +177,6 @@ export const ContainersPage: React.FC = () => {
 
     try {
       await invoke('restart_container', {
-        app: window.__TAURI__?.app,
         containerName,
       });
 
