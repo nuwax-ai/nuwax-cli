@@ -469,6 +469,33 @@ pub mod timeout {
     pub const SERVICE_VERIFY_WAIT: u64 = 5;
 }
 
+/// SQL 相关常量
+pub mod sql {
+    /// SQL 差异执行默认重试次数
+    pub const DEFAULT_RETRY_COUNT: u8 = 3;
+
+    /// MySQL 容器默认映射端口
+    pub const DEFAULT_MYSQL_CONTAINER_PORT: u16 = 13306;
+
+    /// 临时 SQL 目录名
+    pub const TEMP_SQL_DIR: &str = "temp_sql";
+
+    /// 旧版本 SQL 文件名
+    pub const OLD_SQL_FILE: &str = "init_mysql_old.sql";
+
+    /// 新版本 SQL 文件名
+    pub const NEW_SQL_FILE: &str = "init_mysql_new.sql";
+
+    /// 差异 SQL 文件名
+    pub const DIFF_SQL_FILE: &str = "upgrade_diff.sql";
+
+    /// 当前 SQL 文件路径
+    pub const CURRENT_SQL_PATH: &str = "docker/config/init_mysql.sql";
+
+    /// 目录清理最大重试次数
+    pub const MAX_CLEANUP_ATTEMPTS: usize = 3;
+}
+
 /// 网络相关常量
 pub mod network {
     /// 本地回环地址
