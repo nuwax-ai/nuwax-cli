@@ -227,6 +227,113 @@ pub async fn stop_docker_services(app: &CliApp, config_file: Option<PathBuf>, pr
     Ok(())
 }
 
+/// 停止 Docker 服务并等待确认（统一的公共方法）
+/// 
+/// 这是一个完整的停止流程，包括：
+/// 1. 检查服务是否在运行
+/// 2. 执行停止命令
+/// 3. 等待服务完全停止
+/// 
+/// # 参数
+/// - `app`: 应用实例
+/// - `config_file`: 可选的 docker-compose 配置文件路径
+/// - `project_name`: 可选的项目名称
+/// 
+/// # 返回
+/// - `Ok(true)`: 服务已停止（或本来就没运行）
+/// - `Ok(false)`: 等待停止超时，但可以继续
+/// - `Err`: 发生错误
+pub async fn stop_docker_services_and_wait(
+    app: &CliApp,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+) -> Result<bool> {
+    use crate::docker_service::health_check::HealthChecker;
+    use client_core::constants::timeout;
+    use tokio::time::{sleep, Duration, Instant};
+
+    info!("🔍 检查Docker服务状态...");
+
+    // 1. 创建 DockerManager（用于 HealthChecker）
+    let docker_manager = if let Some(ref compose_path) = config_file {
+        let env_path = client_core::constants::docker::get_env_file_path();
+        std::sync::Arc::new(
+            client_core::container::DockerManager::with_project(
+                compose_path,
+                &env_path,
+                project_name.clone(),
+            )?
+        )
+    } else if let Some(ref proj_name) = project_name {
+        std::sync::Arc::new(
+            client_core::container::DockerManager::with_project(
+                client_core::constants::docker::get_compose_file_path(),
+                client_core::constants::docker::get_env_file_path(),
+                Some(proj_name.clone()),
+            )?
+        )
+    } else {
+        app.docker_manager.clone()
+    };
+
+    // 2. 检查服务是否在运行
+    let health_checker = HealthChecker::new(docker_manager);
+    let report = health_checker.health_check().await?;
+    let running_count = report.get_running_count();
+
+    if running_count == 0 {
+        info!("ℹ️ Docker服务未运行，无需停止");
+        return Ok(true);
+    }
+
+    info!("🔍 发现 {} 个运行中的服务", running_count);
+
+    // 3. 执行停止命令
+    info!("🛑 停止Docker服务...");
+    stop_docker_services(app, config_file.clone(), project_name.clone()).await?;
+
+    // 4. 等待服务完全停止（使用 HealthChecker 精确检查）
+    info!("⏳ 等待Docker服务完全停止...");
+    
+    let start_time = Instant::now();
+    let timeout_duration = Duration::from_secs(timeout::SERVICE_STOP_TIMEOUT);
+    let check_interval = Duration::from_secs(timeout::SERVICE_CHECK_INTERVAL);
+    
+    loop {
+        // 每次循环都重新检查服务状态
+        let report = health_checker.health_check().await?;
+        let running_count = report.get_running_count();
+        
+        if running_count == 0 {
+            info!("✅ Docker服务已成功停止");
+            return Ok(true);
+        }
+        
+        // 检查是否超时
+        if start_time.elapsed() >= timeout_duration {
+            warn!(
+                timeout_seconds = timeout::SERVICE_STOP_TIMEOUT,
+                running_count = running_count,
+                "⚠️ 等待服务停止超时，还有 {} 个服务在运行，但可以继续",
+                running_count
+            );
+            
+            // 显示哪些服务还在运行
+            info!("📋 仍在运行的服务:");
+            for container in &report.containers {
+                if container.status.is_healthy() {
+                    info!("  • {} ({})", container.name, container.image);
+                }
+            }
+            
+            return Ok(false);
+        }
+        
+        info!("⏳ 还有 {} 个服务在运行，继续等待...", running_count);
+        sleep(check_interval).await;
+    }
+}
+
 /// 重启 Docker 服务
 pub async fn restart_docker_services(app: &CliApp, config_file: Option<PathBuf>, project_name: Option<String>) -> Result<()> {
     info!("🔄 重启 Docker 服务...");

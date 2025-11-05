@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::app::CliApp;
 use crate::cli::AutoBackupCommand;
@@ -49,37 +49,38 @@ pub async fn handle_auto_backup(app: &mut CliApp, command: &AutoBackupCommand) -
 }
 
 /// 执行自动备份流程：停止服务 -> 备份 -> 重启服务
+/// 
+/// 使用 app.config 中配置的 docker-compose 文件和项目名称
 pub async fn run_auto_backup(app: &mut CliApp) -> Result<()> {
     info!("开始自动备份流程");
 
     let backup_start_time = chrono::Utc::now();
     let mut backup_success = false;
 
-    // 1. 检查Docker服务状态
-    debug!("检查Docker服务状态");
-    let service_running = check_docker_service_status(app).await?;
-
+    // 1. 检查服务状态并停止（使用统一的公共方法）
+    // 记录服务是否原本在运行，用于后续判断是否需要重启
+    // 从 app.config 中获取配置
+    let compose_file = Some(PathBuf::from(&app.config.docker.compose_file));
+    let project_name: Option<String> = None; // 使用 docker-compose 文件中定义的项目名
+    
+    let service_running = {
+        let health_checker = HealthChecker::new(app.docker_manager.clone());
+        let report = health_checker.health_check().await?;
+        report.get_running_count() > 0
+    };
+    
     if service_running {
-        // 2. 停止Docker服务
-        info!("停止Docker服务以进行备份");
-        docker_service::stop_docker_services(app, None, None).await?;
-
-        // 等待服务完全停止
-        info!("等待Docker服务完全停止");
-        let compose_path = client_core::constants::docker::get_compose_file_path();
-        if !docker_utils::wait_for_compose_services_stopped(
-            &compose_path,
-            timeout::SERVICE_STOP_TIMEOUT,
+        docker_service::stop_docker_services_and_wait(
+            app,
+            compose_file.clone(),
+            project_name.clone(),
         )
-        .await?
-        {
-            warn!("等待服务停止超时，但继续进行备份");
-        }
+        .await?;
     } else {
         info!("Docker服务未运行，直接进行备份");
     }
 
-    // 3. 执行备份
+    // 2. 执行备份
     info!("开始执行备份操作");
     let mut backup_error_message: String = String::new();
     match backup::run_backup(app).await {
@@ -102,11 +103,11 @@ pub async fn run_auto_backup(app: &mut CliApp) -> Result<()> {
     if service_running {
         // 4. 重新启动Docker服务
         info!("重新启动Docker服务");
-        docker_service::start_docker_services(app, None, None).await?;
+        docker_service::start_docker_services(app, compose_file.clone(), project_name.clone()).await?;
 
         // 等待服务启动完成
         info!("等待Docker服务完全启动");
-        let compose_path = client_core::constants::docker::get_compose_file_path();
+        let compose_path = compose_file.unwrap_or_else(|| PathBuf::from(&app.config.docker.compose_file));
         if docker_utils::wait_for_compose_services_started(
             &compose_path,
             timeout::SERVICE_START_TIMEOUT,
@@ -154,6 +155,8 @@ pub async fn run_auto_backup(app: &mut CliApp) -> Result<()> {
 pub async fn run_auto_backup_with_upgrade_strategy(
     app: &mut CliApp,
     upgrade_strategy: UpgradeStrategy,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
 ) -> Result<()> {
     info!("开始自动备份流程");
 
@@ -163,33 +166,29 @@ pub async fn run_auto_backup_with_upgrade_strategy(
     let backup_start_time = chrono::Utc::now();
     let mut backup_success = false;
 
-    // 1. 检查Docker服务状态
-    debug!("检查Docker服务状态");
-    let running_flag =
-        backup::check_docker_service_running(app.config.clone(), app.docker_manager.clone())
-            .await?;
-
+    // 1. 检查服务状态并停止（使用统一的公共方法）
+    // 记录服务是否原本在运行，用于后续判断是否需要重启
+    // 使用传入的参数，如果没有则从 app.config 中获取
+    let compose_file = config_file.or_else(|| Some(PathBuf::from(&app.config.docker.compose_file)));
+    
+    let running_flag = {
+        let health_checker = HealthChecker::new(app.docker_manager.clone());
+        let report = health_checker.health_check().await?;
+        report.get_running_count() > 0
+    };
+    
     if running_flag {
-        // 2. 停止Docker服务
-        info!("停止Docker服务以进行备份");
-        docker_service::stop_docker_services(app, None, None).await?;
-
-        // 等待服务完全停止
-        info!("等待Docker服务完全停止");
-        let compose_path = client_core::constants::docker::get_compose_file_path();
-        if !docker_utils::wait_for_compose_services_stopped(
-            &compose_path,
-            timeout::SERVICE_STOP_TIMEOUT,
+        docker_service::stop_docker_services_and_wait(
+            app,
+            compose_file.clone(),
+            project_name.clone(),
         )
-        .await?
-        {
-            warn!("等待服务停止超时，但继续进行备份");
-        }
+        .await?;
     } else {
         info!("Docker服务未运行，直接进行备份");
     }
 
-    // 3. 执行备份
+    // 2. 执行备份
     info!("开始执行备份操作");
     let mut backup_error_message: String = String::new();
 
@@ -213,11 +212,11 @@ pub async fn run_auto_backup_with_upgrade_strategy(
     if running_flag {
         // 4. 重新启动Docker服务
         info!("重新启动Docker服务");
-        docker_service::start_docker_services(app, None, None).await?;
+        docker_service::start_docker_services(app, compose_file.clone(), project_name.clone()).await?;
 
         // 等待服务启动完成
         info!("等待Docker服务完全启动");
-        let compose_path = client_core::constants::docker::get_compose_file_path();
+        let compose_path = compose_file.clone().unwrap_or_else(|| PathBuf::from(&app.config.docker.compose_file));
         if docker_utils::wait_for_compose_services_started(
             &compose_path,
             timeout::SERVICE_START_TIMEOUT,
@@ -413,18 +412,21 @@ pub async fn update_last_backup_time(
     Ok(())
 }
 
-/// 检查Docker服务状态
+/// 检查Docker服务状态（是否有服务在运行）
+/// 
+/// 返回 true 表示有服务在运行，false 表示没有服务在运行
 async fn check_docker_service_status(app: &mut CliApp) -> Result<bool> {
     let health_checker = HealthChecker::new(app.docker_manager.clone());
     let report = health_checker.health_check().await?;
 
-    // 检查是否所有服务都已就绪
-    if report.is_all_healthy() {
-        info!("🎉 所有服务已成功启动! ");
-        return Ok(true);
+    // 检查是否有运行中的容器（而不是检查是否所有服务都健康）
+    let running_count = report.get_running_count();
+    
+    if running_count > 0 {
+        info!("🔍 发现 {} 个运行中的服务", running_count);
+        Ok(true)
     } else {
-        let failed_services = report.failed_containers();
-        info!("🚫 以下服务启动失败: {:?}", failed_services);
-        return Ok(false);
+        info!("🔍 没有发现运行中的服务");
+        Ok(false)
     }
 }

@@ -2,7 +2,7 @@ use crate::app::CliApp;
 use crate::cli::AutoUpgradeDeployCommand;
 use crate::commands::{backup, docker_service, update};
 use crate::docker_service::health_check::HealthChecker;
-use crate::{DockerService, docker_utils};
+use crate::docker_utils;
 use anyhow::{Context, Result};
 use client_core::constants::{sql, timeout};
 use client_core::container::DockerManager;
@@ -154,41 +154,14 @@ pub async fn run_auto_upgrade_deploy(
     } else {
         info!("🔄 检测到升级部署，需要先停止服务");
 
-        // 3. 🛑 先检查并停止服务
-        info!("🔍 检查Docker服务状态...");
+        // 3. 🛑 停止服务并等待（使用统一的公共方法）
+        docker_service::stop_docker_services_and_wait(
+            app,
+            config_file.clone(),
+            project_name.clone(),
+        )
+        .await?;
 
-        // 创建 DockerService 用于健康检查
-        let docker_manager = create_docker_manager(&config_file, &project_name)?;
-        let docker_service = DockerService::new(app.config.clone(), docker_manager)?;
-        let health_report = docker_service.health_check().await?;
-
-        if health_report.get_running_count() > 0 {
-            info!(
-                running_count = health_report.get_running_count(),
-                "Docker服务正在运行，准备停止服务"
-            );
-            // 等待服务完全停止
-            info!("⏳ 等待Docker服务完全停止...");
-            let compose_path = get_compose_file_path(&config_file);
-            if !docker_utils::wait_for_compose_services_stopped(
-                &compose_path,
-                timeout::SERVICE_STOP_TIMEOUT,
-            )
-            .await?
-            {
-                warn!(
-                    timeout_seconds = timeout::SERVICE_STOP_TIMEOUT,
-                    "⚠️ 等待服务停止超时，但继续进行升级"
-                );
-            } else {
-                info!("✅ Docker服务已成功停止");
-            }
-        } else {
-            info!("ℹ️ Docker服务未运行，跳过停止步骤");
-        }
-
-        // 4. 📄 备份当前版本的SQL文件（用于后续差异比较）
-        backup_sql_file_before_upgrade().await?;
     }
 
     // 5. 🔍 提前检查并创建挂载目录（重要：Windows Podman Desktop 需要）
@@ -500,7 +473,9 @@ pub async fn show_status(app: &mut CliApp) -> Result<()> {
     Ok(())
 }
 
-/// 检查Docker服务状态
+/// 检查Docker服务状态（是否有服务在运行）
+/// 
+/// 返回 true 表示有服务在运行，false 表示没有服务在运行
 async fn check_docker_service_status(
     _app: &mut CliApp,
     config_file: &Option<PathBuf>,
@@ -519,7 +494,16 @@ async fn check_docker_service_status(
     let health_checker = HealthChecker::new(docker_manager);
     let report = health_checker.health_check().await?;
     
-    Ok(report.is_all_healthy())
+    // 检查是否有运行中的容器（而不是检查是否所有服务都健康）
+    let running_count = report.get_running_count();
+    
+    if running_count > 0 {
+        info!("🔍 发现 {} 个运行中的服务", running_count);
+        Ok(true)
+    } else {
+        info!("🔍 没有发现运行中的服务");
+        Ok(false)
+    }
 }
 
 
@@ -801,6 +785,12 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     let temp_sql_dir = Path::new(sql::TEMP_SQL_DIR);
     let diff_sql_path = temp_sql_dir.join(sql::DIFF_SQL_FILE);
     let new_sql_path = temp_sql_dir.join(sql::NEW_SQL_FILE);
+
+      // 创建临时SQL目录
+    if !temp_sql_dir.exists() {
+        fs::create_dir_all(temp_sql_dir)?;
+        info!("📁 创建临时SQL目录: {}", temp_sql_dir.display());
+    }
 
     // 复制新版本的SQL文件
     let current_sql_path = Path::new("docker/config/init_mysql.sql");

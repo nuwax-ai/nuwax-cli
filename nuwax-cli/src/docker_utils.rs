@@ -28,11 +28,40 @@ impl ServiceFilter {
                 if keywords.is_empty() {
                     return true;
                 }
+                
+                let container_name_lower = container.names.to_lowercase();
+                
                 keywords.iter().any(|keyword| {
-                    container
-                        .names
-                        .to_lowercase()
-                        .contains(&keyword.to_lowercase())
+                    let keyword_lower = keyword.to_lowercase();
+                    
+                    // 使用更精确的匹配规则，避免误匹配其他项目的容器
+                    // Docker Compose 容器命名规则: {项目名}_{服务名}_{实例号} 或 {项目名}-{服务名}-{实例号}
+                    
+                    // 检查是否是 docker-compose 标准格式的完整匹配
+                    let separators = vec!["_", "-"];
+                    
+                    for separator in separators {
+                        // 格式1: 项目名_服务名_数字 (中间匹配)
+                        let pattern1 = format!("{separator}{keyword_lower}{separator}");
+                        if container_name_lower.contains(&pattern1) {
+                            return true;
+                        }
+                        
+                        // 格式2: 项目名_服务名 (结尾匹配，没有实例号)
+                        let pattern2 = format!("{separator}{keyword_lower}");
+                        if container_name_lower.ends_with(&pattern2) {
+                            return true;
+                        }
+                        
+                        // 格式3: 服务名_数字 (开头匹配，没有项目名)
+                        let pattern3 = format!("{keyword_lower}{separator}");
+                        if container_name_lower.starts_with(&pattern3) {
+                            return true;
+                        }
+                    }
+                    
+                    // 如果所有严格匹配都失败，只有在完全相同的情况下才匹配
+                    container_name_lower == keyword_lower
                 })
             }
             ServiceFilter::All => true,
@@ -220,6 +249,11 @@ pub async fn create_compose_filter(compose_file_path: &Path) -> Result<ServiceFi
 }
 
 /// 便捷函数：等待compose服务停止
+/// 
+/// ⚠️ 注意：此函数使用简单的名称匹配，可能会误匹配其他项目的容器。
+/// 推荐使用 HealthChecker 来获得更准确的状态判断。
+/// 
+/// 此函数保留用于向后兼容，但建议迁移到 HealthChecker。
 pub async fn wait_for_compose_services_stopped(
     compose_file_path: &Path,
     timeout_secs: u64,
