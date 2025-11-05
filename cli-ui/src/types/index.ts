@@ -84,4 +84,50 @@ export interface ParameterInputModalProps {
   commandConfig: CommandConfig | null;
   onConfirm: (parameters: ParameterInputResult) => void;
   onCancel: () => void;
+}
+
+// 容器信息类型
+export interface ContainerInfo {
+  name: string;
+  status: 'running' | 'stopped' | 'starting' | 'stopping' | 'restarting' | 'paused' | 'exited' | 'dead' | 'unknown';
+  image: string;
+  ports: string[];
+  id?: string;
+  created?: string;
+  uptime?: string;
+}
+
+// 备份记录类型
+export interface BackupRecord {
+  id: number;
+  backup_type: 'Manual' | 'PreUpgrade';
+  created_at: string;
+  service_version: string;
+  file_path: string;
+  file_size?: number;
+  file_exists: boolean;
+}
+
+// 工作目录验证结果
+export interface DirectoryValidation {
+  valid: boolean;
+  message: string;
+  has_config: boolean;
+  has_docker_compose: boolean;
+}
+
+// 页面路由类型
+export interface PageRoute {
+  path: string;
+  name: string;
+  icon: React.ComponentType<{ className?: string }>;
+  component: React.ComponentType;
+}
+
+// 容器状态统计
+export interface ContainerStats {
+  total: number;
+  running: number;
+  stopped: number;
+  other: number;
 } 

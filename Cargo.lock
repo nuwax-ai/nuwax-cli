@@ -1091,6 +1091,8 @@ checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 name = "cli-ui"
 version = "0.1.1"
 dependencies = [
+ "anyhow",
+ "client-core",
  "serde",
  "serde_json",
  "tauri",

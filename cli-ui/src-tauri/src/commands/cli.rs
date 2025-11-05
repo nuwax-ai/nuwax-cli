@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::process::{Command as StdCommand, Stdio};
 use tauri::{AppHandle, Emitter, command};
 use tauri_plugin_shell::{ShellExt, process::CommandEvent};
+use std::path::PathBuf;
 
 /// 调试环境变量和命令可用性
 #[tauri::command]
@@ -156,6 +157,26 @@ pub struct ProcessCheckResult {
     pub processes_killed: Vec<u32>,
     pub success: bool,
     pub message: String,
+}
+
+/// 容器信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerInfo {
+    pub name: String,
+    pub status: String,
+    pub image: String,
+    pub ports: Vec<String>,
+}
+
+/// 备份记录
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupRecordInfo {
+    pub id: i64,
+    pub backup_type: String,
+    pub created_at: String,
+    pub service_version: String,
+    pub file_path: String,
+    pub status: String,
 }
 
 /// 获取用户的完整环境变量（包括shell配置）
@@ -624,4 +645,306 @@ pub async fn check_database_lock(_app: AppHandle, working_dir: String) -> Result
             }
         }
     }
+}
+
+/// 获取容器状态
+#[command]
+pub async fn get_container_status(
+    working_directory: String,
+) -> Result<Vec<ContainerInfo>, String> {
+    use client_core::container::DockerManager;
+    
+    // 构建 docker-compose.yml 和 .env 文件路径
+    let working_dir = PathBuf::from(&working_directory);
+    let compose_file = working_dir.join("docker-compose.yml");
+    let env_file = working_dir.join(".env");
+    
+    // 创建 DockerManager 实例
+    let docker_manager = DockerManager::with_project(compose_file, env_file, None)
+        .map_err(|e| format!("创建 DockerManager 失败: {e}"))?;
+    
+    // 获取服务状态
+    let services = docker_manager
+        .get_services_status()
+        .await
+        .map_err(|e| format!("获取容器状态失败: {e}"))?;
+    
+    // 转换为 ContainerInfo 格式
+    let containers: Vec<ContainerInfo> = services
+        .into_iter()
+        .map(|service| ContainerInfo {
+            name: service.name,
+            status: service.status.display_name().to_string(),
+            image: service.image,
+            ports: service.ports,
+        })
+        .collect();
+    
+    Ok(containers)
+}
+
+/// 流式传输容器日志
+#[command]
+pub async fn stream_container_logs(
+    app: AppHandle,
+    container_name: String,
+    follow: bool,
+) -> Result<(), String> {
+    let shell = app.shell();
+    
+    // 构建 docker logs 命令
+    let mut args = vec!["logs".to_string()];
+    if follow {
+        args.push("-f".to_string());
+    }
+    args.push("--tail".to_string());
+    args.push("100".to_string()); // 默认显示最后100行
+    args.push(container_name.clone());
+    
+    let mut cmd = shell.command("docker");
+    cmd = cmd.args(&args);
+    
+    // 设置增强的环境变量
+    let enhanced_env = get_user_environment();
+    for (key, value) in enhanced_env {
+        cmd = cmd.env(key, value);
+    }
+    
+    let (mut rx, _child) = cmd.spawn().map_err(|e| format!("执行 docker logs 命令失败: {e}"))?;
+    
+    // 在后台任务中处理日志流
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(data) => {
+                    let output = String::from_utf8_lossy(&data);
+                    // 发送容器日志事件
+                    let _ = app.emit("container-log", &output);
+                }
+                CommandEvent::Stderr(data) => {
+                    let output = String::from_utf8_lossy(&data);
+                    // stderr 也作为日志输出
+                    let _ = app.emit("container-log", &output);
+                }
+                CommandEvent::Terminated(_) => {
+                    // 日志流结束
+                    let _ = app.emit("container-log-complete", &container_name);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    
+    Ok(())
+}
+
+/// 停止容器日志流
+#[command]
+pub async fn stop_container_logs(
+    container_name: String,
+) -> Result<(), String> {
+    // 查找并终止 docker logs 进程
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let output = StdCommand::new("pkill")
+            .args(["-f", &format!("docker logs.*{container_name}")])
+            .output();
+        
+        match output {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("停止容器日志流失败: {e}")),
+        }
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        // Windows 上使用 taskkill
+        let output = StdCommand::new("taskkill")
+            .args(&["/F", "/IM", "docker.exe"])
+            .output();
+        
+        match output {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("停止容器日志流失败: {e}")),
+        }
+    }
+}
+
+/// 启动容器
+#[command]
+pub async fn start_container(
+    app: AppHandle,
+    container_name: String,
+) -> Result<(), String> {
+    let shell = app.shell();
+    
+    let mut cmd = shell.command("docker");
+    cmd = cmd.args(&["start", &container_name]);
+    
+    // 设置增强的环境变量
+    let enhanced_env = get_user_environment();
+    for (key, value) in enhanced_env {
+        cmd = cmd.env(key, value);
+    }
+    
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("执行 docker start 命令失败: {e}"))?;
+    
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = app.emit("cli-output", format!("✅ 容器 {container_name} 启动成功\n{stdout}"));
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let error_msg = format!("启动容器 {container_name} 失败: {stderr}");
+        let _ = app.emit("cli-error", &error_msg);
+        Err(error_msg)
+    }
+}
+
+/// 停止容器
+#[command]
+pub async fn stop_container(
+    app: AppHandle,
+    container_name: String,
+) -> Result<(), String> {
+    let shell = app.shell();
+    
+    let mut cmd = shell.command("docker");
+    cmd = cmd.args(&["stop", &container_name]);
+    
+    // 设置增强的环境变量
+    let enhanced_env = get_user_environment();
+    for (key, value) in enhanced_env {
+        cmd = cmd.env(key, value);
+    }
+    
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("执行 docker stop 命令失败: {e}"))?;
+    
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = app.emit("cli-output", format!("✅ 容器 {container_name} 停止成功\n{stdout}"));
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let error_msg = format!("停止容器 {container_name} 失败: {stderr}");
+        let _ = app.emit("cli-error", &error_msg);
+        Err(error_msg)
+    }
+}
+
+/// 重启容器
+#[command]
+pub async fn restart_container(
+    app: AppHandle,
+    container_name: String,
+) -> Result<(), String> {
+    let shell = app.shell();
+    
+    let mut cmd = shell.command("docker");
+    cmd = cmd.args(&["restart", &container_name]);
+    
+    // 设置增强的环境变量
+    let enhanced_env = get_user_environment();
+    for (key, value) in enhanced_env {
+        cmd = cmd.env(key, value);
+    }
+    
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("执行 docker restart 命令失败: {e}"))?;
+    
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = app.emit("cli-output", format!("✅ 容器 {container_name} 重启成功\n{stdout}"));
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let error_msg = format!("重启容器 {container_name} 失败: {stderr}");
+        let _ = app.emit("cli-error", &error_msg);
+        Err(error_msg)
+    }
+}
+
+/// 获取备份列表
+#[command]
+pub async fn list_backups(
+    working_directory: String,
+) -> Result<Vec<BackupRecordInfo>, String> {
+    use client_core::{
+        backup::BackupManager,
+        config::AppConfig,
+        container::DockerManager,
+        database::Database,
+    };
+    use std::sync::Arc;
+    
+    // 构建配置文件路径
+    let working_dir = PathBuf::from(&working_directory);
+    let config_path = working_dir.join("config.toml");
+    
+    // 加载配置
+    let config = if config_path.exists() {
+        Arc::new(AppConfig::load_from_file(&config_path)
+            .map_err(|e| format!("加载配置文件失败: {e}"))?)
+    } else {
+        return Err("配置文件不存在".to_string());
+    };
+    
+    // 初始化数据库
+    let db_path = working_dir.join("data").join("duck_client.db");
+    let database = Arc::new(Database::connect(&db_path)
+        .await
+        .map_err(|e| format!("连接数据库失败: {e}"))?);
+    
+    // 创建 DockerManager
+    let compose_file = working_dir.join("docker-compose.yml");
+    let env_file = working_dir.join(".env");
+    let docker_manager = Arc::new(DockerManager::with_project(compose_file, env_file, None)
+        .map_err(|e| format!("创建 DockerManager 失败: {e}"))?);
+    
+    // 创建 BackupManager
+    let backup_dir = PathBuf::from(&config.backup.storage_dir);
+    let backup_manager = BackupManager::new(backup_dir, database, docker_manager)
+        .map_err(|e| format!("创建 BackupManager 失败: {e}"))?;
+    
+    // 获取备份列表
+    let backups = backup_manager
+        .list_backups()
+        .await
+        .map_err(|e| format!("获取备份列表失败: {e}"))?;
+    
+    // 转换为 BackupRecordInfo 格式
+    let backup_infos: Vec<BackupRecordInfo> = backups
+        .into_iter()
+        .map(|backup| {
+            let backup_type_str = match backup.backup_type {
+                client_core::database::BackupType::Manual => "手动备份",
+                client_core::database::BackupType::PreUpgrade => "升级前备份",
+            };
+            
+            let status_str = match backup.status {
+                client_core::database::BackupStatus::Completed => "已完成",
+                client_core::database::BackupStatus::Failed => "失败",
+            };
+            
+            BackupRecordInfo {
+                id: backup.id,
+                backup_type: backup_type_str.to_string(),
+                created_at: backup.created_at.to_rfc3339(),
+                service_version: backup.service_version,
+                file_path: backup.file_path,
+                status: status_str.to_string(),
+            }
+        })
+        .collect();
+    
+    Ok(backup_infos)
 }

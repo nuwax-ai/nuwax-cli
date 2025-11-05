@@ -28,7 +28,14 @@ pub fn run() {
             commands::check_cli_available,
             commands::check_and_cleanup_duck_processes,
             commands::check_database_lock,
-            commands::debug_environment
+            commands::debug_environment,
+            commands::get_container_status,
+            commands::stream_container_logs,
+            commands::stop_container_logs,
+            commands::start_container,
+            commands::stop_container,
+            commands::restart_container,
+            commands::list_backups
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
