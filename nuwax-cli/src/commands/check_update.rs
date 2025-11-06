@@ -155,19 +155,6 @@ impl UpdateSourceManager {
         }
     }
 
-    /// 创建只使用版本检查服务器的管理器
-    pub fn version_server_only() -> Self {
-        Self {
-            sources: vec![UpdateSource::VersionServer],
-        }
-    }
-
-    /// 创建只使用 GitHub 的管理器
-    pub fn github_only() -> Self {
-        Self {
-            sources: vec![UpdateSource::GitHub],
-        }
-    }
 
     /// 获取版本信息，按优先级尝试各个源
     pub async fn fetch_latest_version(&self) -> Result<GitHubRelease> {
@@ -603,8 +590,8 @@ pub async fn install_release(url: &str, version: &str) -> Result<()> {
         warn!("清理临时文件失败: {}", e);
     }
 
-    info!("🎉 安装完成！Nuwax Cli  已更新到版本 {}", version);
-    info!("💡 请重新启动终端或运行 'nuwax-cli --version' 验证安装");
+    info!("🎉 安装完成！Nuwax Cli  已更新到版本 {}, 可运行'nuwax-cli --version' 验证安装版本", version);
+    info!("💡 请再次运行命令 'nuwax-cli auto-upgrade-deploy run' 来完成最终安装部署");
 
     Ok(())
 }
