@@ -101,3 +101,106 @@ pub struct TableDefinition {
     pub engine: Option<String>,
     pub charset: Option<String>,
 }
+
+/// SQL差异结果
+#[derive(Debug, Clone)]
+pub struct SchemaDiffResult {
+    /// 差异SQL内容
+    pub diff_sql: String,
+    /// 差异描述
+    pub description: String,
+    /// 在线架构原始SQL（仅Live Diff时有值）
+    pub live_sql: Option<String>,
+    /// 是否有可执行的SQL语句
+    pub has_executable_sql: bool,
+    /// 是否包含警告（删除操作）
+    pub has_warnings: bool,
+}
+
+/// MySQL差异统计信息
+#[derive(Debug, Clone, Default)]
+pub struct DiffStats {
+    /// 新增的表数量
+    pub tables_added: usize,
+    /// 删除的表数量（警告）
+    pub tables_dropped: usize,
+    /// 修改的表数量
+    pub tables_modified: usize,
+    /// 新增的列数量
+    pub columns_added: usize,
+    /// 删除的列数量（警告）
+    pub columns_dropped: usize,
+    /// 修改的列数量
+    pub columns_modified: usize,
+    /// 新增的索引数量
+    pub indexes_added: usize,
+    /// 删除的索引数量（警告）
+    pub indexes_dropped: usize,
+    /// 修改的索引数量
+    pub indexes_modified: usize,
+}
+
+impl DiffStats {
+    /// 是否有任何变更
+    pub fn has_changes(&self) -> bool {
+        self.tables_added > 0
+            || self.tables_dropped > 0
+            || self.tables_modified > 0
+            || self.columns_added > 0
+            || self.columns_dropped > 0
+            || self.columns_modified > 0
+            || self.indexes_added > 0
+            || self.indexes_dropped > 0
+            || self.indexes_modified > 0
+    }
+
+    /// 是否有删除操作（危险操作）
+    pub fn has_dangerous_operations(&self) -> bool {
+        self.tables_dropped > 0 || self.columns_dropped > 0 || self.indexes_dropped > 0
+    }
+
+    /// 是否有可执行的操作（非删除操作）
+    pub fn has_executable_operations(&self) -> bool {
+        self.tables_added > 0
+            || self.columns_added > 0
+            || self.columns_modified > 0
+            || self.indexes_added > 0
+            || self.indexes_modified > 0
+    }
+
+    /// 生成变更摘要
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+
+        if self.tables_added > 0 {
+            parts.push(format!("新增表({})", self.tables_added));
+        }
+        if self.tables_dropped > 0 {
+            parts.push(format!("删除表({}·警告)", self.tables_dropped));
+        }
+        if self.columns_added > 0 {
+            parts.push(format!("新增列({})", self.columns_added));
+        }
+        if self.columns_dropped > 0 {
+            parts.push(format!("删除列({}·警告)", self.columns_dropped));
+        }
+        if self.columns_modified > 0 {
+            parts.push(format!("修改列({})", self.columns_modified));
+        }
+        if self.indexes_added > 0 {
+            parts.push(format!("新增索引({})", self.indexes_added));
+        }
+        if self.indexes_dropped > 0 {
+            parts.push(format!("删除索引({}·警告)", self.indexes_dropped));
+        }
+        if self.indexes_modified > 0 {
+            parts.push(format!("修改索引({})", self.indexes_modified));
+        }
+
+        if parts.is_empty() {
+            "无变更".to_string()
+        } else {
+            parts.join("、")
+        }
+    }
+}

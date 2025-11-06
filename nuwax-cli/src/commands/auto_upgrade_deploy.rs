@@ -780,6 +780,39 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 归档差异SQL文件
+/// 
+/// # 参数
+/// - `diff_sql_path`: 差异SQL文件路径
+/// - `status`: 状态标识 ("executed", "failed", "no_exec")
+async fn archive_diff_sql_file(diff_sql_path: &Path, status: &str) -> Result<()> {
+    if !diff_sql_path.is_file() {
+        return Ok(());
+    }
+
+    let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let new_name = format!("diff_sql_{}_{}.sql", status, timestamp);
+    let new_path = parent.join(new_name);
+
+    match fs::rename(diff_sql_path, &new_path) {
+        Ok(_) => {
+            let status_desc = match status {
+                "executed" => "已执行",
+                "failed" => "执行失败",
+                "no_exec" => "未执行",
+                _ => "已归档",
+            };
+            info!("📝 {} 差异SQL文件: {}", status_desc, new_path.display());
+            Ok(())
+        }
+        Err(e) => {
+            warn!("⚠️ 归档差异SQL文件失败: {}", e);
+            Ok(()) // 归档失败不影响主流程
+        }
+    }
+}
+
 /// 连接MySQL容器并执行差异SQL（Live Diff）
 async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     let temp_sql_dir = Path::new(sql::TEMP_SQL_DIR);
@@ -845,65 +878,83 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     // 基于在线架构与模板生成差异SQL
     info!("📊 正在基于在线架构生成SQL差异...");
-    let (diff_sql, description, live_sql) =
-        generate_live_schema_diff(&executor, &new_sql_content, "目标版本")
-            .await
-            .context("生成在线差异SQL失败")?;
+    let diff_result = generate_live_schema_diff(&executor, &new_sql_content, "目标版本")
+        .await
+        .context("生成在线差异SQL失败")?;
+    
     info!(
-        description = %description,
+        description = %diff_result.description,
+        has_executable_sql = diff_result.has_executable_sql,
+        has_warnings = diff_result.has_warnings,
         "📋 差异生成完成"
     );
 
     // 保存从 MySQL 读取的原始 CREATE TABLE 语句到 init_mysql_old.sql
-    let old_sql_path = temp_sql_dir.join(sql::OLD_SQL_FILE);
-    fs::write(&old_sql_path, &live_sql)?;
-    info!("📄 已保存在线架构SQL文件: {}", old_sql_path.display());
+    if let Some(live_sql) = &diff_result.live_sql {
+        let old_sql_path = temp_sql_dir.join(sql::OLD_SQL_FILE);
+        fs::write(&old_sql_path, live_sql)?;
+        info!("📄 已保存在线架构SQL文件: {}", old_sql_path.display());
+    }
 
-    // 检查是否有实际的SQL语句需要执行
-    let meaningful_lines: Vec<&str> = diff_sql
+    // 保存差异SQL文件（无论是否有可执行SQL，都保存以便查看）
+    fs::write(&diff_sql_path, &diff_result.diff_sql)
+        .context("保存差异SQL文件失败")?;
+    info!("📄 差异SQL文件已保存: {}", diff_sql_path.display());
+
+    // 判断差异类型并输出相应提示
+    if !diff_result.has_executable_sql {
+        // 没有可执行SQL（可能有警告，也可能完全无差异）
+        if diff_result.has_warnings {
+            // 情况1：只有删除操作警告，没有可执行的新增/修改SQL
+            info!("⚠️  检测到架构差异：仅包含删除操作（已跳过）");
+            info!("💡 删除操作需要手动执行，请查看差异文件中的说明");
+        } else {
+            // 情况2：完全没有差异（既没有可执行SQL，也没有警告）
+            info!("📄 数据库架构无差异，无需执行升级");
+        }
+        
+        // 统一归档差异SQL文件
+        archive_diff_sql_file(&diff_sql_path, "no_exec").await?;
+        return Ok(());
+    }
+
+    // 情况3：有可执行的SQL语句（可能同时包含警告）
+    // 再次确认是否真的有可执行的SQL语句（排除全是注释的情况）
+    let executable_lines: Vec<&str> = diff_result.diff_sql
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
             !trimmed.is_empty() && !trimmed.starts_with("--") && !trimmed.starts_with("/*")
         })
         .collect();
-
-    if meaningful_lines.is_empty() {
-        info!("📄 差异SQL为空，无需执行数据库升级");
-
-        // 保存并归档空差异文件
-        fs::write(&diff_sql_path, &diff_sql)?;
-        let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let new_name = format!("diff_sql_empty_{timestamp}.sql");
-        let new_path = parent.join(new_name);
-        match fs::rename(&diff_sql_path, &new_path) {
-            Ok(_) => info!("📝 已归档空差异SQL文件: {}", new_path.display()),
-            Err(e) => warn!("⚠️ 归档空差异SQL文件失败: {}", e),
-        }
-
+    
+    if executable_lines.is_empty() {
+        // 虽然 has_executable_sql 为 true，但实际没有可执行的SQL（可能是逻辑错误）
+        warn!("⚠️  检测到差异但没有实际可执行的SQL语句");
+        archive_diff_sql_file(&diff_sql_path, "no_exec").await?;
         return Ok(());
     }
-
+    
     info!(
-        sql_lines = meaningful_lines.len(),
+        sql_lines = executable_lines.len(),
+        has_warnings = diff_result.has_warnings,
         "🔄 开始执行数据库升级"
     );
-
-    // 保存差异SQL文件
-    fs::write(&diff_sql_path, &diff_sql)
-        .context("保存差异SQL文件失败")?;
-    info!(
-        path = %diff_sql_path.display(),
-        "📄 已保存SQL差异文件"
-    );
+    
+    // 如果同时包含警告，提示用户注意（这是混合场景：既有新增/修改，又有删除）
+    if diff_result.has_warnings {
+        warn!("⚠️  注意: 差异中同时包含可执行SQL和删除操作警告");
+        warn!("   ✓ 新增/修改操作将正常执行");
+        warn!("   ✗ 删除操作已跳过，需手动执行");
+        warn!("   📄 详情请查看: {}", diff_sql_path.display());
+    }
     
     info!(
         retry_count = sql::DEFAULT_RETRY_COUNT,
         "🚀 开始执行差异SQL"
     );
     match executor
-        .execute_diff_sql_with_retry(&diff_sql, sql::DEFAULT_RETRY_COUNT)
+        .execute_diff_sql_with_retry(&diff_result.diff_sql, sql::DEFAULT_RETRY_COUNT)
         .await
     {
         Ok(results) => {
@@ -915,30 +966,16 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
                 info!("  {}", result);
             }
             
-            // 重命名差异SQL文件以保留历史记录
-            if diff_sql_path.is_file() {
-                let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
-                let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                let new_name = format!("diff_sql_executed_{timestamp}.sql");
-                let new_path = parent.join(new_name);
-
-                match fs::rename(&diff_sql_path, &new_path) {
-                    Ok(_) => info!(
-                        archived_path = %new_path.display(),
-                        "✅ 已归档执行的差异SQL文件"
-                    ),
-                    Err(e) => warn!(
-                        error = %e,
-                        "⚠️ 归档差异SQL文件失败"
-                    ),
-                }
-            }
+            // 归档已执行的差异SQL文件
+            archive_diff_sql_file(&diff_sql_path, "executed").await?;
         }
         Err(e) => {
             error!(
                 error = %e,
                 "❌ 数据库升级失败"
             );
+            // 归档执行失败的差异SQL文件
+            archive_diff_sql_file(&diff_sql_path, "failed").await?;
             return Err(e);
         }
     }
