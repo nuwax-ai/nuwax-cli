@@ -1052,10 +1052,6 @@ pub async fn check_and_install_nuwax_cli_update_early() -> Result<()> {
         {
             Ok(_) => {
                 info!("✅ nuwax-cli 更新成功！程序将重启以使用新版本");
-                info!(
-                    "🔄 如果更新后出现问题，可以回滚到: {}",
-                    version_info.current_version
-                );
                 std::process::exit(0);
             }
             Err(e) => {
