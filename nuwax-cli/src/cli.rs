@@ -182,8 +182,6 @@ pub enum Commands {
         #[command(flatten)]
         args: UpgradeArgs,
     },
-    /// 手动创建备份
-    Backup,
     /// 列出所有备份
     ListBackups,
     /// 从备份恢复
@@ -199,14 +197,6 @@ pub enum Commands {
         /// 是否回滚数据,默认不会滚数据文件
         #[arg(long, default_value = "false", help = "是否回滚数据文件，默认不回滚")]
         rollback_data: bool,
-    },
-    /// 只从备份恢复 data 目录（保留 app 目录和配置文件）
-    RollbackDataOnly {
-        /// 备份 ID（可选，不提供时将显示交互式选择界面）
-        backup_id: Option<i64>,
-        /// 强制覆盖
-        #[arg(long)]
-        force: bool,
     },
     /// Docker服务相关命令
     #[command(subcommand)]

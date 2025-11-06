@@ -4,7 +4,6 @@ use client_core::{
     config::AppConfig, constants::config, container::DockerManager, database::Database,
     upgrade::UpgradeManager,
 };
-use log::info;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -120,7 +119,6 @@ impl CliApp {
                     .map_err(|e| client_core::error::DuckError::custom(format!("升级失败: {e}")))?;
                 Ok(())
             }
-            Commands::Backup => commands::run_backup(self).await,
             Commands::ListBackups => commands::run_list_backups(self).await,
             Commands::Rollback {
                 backup_id,
@@ -137,9 +135,6 @@ impl CliApp {
                     rollback_data,
                 )
                 .await
-            }
-            Commands::RollbackDataOnly { backup_id, force } => {
-                commands::backup::run_rollback_data_only(self, backup_id, force, true, None).await
             }
             Commands::DockerService(docker_cmd) => {
                 commands::run_docker_service_command(self, docker_cmd).await

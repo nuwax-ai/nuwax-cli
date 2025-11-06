@@ -13,7 +13,7 @@ pub mod update;
 pub use status::{run_api_info, run_status, run_status_details, show_client_version};
 
 // Backup commands
-pub use backup::{run_backup, run_list_backups};
+pub use backup::run_list_backups;
 
 // Update commands
 pub use update::run_upgrade;
@@ -28,9 +28,7 @@ pub use ducker::run_ducker;
 pub use auto_backup::handle_auto_backup;
 
 // Auto upgrade deploy commands
-pub use auto_upgrade_deploy::{
-    check_and_install_nuwax_cli_update_early, handle_auto_upgrade_deploy_command,
-};
+pub use auto_upgrade_deploy::handle_auto_upgrade_deploy_command;
 
 // Cache commands
 pub use cache::handle_cache_command;
