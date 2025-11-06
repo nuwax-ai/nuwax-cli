@@ -125,27 +125,27 @@
 
 ## Phase 5: 路由和集成
 
-- [ ] 5. 配置 React Router
+- [-] 5. 配置 React Router
   - 安装 react-router-dom v6
   - 定义路由路径（/overview, /deploy, /containers, /backup, /logs）
   - 在 App.tsx 中配置 BrowserRouter 和 Routes
   - 实现路由懒加载（使用 React.lazy）
   - _Requirements: 所有需求_
 
-- [ ] 5.1 集成侧边栏导航
+- [x] 5.1 集成侧边栏导航
   - 在 Sidebar 组件中使用 NavLink
   - 实现路由高亮显示（active 状态）
   - 实现侧边栏折叠功能（响应式设计）
   - _Requirements: 所有需求_
 
-- [ ] 5.2 重构 App.tsx
+- [x] 5.2 重构 App.tsx
   - 移除现有的单页面布局
   - 使用 MainLayout 包裹路由
   - 使用 AppProvider 包裹整个应用
   - 保留 WelcomeSetupModal 和 ErrorBoundary
   - _Requirements: 1.1, 1.2_
 
-- [ ] 5.3 实现错误恢复机制
+- [x] 5.3 实现错误恢复机制
   - 验证现有的 ErrorBoundary
   - 实现全局错误处理（在 AppContext 中）
   - 实现错误提示（使用 Tauri dialog API）

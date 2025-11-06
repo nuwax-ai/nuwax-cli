@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, memo } from 'react';
 import { LogEntry } from '../types';
 
 interface LogTerminalProps {
@@ -8,7 +8,8 @@ interface LogTerminalProps {
   maxHeight?: string;
 }
 
-export const LogTerminal: React.FC<LogTerminalProps> = ({
+// 使用 React.memo 优化渲染性能
+export const LogTerminal: React.FC<LogTerminalProps> = memo(({
   logs,
   className = '',
   autoScroll = true,
@@ -74,6 +75,12 @@ export const LogTerminal: React.FC<LogTerminalProps> = ({
         <div className="text-gray-500 text-center py-8">暂无日志</div>
       ) : (
         <div className="space-y-1">
+          {/* 
+            性能优化说明：
+            - 使用循环缓冲区限制日志数量（在 AppContext 中实现）
+            - 当日志数量超过 1000 条时，考虑使用虚拟滚动库（如 react-window）
+            - 当前实现已通过 React.memo 优化渲染性能
+          */}
           {logs.map((log) => (
             <div key={log.id} className="flex items-start space-x-2">
               <span className="text-gray-500 text-xs flex-shrink-0">
@@ -95,4 +102,13 @@ export const LogTerminal: React.FC<LogTerminalProps> = ({
       )}
     </div>
   );
-};
+}, (prevProps, nextProps) => {
+  // 自定义比较函数：只在 logs 数组长度或最后一条日志变化时重新渲染
+  return (
+    prevProps.logs.length === nextProps.logs.length &&
+    prevProps.logs[prevProps.logs.length - 1]?.id === nextProps.logs[nextProps.logs.length - 1]?.id &&
+    prevProps.className === nextProps.className &&
+    prevProps.autoScroll === nextProps.autoScroll &&
+    prevProps.maxHeight === nextProps.maxHeight
+  );
+});

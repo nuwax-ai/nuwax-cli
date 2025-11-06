@@ -1,13 +1,20 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, lazy, Suspense } from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { listen } from '@tauri-apps/api/event';
-import WorkingDirectoryBar from './components/WorkingDirectoryBar';
-import OperationPanel from './components/OperationPanel';
-import TerminalWindow from './components/TerminalWindow';
+import { MainLayout } from './components/MainLayout';
 import WelcomeSetupModal from './components/WelcomeSetupModal';
 import ErrorBoundary from './components/ErrorBoundary';
+import { AppProvider } from './context/AppContext';
 import { LogEntry, DEFAULT_LOG_CONFIG, LogConfig } from './types';
 import { ConfigManager, DialogManager, DuckCliManager, FileSystemManager, ProcessManager } from './utils/tauri';
 import './App.css';
+
+// 懒加载页面组件
+const OverviewPage = lazy(() => import('./pages/OverviewPage').then(m => ({ default: m.OverviewPage })));
+const DeployPage = lazy(() => import('./pages/DeployPage').then(m => ({ default: m.DeployPage })));
+const ContainersPage = lazy(() => import('./pages/ContainersPage').then(m => ({ default: m.ContainersPage })));
+const BackupPage = lazy(() => import('./pages/BackupPage').then(m => ({ default: m.BackupPage })));
+const LogsPage = lazy(() => import('./pages/LogsPage').then(m => ({ default: m.LogsPage })));
 
 function App() {
   // 工作目录状态
@@ -380,85 +387,127 @@ function App() {
     initializeApp();
   }, [isInitialized, logConfig.maxEntries, handleDirectoryChange]);
 
+  // 处理更改目录按钮点击
+  const handleChangeDirectoryClick = useCallback(() => {
+    setShowWelcomeModal(true);
+  }, []);
+
   return (
-    <div className="h-screen flex flex-col bg-gray-100">
-      {/* 应用启动加载界面 */}
-      {isAppLoading && (
-        <div className="fixed inset-0 bg-white bg-opacity-90 flex items-center justify-center z-50">
-          <div className="text-center">
-            <div className="text-6xl mb-4">🦆</div>
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-4"></div>
-            <h2 className="text-xl font-semibold text-gray-900 mb-2">Duck CLI GUI</h2>
-            <p className="text-gray-600">正在启动应用...</p>
+    <BrowserRouter>
+      <div className="h-screen flex flex-col bg-gray-100">
+        {/* 应用启动加载界面 */}
+        {isAppLoading && (
+          <div className="fixed inset-0 bg-white bg-opacity-90 flex items-center justify-center z-50">
+            <div className="text-center">
+              <div className="text-6xl mb-4">🦆</div>
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-4"></div>
+              <h2 className="text-xl font-semibold text-gray-900 mb-2">Duck CLI GUI</h2>
+              <p className="text-gray-600">正在启动应用...</p>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* 主应用界面 */}
-      {!isAppLoading && (
-        <>
-          {/* 顶部工作目录栏 */}
-          <WorkingDirectoryBar 
-            onDirectoryChange={handleDirectoryChange} 
-            workingDirectory={workingDirectory}
+        {/* 主应用界面 */}
+        {!isAppLoading && (
+          <>
+            {/* 路由配置 */}
+            <Routes>
+              <Route path="/" element={<MainLayout onChangeDirectory={handleChangeDirectoryClick} />}>
+                {/* 默认重定向到概览页 */}
+                <Route index element={<Navigate to="/overview" replace />} />
+                
+                {/* 各个功能页面 */}
+                <Route 
+                  path="overview" 
+                  element={
+                    <Suspense fallback={<LoadingFallback />}>
+                      <OverviewPage />
+                    </Suspense>
+                  } 
+                />
+                <Route 
+                  path="deploy" 
+                  element={
+                    <Suspense fallback={<LoadingFallback />}>
+                      <DeployPage />
+                    </Suspense>
+                  } 
+                />
+                <Route 
+                  path="containers" 
+                  element={
+                    <Suspense fallback={<LoadingFallback />}>
+                      <ContainersPage />
+                    </Suspense>
+                  } 
+                />
+                <Route 
+                  path="backup" 
+                  element={
+                    <Suspense fallback={<LoadingFallback />}>
+                      <BackupPage />
+                    </Suspense>
+                  } 
+                />
+                <Route 
+                  path="logs" 
+                  element={
+                    <Suspense fallback={<LoadingFallback />}>
+                      <LogsPage />
+                    </Suspense>
+                  } 
+                />
+                
+                {/* 404 重定向 */}
+                <Route path="*" element={<Navigate to="/overview" replace />} />
+              </Route>
+            </Routes>
+          </>
+        )}
+
+        {/* 执行状态指示器 */}
+        {isExecuting && !isAppLoading && (
+          <div className="fixed bottom-4 right-4 bg-blue-600 text-white px-4 py-2 rounded-lg shadow-lg flex items-center space-x-2">
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+            <span className="text-sm font-medium">正在执行命令...</span>
+          </div>
+        )}
+
+        {/* 欢迎设置弹窗 */}
+        {showWelcomeModal && !isAppLoading && (
+          <WelcomeSetupModal
+            isOpen={showWelcomeModal}
+            onComplete={async (directory: string) => {
+              // 验证目录
+              const validation = await FileSystemManager.validateDirectory(directory);
+              await handleDirectoryChange(directory, validation.valid);
+              setShowWelcomeModal(false);
+            }}
+            onSkip={() => setShowWelcomeModal(false)}
           />
-
-          {/* 主内容区域 */}
-          <div className="flex-1 flex flex-col min-h-0">
-            {/* 上半部分：操作面板 - 使用自适应高度 */}
-            <div className="flex-shrink-0 overflow-auto">
-              <OperationPanel
-                workingDirectory={workingDirectory}
-                isDirectoryValid={isDirectoryValid}
-                onCommandExecute={handleCommandExecute}
-                onLogMessage={handleLogMessage}
-              />
-            </div>
-            
-            {/* 下半部分：终端窗口 - 占用剩余空间 */}
-            <div className="flex-1 border-t border-gray-200 min-h-0">
-              <TerminalWindow
-                logs={logs}
-                onClearLogs={handleClearLogs}
-                isEnabled={isDirectoryValid}
-                totalLogCount={totalLogCount}
-                maxLogEntries={logConfig.maxEntries}
-                onExportLogs={exportAllLogs}
-              />
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* 执行状态指示器 */}
-      {isExecuting && !isAppLoading && (
-        <div className="fixed bottom-4 right-4 bg-blue-600 text-white px-4 py-2 rounded-lg shadow-lg flex items-center space-x-2">
-          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-          <span className="text-sm font-medium">正在执行命令...</span>
-        </div>
-      )}
-
-      {/* 欢迎设置弹窗 */}
-      {showWelcomeModal && !isAppLoading && (
-        <WelcomeSetupModal
-          isOpen={showWelcomeModal}
-          onComplete={async (directory: string) => {
-            // 验证目录
-            const validation = await FileSystemManager.validateDirectory(directory);
-            await handleDirectoryChange(directory, validation.valid);
-            setShowWelcomeModal(false);
-          }}
-          onSkip={() => setShowWelcomeModal(false)}
-        />
-      )}
-    </div>
+        )}
+      </div>
+    </BrowserRouter>
   );
+}
+
+// 加载中占位组件
+const LoadingFallback: React.FC = () => (
+  <div className="flex items-center justify-center h-full">
+    <div className="text-center">
+      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+      <p className="text-gray-600">加载中...</p>
+    </div>
+  </div>
+);
 }
 
 export default function AppWithErrorBoundary() {
   return (
     <ErrorBoundary>
-      <App />
+      <AppProvider>
+        <App />
+      </AppProvider>
     </ErrorBoundary>
   );
 }

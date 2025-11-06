@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback } from 'react';
+import { message } from '@tauri-apps/plugin-dialog';
 import { LogEntry, LogConfig, DEFAULT_LOG_CONFIG, ContainerInfo } from '../types';
 
 interface AppContextType {
@@ -23,6 +24,10 @@ interface AppContextType {
   
   // 日志配置
   logConfig: LogConfig;
+  
+  // 错误处理
+  handleError: (error: Error | string, context?: string) => Promise<void>;
+  lastError: string | null;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -38,6 +43,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [containers, setContainers] = useState<ContainerInfo[]>([]);
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
   const [logConfig] = useState<LogConfig>(DEFAULT_LOG_CONFIG);
+  const [lastError, setLastError] = useState<string | null>(null);
 
   // 设置工作目录
   const setWorkingDirectory = useCallback((dir: string | null, valid: boolean) => {
@@ -77,6 +83,36 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     console.log('refreshContainers called from context');
   }, []);
 
+  // 全局错误处理
+  const handleError = useCallback(async (error: Error | string, context?: string) => {
+    const errorMessage = typeof error === 'string' ? error : error.message;
+    const fullMessage = context ? `${context}: ${errorMessage}` : errorMessage;
+    
+    // 记录错误到日志
+    addLog({
+      type: 'error',
+      message: `❌ ${fullMessage}`,
+    });
+    
+    // 更新最后错误状态
+    setLastError(fullMessage);
+    
+    // 显示错误对话框
+    try {
+      await message(fullMessage, {
+        title: '错误',
+        kind: 'error',
+      });
+    } catch (dialogError) {
+      console.error('Failed to show error dialog:', dialogError);
+    }
+    
+    // 3秒后清除错误状态
+    setTimeout(() => {
+      setLastError(null);
+    }, 3000);
+  }, [addLog]);
+
   const contextValue: AppContextType = {
     workingDirectory,
     isDirectoryValid,
@@ -90,6 +126,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     isExecuting,
     setIsExecuting,
     logConfig,
+    handleError,
+    lastError,
   };
 
   return (
