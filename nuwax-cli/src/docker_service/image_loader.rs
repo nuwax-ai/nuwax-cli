@@ -301,7 +301,15 @@ impl ImageLoader {
                 }
                 Err(e) => {
                     error!("{} ✗ 镜像加载失败: {} - {}", progress, file_name, e);
-                    result.add_failure(file_name.to_string(), e.to_string());
+                    
+                    // 立即返回错误，停止后续镜像加载
+                    return Err(DockerServiceError::ImageLoading(format!(
+                        "镜像加载失败: {} - {}。已成功加载 {} 个镜像，剩余 {} 个镜像未加载",
+                        file_name,
+                        e,
+                        result.success_count,
+                        images.len() - index
+                    )));
                 }
             }
         }
