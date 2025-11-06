@@ -7,8 +7,6 @@ use quick_cache::sync::Cache;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, error, info};
 
 // 缓存条目的结构

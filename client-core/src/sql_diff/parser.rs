@@ -446,32 +446,6 @@ fn is_column_primary_key(column: &ColumnDef) -> bool {
     false
 }
 
-/// 检查列是否是主键列
-fn is_primary_key_column(column: &ColumnDef, constraints: &[TableConstraint]) -> bool {
-    // 首先检查列级别的主键定义
-    for option in &column.options {
-        if let sqlparser::ast::ColumnOption::Unique { is_primary, .. } = &option.option {
-            if *is_primary {
-                return true;
-            }
-        }
-    }
-
-    // 然后检查表级别的主键约束
-    let column_name = ident_to_string(&column.name);
-    for constraint in constraints {
-        if let TableConstraint::PrimaryKey { columns, .. } = constraint {
-            for pk_column in columns {
-                if ident_to_string(pk_column) == column_name {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
 /// 从 IndexColumn 列表中提取列名
 /// 
 /// 处理三种情况：

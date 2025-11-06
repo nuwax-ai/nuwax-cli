@@ -394,47 +394,6 @@ impl ImageLoader {
         image_name.to_string()
     }
 
-    /// 设置镜像标签（传统方法，保持向后兼容）
-    pub async fn setup_image_tags(&self) -> DockerServiceResult<TagResult> {
-        let images = self.scan_architecture_images()?;
-        let mut result = TagResult::new();
-
-        info!("开始设置镜像标签...");
-
-        for image in images {
-            if image.original_tag != image.target_tag {
-                let original_with_latest =
-                    format!("{}:latest-{}", image.target_tag, self.architecture.as_str());
-                let target_with_latest = format!("{}:latest", image.target_tag);
-
-                info!(
-                    "设置标签: {} -> {}",
-                    original_with_latest, target_with_latest
-                );
-
-                // 使用 docker tag 命令设置标签
-                match self
-                    .tag_image(&original_with_latest, &target_with_latest)
-                    .await
-                {
-                    Ok(_) => {
-                        info!("✓ 标签设置成功: {}", target_with_latest);
-                        result.add_success(original_with_latest, target_with_latest);
-                    }
-                    Err(e) => {
-                        error!("✗ 标签设置失败: {} - {}", target_with_latest, e);
-                        result.add_failure(original_with_latest, target_with_latest, e.to_string());
-                    }
-                }
-            }
-        }
-
-        info!(
-            "标签设置完成: 成功 {}, 失败 {}",
-            result.success_count, result.failure_count
-        );
-        Ok(result)
-    }
 
     /// 为单个镜像设置标签
     async fn tag_image(&self, source_tag: &str, target_tag: &str) -> DockerServiceResult<()> {

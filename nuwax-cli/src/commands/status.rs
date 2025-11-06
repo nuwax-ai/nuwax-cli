@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::docker_utils;
 use crate::{app::CliApp, docker_service::health_check::HealthChecker};
 use anyhow::Result;
 use client_core::container::{DockerManager, ServiceStatus};

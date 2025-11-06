@@ -576,47 +576,6 @@ fn copy_dir_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 备份当前版本的SQL文件（用于后续差异比较）
-async fn backup_sql_file_before_upgrade() -> Result<()> {
-    let current_sql_path = Path::new(sql::CURRENT_SQL_PATH);
-    let temp_sql_dir = Path::new(sql::TEMP_SQL_DIR);
-    let old_sql_path = temp_sql_dir.join(sql::OLD_SQL_FILE);
-
-    // 创建临时SQL目录
-    if !temp_sql_dir.exists() {
-        fs::create_dir_all(temp_sql_dir)?;
-        info!("📁 创建临时SQL目录: {}", temp_sql_dir.display());
-    }
-
-    // 🔧 关键修复：如果 upgrade_diff.sql 已存在，则不覆盖 init_mysql_old.sql
-    // 避免重新部署时旧版本SQL被新版本覆盖，导致差异为空
-    let diff_sql_path = temp_sql_dir.join(sql::DIFF_SQL_FILE);
-    if diff_sql_path.exists() {
-        if old_sql_path.exists() {
-            info!("✅ 检测到已有差异SQL文件和旧版本SQL文件，保持不变");
-            info!("   跳过备份以保护旧版本SQL: {}", old_sql_path.display());
-            return Ok(());
-        } else {
-            warn!("⚠️ 发现差异SQL文件但缺少旧版本SQL文件，将重新备份");
-        }
-    }
-
-    // 复制当前SQL文件到临时目录
-    // 注意：此函数只在非首次部署时调用，所以SQL文件应该存在
-    if current_sql_path.exists() {
-        fs::copy(current_sql_path, &old_sql_path)?;
-        info!("📄 已备份当前版本SQL文件: {}", old_sql_path.display());
-    } else {
-        // 如果文件不存在，说明可能是特殊情况，记录警告但不中断流程
-        warn!("⚠️ 当前版本SQL文件不存在");
-        // 创建空的占位文件，后续差异生成会处理
-        fs::write(&old_sql_path, "")?;
-        info!("📄 创建空的旧版本SQL占位文件");
-    }
-
-    Ok(())
-}
-
 
 
 //批量删除文件,或者目录

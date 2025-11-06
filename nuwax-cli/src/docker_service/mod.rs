@@ -6,7 +6,6 @@ use client_core::container::DockerManager;
 
 // 子模块声明
 pub mod architecture;
-pub mod compose_parser;
 pub mod config;
 pub mod directory_permissions;
 pub mod environment;

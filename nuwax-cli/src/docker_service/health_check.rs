@@ -1,7 +1,7 @@
 use crate::docker_service::{DockerServiceError, DockerServiceResult};
 use bollard::Docker;
-use bollard::container::{InspectContainerOptions, ListContainersOptions};
-use bollard::models::{Health, HealthStatusEnum};
+use bollard::models::HealthStatusEnum;
+use bollard::query_parameters::{InspectContainerOptions, ListContainersOptions};
 use client_core::constants::timeout;
 use client_core::container::DockerManager;
 use serde::{Deserialize, Serialize};
@@ -724,12 +724,10 @@ impl HealthChecker {
         match Docker::connect_with_socket_defaults() {
             Ok(docker) => {
                 // 获取容器列表，查找指定容器
-                let options = Some(ListContainersOptions::<String> {
+                match docker.list_containers(Some(ListContainersOptions {
                     all: true,
                     ..Default::default()
-                });
-
-                match docker.list_containers(options).await {
+                })).await {
                     Ok(containers) => {
                         for container in containers {
                             // 检查容器名称是否匹配

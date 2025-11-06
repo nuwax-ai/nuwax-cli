@@ -660,63 +660,6 @@ pub async fn show_architecture_info(_app: &CliApp) -> Result<()> {
     Ok(())
 }
 
-/// 使用 ducker 列出 Docker 镜像
-pub async fn list_docker_images_with_ducker(app: &CliApp) -> Result<()> {
-    info!("🔍 使用 ducker 列出 Docker 镜像...");
-
-    let docker_service_manager =
-        DockerService::new(app.config.clone(), app.docker_manager.clone())?;
-
-    match docker_service_manager
-        .list_docker_images_with_ducker()
-        .await
-    {
-        Ok(images) => {
-            if images.is_empty() {
-                info!("📭 未找到任何 Docker 镜像");
-            } else {
-                info!("🎯 找到 {} 个 Docker 镜像:", images.len());
-                for (index, image) in images.iter().enumerate() {
-                    info!("  {}. {}", index + 1, image);
-                }
-
-                // 显示与我们业务相关的镜像
-                let business_images: Vec<&String> = images
-                    .iter()
-                    .filter(|img| {
-                        img.contains("registry.yichamao.com")
-                            || img.contains("mysql")
-                            || img.contains("redis")
-                            || img.contains("milvus")
-                            || img.contains("quickwit")
-                    })
-                    .collect();
-
-                if !business_images.is_empty() {
-                    info!("");
-                    info!("🏢 业务相关镜像 ({} 个):", business_images.len());
-                    for image in business_images {
-                        let status = if image.contains(":latest") && !image.contains("latest-") {
-                            "✅ 已准备"
-                        } else if image.contains("latest-arm64") || image.contains("latest-amd64") {
-                            "🔄 需要标签"
-                        } else {
-                            "ℹ️  其他版本"
-                        };
-                        info!("  • {} {}", status, image);
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            error!("❌ 获取镜像列表失败: {}", e);
-            return Err(e.into());
-        }
-    }
-
-    Ok(())
-}
-
 /// 设置frontend服务端口（使用新的环境变量管理器）
 async fn set_frontend_port(port: u16) -> Result<()> {
     use crate::utils::env_manager::update_frontend_port;

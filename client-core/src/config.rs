@@ -3,10 +3,8 @@ use crate::constants::{backup, config, docker, updates, version};
 use crate::version::Version; // 新增：导入Version类型
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc};
 use toml;
 
 /// 应用配置结构
