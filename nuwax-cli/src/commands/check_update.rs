@@ -6,9 +6,23 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
-/// GitHub 仓库常量配置
-pub const GITHUB_OWNER: &str = "soddygo";
-pub const GITHUB_REPO: &str = "duck_client";
+/// GitHub 仓库信息从 Cargo.toml 中的 repository 字段解析
+/// 在编译时从环境变量 CARGO_PKG_REPOSITORY 中提取
+fn parse_github_repo() -> (&'static str, &'static str) {
+    const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+    
+    // 解析 GitHub URL，支持格式: https://github.com/owner/repo
+    if let Some(path) = REPOSITORY.strip_prefix("https://github.com/") {
+        if let Some((owner, repo)) = path.split_once('/') {
+            // 移除可能的 .git 后缀
+            let repo = repo.trim_end_matches(".git");
+            return (owner, repo);
+        }
+    }
+    
+    // 如果解析失败，抛出编译错误
+    panic!("无法从 Cargo.toml 的 repository 字段解析 GitHub 仓库信息: {}", REPOSITORY);
+}
 
 //cli 命令工具请求的地址
 pub const CLI_API_URL_PATH: &str = "/api/v1/cli/versions/latest.json";
@@ -273,9 +287,10 @@ impl GitHubRepo {
         }
     }
 
-    /// 创建默认的 duck_client 仓库配置
+    /// 创建默认的仓库配置（从 Cargo.toml 读取）
     pub fn default() -> Self {
-        Self::new(GITHUB_OWNER, GITHUB_REPO)
+        let (owner, repo) = parse_github_repo();
+        Self::new(owner, repo)
     }
 
     /// 获取最新release API URL
