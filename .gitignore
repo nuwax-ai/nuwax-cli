@@ -11,6 +11,7 @@ history.db
 history.db.wal
 config.toml
 test_deploy
+tmp/
 
 cli-ui/src-tauri/binaries
 data/duck_client.db
