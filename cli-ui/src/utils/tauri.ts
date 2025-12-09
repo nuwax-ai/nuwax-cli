@@ -576,12 +576,14 @@ export class DuckCliManager {
    */
   static async executeSmart(
     args: string[], 
-    workingDir?: string
+    workingDir?: string,
+    commandId?: string
   ): Promise<{ success: boolean; exit_code: number; stdout: string; stderr: string }> {
     try {
       return await invoke('execute_duck_cli_smart', { 
         args, 
-        workingDir: workingDir || null 
+        workingDir: workingDir || null,
+        commandId: commandId || null
       });
     } catch (error) {
       return {
@@ -596,9 +598,9 @@ export class DuckCliManager {
   /**
    * 初始化项目
    */
-  static async initialize(workingDir: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async initialize(workingDir: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['init'], workingDir);
+      const result = await this.executeSmart(['init'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -616,9 +618,9 @@ export class DuckCliManager {
   /**
    * 检查服务状态
    */
-  static async checkStatus(workingDir: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async checkStatus(workingDir: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['status'], workingDir);
+      const result = await this.executeSmart(['status'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -636,9 +638,9 @@ export class DuckCliManager {
   /**
    * 启动服务
    */
-  static async startService(workingDir: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async startService(workingDir: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['docker-service', 'start'], workingDir);
+      const result = await this.executeSmart(['docker-service', 'start'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -656,9 +658,9 @@ export class DuckCliManager {
   /**
    * 停止服务
    */
-  static async stopService(workingDir: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async stopService(workingDir: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['docker-service', 'stop'], workingDir);
+      const result = await this.executeSmart(['docker-service', 'stop'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -676,9 +678,9 @@ export class DuckCliManager {
   /**
    * 重启服务
    */
-  static async restartService(workingDir: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async restartService(workingDir: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['docker-service', 'restart'], workingDir);
+      const result = await this.executeSmart(['docker-service', 'restart'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -696,9 +698,9 @@ export class DuckCliManager {
   /**
    * 一键部署
    */
-  static async autoUpgradeDeploy(workingDir: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async autoUpgradeDeploy(workingDir: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['auto-upgrade-deploy', 'run'], workingDir);
+      const result = await this.executeSmart(['auto-upgrade-deploy', 'run'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -716,9 +718,9 @@ export class DuckCliManager {
   /**
    * 检查更新
    */
-  static async checkCliUpdate(workingDir: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async checkCliUpdate(workingDir: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['check-update', 'check'], workingDir);
+      const result = await this.executeSmart(['check-update', 'check'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -736,10 +738,10 @@ export class DuckCliManager {
   /**
    * 升级服务
    */
-  static async upgradeService(workingDir: string, full = false): Promise<{ success: boolean; output: string; error?: string }> {
+  static async upgradeService(workingDir: string, full = false, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
       const args = full ? ['upgrade', '--full'] : ['upgrade'];
-      const result = await this.executeSmart(args, workingDir);
+      const result = await this.executeSmart(args, workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -757,9 +759,9 @@ export class DuckCliManager {
   /**
    * 创建备份
    */
-  static async createBackup(workingDir: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async createBackup(workingDir: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['backup', 'create'], workingDir);
+      const result = await this.executeSmart(['backup', 'create'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -777,10 +779,10 @@ export class DuckCliManager {
   /**
    * 获取备份列表（使用 JSON 命令）
    */
-  static async getBackupList(workingDir: string): Promise<{ success: boolean; backups: any[]; error?: string }> {
+  static async getBackupList(workingDir: string, commandId?: string): Promise<{ success: boolean; backups: any[]; error?: string }> {
     try {
       // 使用新的 --list-json 参数获取 JSON 格式的备份列表
-      const result = await this.executeSmart(['rollback', '--list-json'], workingDir);
+      const result = await this.executeSmart(['rollback', '--list-json'], workingDir, commandId);
       
       if (result.success) {
         try {
@@ -826,14 +828,14 @@ export class DuckCliManager {
   /**
    * 执行回滚（使用 CLI 命令）
    */
-  static async executeRollback(workingDir: string, backupId: number, force: boolean = false): Promise<{ success: boolean; error?: string }> {
+  static async executeRollback(workingDir: string, backupId: number, force: boolean = false, commandId?: string): Promise<{ success: boolean; error?: string }> {
     try {
       const args = ['rollback', backupId.toString()];
       if (force) {
         args.push('--force');
       }
       
-      const result = await this.executeSmart(args, workingDir);
+      const result = await this.executeSmart(args, workingDir, commandId);
       
       return {
         success: result.success,
@@ -850,9 +852,9 @@ export class DuckCliManager {
   /**
    * 清理缓存
    */
-  static async clearCache(workingDir: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async clearCache(workingDir: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['cache', 'clear'], workingDir);
+      const result = await this.executeSmart(['cache', 'clear'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -870,9 +872,9 @@ export class DuckCliManager {
   /**
    * 清理下载文件
    */
-  static async clearDownloads(workingDir: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async clearDownloads(workingDir: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['cache', 'clean-downloads'], workingDir);
+      const result = await this.executeSmart(['cache', 'clean-downloads'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,
@@ -890,9 +892,9 @@ export class DuckCliManager {
   /**
    * 获取帮助信息
    */
-  static async getHelp(workingDir?: string): Promise<{ success: boolean; output: string; error?: string }> {
+  static async getHelp(workingDir?: string, commandId?: string): Promise<{ success: boolean; output: string; error?: string }> {
     try {
-      const result = await this.executeSmart(['--help'], workingDir);
+      const result = await this.executeSmart(['--help'], workingDir, commandId);
       return {
         success: result.success,
         output: result.stdout,

@@ -1,105 +1,108 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useCallback, useState } from 'react';
 import WorkingDirectoryBar from './components/WorkingDirectoryBar';
 import OperationPanel from './components/OperationPanel';
 import TerminalWindow from './components/TerminalWindow';
 import WelcomeSetupModal from './components/WelcomeSetupModal';
 import ErrorBoundary from './components/ErrorBoundary';
-import { LogEntry, DEFAULT_LOG_CONFIG, LogConfig } from './types';
-import { ConfigManager, DialogManager, DuckCliManager, FileSystemManager, ProcessManager } from './utils/tauri';
+import { LogEntry } from './types';
+import { ConfigManager, DialogManager, FileSystemManager, ProcessManager } from './utils/tauri';
+import { useAppStore } from './store/appStore';
+import { useAppInit } from './hooks/useAppInit';
+import { useCliEvents } from './hooks/useCliEvents';
+import { cliGateway } from './services/cliGateway';
 import './App.css';
 
 function App() {
-  // 工作目录状态
-  const [workingDirectory, setWorkingDirectory] = useState<string | null>(null);
-  const [isDirectoryValid, setIsDirectoryValid] = useState(false);
-  const [showWelcomeModal, setShowWelcomeModal] = useState(false);
-  
-  // 日志状态 - 使用循环缓冲区
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [logConfig] = useState<LogConfig>(DEFAULT_LOG_CONFIG);
-  const [totalLogCount, setTotalLogCount] = useState(0); // 总日志数量统计
-  const [isInitialized, setIsInitialized] = useState(false); // 初始化状态标记
-  const [isAppLoading, setIsAppLoading] = useState(true); // 应用启动加载状态
-  
-  // 当前执行状态
-  const [isExecuting, setIsExecuting] = useState(false);
-  
-  // 使用 useRef 避免循环依赖
-  const logsRef = useRef<LogEntry[]>([]);
+  const workingDirectory = useAppStore((state) => state.workingDirectory);
+  const showWelcomeModal = useAppStore((state) => state.showWelcomeModal);
+  const isAppLoading = useAppStore((state) => state.isAppLoading);
+  const isExecuting = useAppStore((state) => state.isExecuting);
+  const logs = useAppStore((state) => state.logs);
+  const logConfig = useAppStore((state) => state.logConfig);
+  const totalLogCount = useAppStore((state) => state.totalLogCount);
+  const setExecuting = useAppStore((state) => state.setExecuting);
+  const setShowWelcomeModal = useAppStore((state) => state.setShowWelcomeModal);
+  const setWorkingDirectory = useAppStore((state) => state.setWorkingDirectory);
+  const setValidationState = useAppStore((state) => state.setValidationState);
+  const addLog = useAppStore((state) => state.addLog);
+  const clearLogs = useAppStore((state) => state.clearLogs);
+  const [isRechecking, setIsRechecking] = useState(false);
 
-  // 同步 logs 状态到 ref
-  useEffect(() => {
-    logsRef.current = logs;
-  }, [logs]);
+  // 统一事件监听
+  useCliEvents();
 
-  // 智能日志管理 - 循环缓冲区实现
-  const manageLogBuffer = useCallback((newLogs: LogEntry[]) => {
-    setLogs(currentLogs => {
-      const allLogs = [...currentLogs, ...newLogs];
-      
-      // 检查是否需要清理
-      if (allLogs.length > logConfig.maxEntries) {
-        const excessCount = allLogs.length - logConfig.maxEntries;
-        const trimCount = Math.max(excessCount, logConfig.trimBatchSize);
-        
-        // 保留最新的日志条目
-        const trimmedLogs = allLogs.slice(trimCount);
-        
-        console.log(`日志缓冲区清理: 删除 ${trimCount} 条旧记录, 保留 ${trimmedLogs.length} 条`);
-        
-        return trimmedLogs;
+  // 处理工作目录变更、验证与进程检查
+  const validateAndApplyDirectory = useCallback(async (directory: string) => {
+    setValidationState('validating');
+    setWorkingDirectory({ path: directory });
+
+    try {
+      const validation = await FileSystemManager.validateDirectory(directory);
+
+      if (!validation.valid) {
+        setWorkingDirectory({
+          path: directory,
+          isValid: false,
+          validationState: 'invalid',
+          error: validation.error,
+        });
+        setShowWelcomeModal(true);
+        addLog('warning', validation.error || '目录验证失败');
+        return;
       }
-      
-      return allLogs;
-    });
-  }, [logConfig.maxEntries, logConfig.trimBatchSize]);
 
-  // 轻量级去重逻辑 - 只检查连续重复
-  const shouldSkipDuplicate = useCallback((newMessage: string, newType: LogEntry['type']) => {
-    const currentLogs = logsRef.current;
-    if (currentLogs.length === 0) return false;
-    
-    // 只检查最后一条日志，避免连续重复（极端情况的保护）
-    const lastLog = currentLogs[currentLogs.length - 1];
-    return lastLog && 
-      lastLog.message === newMessage && 
-      lastLog.type === newType;
-  }, []);
+      setWorkingDirectory({
+        path: directory,
+        isValid: true,
+        validationState: 'valid',
+        error: undefined,
+      });
+      setShowWelcomeModal(false);
+      addLog('info', `📁 工作目录已设置: ${directory}`);
 
-  // 添加日志条目 - 使用循环缓冲区
-  const addLogEntry = useCallback((
-    type: LogEntry['type'], 
-    message: string, 
-    command?: string, 
-    args?: string[]
-  ) => {
-    // 过滤空消息
-    if (!message.trim() && type !== 'command') return;
-    
-    // 只对相同类型的连续消息做去重，移除时间限制
-    if (shouldSkipDuplicate(message, type)) return;
-    
-    const entry: LogEntry = {
-      id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-      timestamp: new Date().toLocaleTimeString(),
-      type,
-      message,
-      command,
-      args
-    };
-    
-    // 更新统计
-    setTotalLogCount(prev => prev + 1);
-    
-    // 使用循环缓冲区管理
-    manageLogBuffer([entry]);
-  }, [shouldSkipDuplicate, manageLogBuffer]);
+      await ConfigManager.setWorkingDirectory(directory);
+
+      try {
+        addLog('info', '🔍 检查并清理冲突进程...');
+        const checkResult = await ProcessManager.initializeProcessCheck(directory);
+
+        if (checkResult.processCleanup.processes_found.length > 0) {
+          addLog('warning', `🧹 发现 ${checkResult.processCleanup.processes_found.length} 个冲突进程`);
+          addLog('success', `✅ 已清理 ${checkResult.processCleanup.processes_killed.length} 个进程`);
+        }
+
+        if (checkResult.databaseLocked) {
+          addLog('error', '⚠️ 数据库文件仍被锁定，请稍后重试');
+          setWorkingDirectory({
+            isValid: false,
+            validationState: 'invalid',
+            error: '数据库文件被锁定',
+          });
+          setShowWelcomeModal(true);
+        } else {
+          addLog('success', checkResult.message);
+        }
+      } catch (error) {
+        addLog('warning', `⚠️ 进程检查失败: ${error}，但不影响正常使用`);
+      }
+    } catch (error) {
+      setWorkingDirectory({
+        path: directory,
+        isValid: false,
+        validationState: 'invalid',
+        error: String(error),
+      });
+      setShowWelcomeModal(true);
+      addLog('error', `目录处理失败: ${error}`);
+    }
+  }, [addLog, setShowWelcomeModal, setValidationState, setWorkingDirectory]);
+
+  // 初始化流程
+  useAppInit(validateAndApplyDirectory);
 
   // 导出所有日志
   const exportAllLogs = useCallback(async () => {
     try {
-      // 检查是否有日志可导出
       if (logs.length === 0) {
         await DialogManager.showMessage('提示', '当前没有日志可导出', 'info');
         return false;
@@ -107,9 +110,7 @@ function App() {
 
       const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
       const filename = `duck-cli-logs-${timestamp}.txt`;
-      
-      console.log(`准备导出 ${logs.length} 条日志...`);
-      
+
       const logContent = logs.map(log => {
         const prefix = `[${log.timestamp}] [${log.type.toUpperCase()}]`;
         if (log.type === 'command') {
@@ -118,27 +119,17 @@ function App() {
         return `${prefix} ${log.message}`;
       }).join('\n');
 
-      console.log(`日志内容长度: ${logContent.length} 字符`);
-
-      // 打开保存对话框
       const savedPath = await DialogManager.saveFile('导出日志', filename);
-      console.log('用户选择的保存路径:', savedPath);
       
       if (savedPath) {
-        console.log(`开始写入文件: ${savedPath}`);
         const success = await FileSystemManager.writeTextFile(savedPath, logContent);
-        console.log('文件写入结果:', success);
         
         if (success) {
-          // 验证文件是否真的被创建
           const fileExists = await FileSystemManager.pathExists(savedPath);
-          console.log('文件是否存在:', fileExists);
           
           if (fileExists) {
             await DialogManager.showMessage('成功', `日志已成功导出到:\n${savedPath}\n\n共导出 ${logs.length} 条日志记录`, 'info');
-            
-            // 添加导出成功的日志记录
-            addLogEntry('success', `✅ 日志导出成功: ${savedPath} (${logs.length} 条记录)`);
+            addLog('success', `✅ 日志导出成功: ${savedPath} (${logs.length} 条记录)`);
             return true;
           } else {
             throw new Error('文件写入成功但文件不存在，可能是权限问题');
@@ -147,238 +138,89 @@ function App() {
           throw new Error('文件写入失败');
         }
       } else {
-        console.log('用户取消了文件保存操作');
-        addLogEntry('info', '用户取消了日志导出操作');
+        addLog('info', '用户取消了日志导出操作');
         return false;
       }
     } catch (error) {
-      console.error('Export logs failed:', error);
       await DialogManager.showMessage('错误', `日志导出失败:\n${error}`, 'error');
-      addLogEntry('error', `❌ 日志导出失败: ${error}`);
+      addLog('error', `❌ 日志导出失败: ${error}`);
       return false;
     }
-  }, [logs, addLogEntry]);
+  }, [logs, addLog]);
 
-  // 设置Tauri事件监听器 - 使用全局变量确保应用生命周期内只设置一次
-  const addLogEntryRef = useRef(addLogEntry);
-  
-  // 同步最新的addLogEntry函数到ref
-  useEffect(() => {
-    addLogEntryRef.current = addLogEntry;
-  }, [addLogEntry]);
+  // 处理工作目录选择
+  const handleDirectorySelect = useCallback(async () => {
+    const selectedPath = await DialogManager.selectDirectory();
+    if (selectedPath) {
+      await validateAndApplyDirectory(selectedPath);
+    }
+  }, [validateAndApplyDirectory]);
 
-  useEffect(() => {
-    // 使用全局变量防止重复设置监听器
-    if ((window as any).__duck_cli_listeners_setup) {
+  // 手动重新检测进程/锁
+  const handleRecheck = useCallback(async () => {
+    if (!workingDirectory.path) {
+      addLog('warning', '请先选择工作目录');
       return;
     }
+    setIsRechecking(true);
+    try {
+      addLog('info', '🔍 重新检测进程与数据库锁状态...');
+      const checkResult = await ProcessManager.initializeProcessCheck(workingDirectory.path);
 
-    (window as any).__duck_cli_listeners_setup = true;
-
-    let unlistenOutput: any;
-    let unlistenError: any;
-    let unlistenComplete: any;
-
-    const setupEventListeners = async () => {
-      try {
-        // 监听CLI输出事件
-        unlistenOutput = await listen('cli-output', (event) => {
-          const output = event.payload as string;
-          if (output.trim()) {
-            addLogEntryRef.current('info', output.trim());
-          }
-        });
-
-        // 监听CLI错误事件
-        unlistenError = await listen('cli-error', (event) => {
-          const error = event.payload as string;
-          if (error.trim()) {
-            addLogEntryRef.current('error', error.trim());
-          }
-        });
-
-        // 监听CLI完成事件
-        unlistenComplete = await listen('cli-complete', (event) => {
-          const exitCode = event.payload as number;
-          setIsExecuting(false);
-          
-          if (exitCode === 0) {
-            addLogEntryRef.current('success', `命令执行完成 (退出码: ${exitCode})`);
-          } else {
-            addLogEntryRef.current('error', `命令执行失败 (退出码: ${exitCode})`);
-          }
-          
-          // 添加分隔线
-          addLogEntryRef.current('info', '─'.repeat(50));
-        });
-
-        // 保存清理函数到全局变量
-        (window as any).__duck_cli_listeners_cleanup = () => {
-          if (unlistenOutput) unlistenOutput();
-          if (unlistenError) unlistenError();
-          if (unlistenComplete) unlistenComplete();
-          (window as any).__duck_cli_listeners_setup = false;
-        };
-      } catch (error) {
-        console.error('设置事件监听器失败:', error);
-        (window as any).__duck_cli_listeners_setup = false;
+      if (checkResult.processCleanup.processes_found.length > 0) {
+        addLog('warning', `🧹 发现 ${checkResult.processCleanup.processes_found.length} 个冲突进程`);
+        addLog('success', `✅ 已清理 ${checkResult.processCleanup.processes_killed.length} 个进程`);
       }
-    };
 
-    setupEventListeners();
-
-    // 清理函数
-    return () => {
-      // 不在组件卸载时清理全局监听器，让它们在应用生命周期内持续存在
-    };
-  }, []); // 空依赖数组，确保只注册一次
-
-  // 处理工作目录变化
-  const handleDirectoryChange = useCallback(async (directory: string | null, isValid: boolean) => {
-    console.log('工作目录变更:', directory, '有效性:', isValid);
-    
-    const previousDirectory = workingDirectory;
-    setWorkingDirectory(directory);
-    setIsDirectoryValid(isValid);
-
-    if (directory && isValid && directory !== previousDirectory) {
-      // 保存工作目录配置
-      try {
-        await ConfigManager.setWorkingDirectory(directory);
-        console.log('工作目录已保存到配置:', directory);
-      } catch (error) {
-        console.error('保存工作目录失败:', error);
-        addLogEntry('warning', `⚠️ 保存工作目录失败: ${error}`);
+      if (checkResult.databaseLocked) {
+        addLog('error', '⚠️ 数据库文件仍被锁定，请稍后重试');
+      } else {
+        addLog('success', checkResult.message);
       }
-      
-      // 立即设置目录，不阻塞界面
-      addLogEntry('info', `📁 工作目录已设置: ${directory}`);
-      
-      // 将耗时的进程检查移到后台异步执行
-      setTimeout(async () => {
-        try {
-          addLogEntry('info', '🔍 后台检查并清理冲突进程...');
-          const checkResult = await ProcessManager.initializeProcessCheck(directory);
-          
-          if (checkResult.processCleanup.processes_found.length > 0) {
-            addLogEntry('warning', `🧹 发现 ${checkResult.processCleanup.processes_found.length} 个冲突进程`);
-            addLogEntry('success', `✅ 已清理 ${checkResult.processCleanup.processes_killed.length} 个进程`);
-          }
-          
-          if (checkResult.databaseLocked) {
-            addLogEntry('error', '⚠️ 数据库文件仍被锁定，请稍后重试');
-            setIsDirectoryValid(false); // 临时禁用功能直到锁定解除
-          } else {
-            addLogEntry('success', checkResult.message);
-          }
-        } catch (error) {
-          console.error('进程检查失败:', error);
-          addLogEntry('warning', `⚠️ 进程检查失败: ${error}，但不影响正常使用`);
-          // 进程检查失败不影响工作目录的有效性
-        }
-      }, 100); // 100ms 后执行，不阻塞界面
+    } catch (error) {
+      addLog('error', `检测失败: ${error}`);
+    } finally {
+      setIsRechecking(false);
     }
-
-    // 根据是否需要显示欢迎界面
-    if (!directory || !isValid) {
-      setShowWelcomeModal(true);
-    } else {
-      setShowWelcomeModal(false);
-    }
-  }, [workingDirectory, addLogEntry]);
+  }, [addLog, workingDirectory.path]);
 
   // 处理命令执行
   const handleCommandExecute = useCallback(async (command: string, args: string[]) => {
-    // 防止重复执行
     if (isExecuting) {
       return;
     }
+
+    if (!workingDirectory.path || !workingDirectory.isValid) {
+      addLog('warning', '请先设置有效的工作目录');
+      return;
+    }
     
-    addLogEntry('command', '', command, args);
-    setIsExecuting(true);
-    
-    // 添加执行开始标记
-    addLogEntry('info', `🚀 开始执行: ${command} ${args.join(' ')}`);
+    const commandId = `${command}-${Date.now()}`;
+    addLog('command', '', command, args);
+    setExecuting(true);
+    addLog('info', `🚀 开始执行: ${command} ${args.join(' ')} [${commandId}]`);
     
     try {
-      // 真正执行Tauri命令，会触发事件监听器接收实时输出
-      if (command === 'duck-cli' && workingDirectory) {
-        await DuckCliManager.executeSmart(args, workingDirectory);
+      if (command === 'duck-cli') {
+        await cliGateway.execute(args, { workingDirectory: workingDirectory.path, commandId });
       }
     } catch (error) {
-      addLogEntry('error', `❌ 命令执行失败: ${error}`);
-      setIsExecuting(false); // 异常时手动重置状态
+      addLog('error', `❌ 命令执行失败: ${error}`);
+      setExecuting(false);
     }
-    // 注意：setIsExecuting(false) 会在事件监听器的 cli-complete 事件中处理
-  }, [addLogEntry, workingDirectory, isExecuting]);
+    // setExecuting(false) 将由 cli-complete 事件处理
+  }, [addLog, isExecuting, setExecuting, workingDirectory.path, workingDirectory.isValid]);
 
   // 处理日志消息
   const handleLogMessage = useCallback((message: string, type: LogEntry['type']) => {
-    addLogEntry(type, message);
-  }, [addLogEntry]);
+    addLog(type, message);
+  }, [addLog]);
 
   // 清除日志
   const handleClearLogs = useCallback(() => {
-    setLogs([]);
-    setTotalLogCount(0);
-    addLogEntry('info', '日志已清除');
-  }, [addLogEntry]);
-
-  // 应用初始化 - 只执行一次
-  useEffect(() => {
-    if (isInitialized) return;
-
-    const initializeApp = async () => {
-      console.log('开始初始化应用...');
-      
-      // 标记应用正在初始化，防止其他组件重复初始化
-      (window as any).__duck_app_initializing = true;
-      
-      // 使用直接的状态更新避免循环
-      const initEntry: LogEntry = {
-        id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-        timestamp: new Date().toLocaleTimeString(),
-        type: 'info',
-        message: '🚀 Duck CLI GUI 已启动'
-      };
-      
-      const configEntry: LogEntry = {
-        id: (Date.now() + 1).toString() + Math.random().toString(36).substr(2, 9),
-        timestamp: new Date().toLocaleTimeString(),
-        type: 'info',
-        message: `📊 日志管理: 最大 ${logConfig.maxEntries} 条，自动循环覆盖旧记录`
-      };
-      
-      setLogs([initEntry, configEntry]);
-      setTotalLogCount(2);
-      
-      try {
-        // 检查是否已有保存的工作目录
-        const savedDirectory = await ConfigManager.getWorkingDirectory();
-        
-        if (savedDirectory) {
-          // 验证保存的目录
-          const validation = await FileSystemManager.validateDirectory(savedDirectory);
-          await handleDirectoryChange(savedDirectory, validation.valid);
-        } else {
-          setShowWelcomeModal(true);
-        }
-      } catch (error) {
-        console.error('初始化失败:', error);
-        setShowWelcomeModal(true);
-      }
-      
-      // 标记应用初始化完成
-      (window as any).__duck_app_initialized = true;
-      (window as any).__duck_app_initializing = false;
-      
-      setIsInitialized(true);
-      setIsAppLoading(false); // 停止加载状态
-      console.log('应用初始化完成');
-    };
-
-    initializeApp();
-  }, [isInitialized, logConfig.maxEntries, handleDirectoryChange]);
+    clearLogs();
+    addLog('info', '日志已清除');
+  }, [addLog, clearLogs]);
 
   return (
     <div className="h-screen flex flex-col bg-gray-100">
@@ -399,8 +241,12 @@ function App() {
         <>
           {/* 顶部工作目录栏 */}
           <WorkingDirectoryBar 
-            onDirectoryChange={handleDirectoryChange} 
-            workingDirectory={workingDirectory}
+            workingDirectory={workingDirectory.path}
+            validationState={workingDirectory.validationState}
+            validationError={workingDirectory.error}
+            onSelectDirectory={handleDirectorySelect}
+            onRecheck={handleRecheck}
+            isRechecking={isRechecking}
           />
 
           {/* 主内容区域 */}
@@ -408,8 +254,8 @@ function App() {
             {/* 上半部分：操作面板 - 使用自适应高度 */}
             <div className="flex-shrink-0 overflow-auto">
               <OperationPanel
-                workingDirectory={workingDirectory}
-                isDirectoryValid={isDirectoryValid}
+                workingDirectory={workingDirectory.path}
+                isDirectoryValid={workingDirectory.isValid}
                 onCommandExecute={handleCommandExecute}
                 onLogMessage={handleLogMessage}
               />
@@ -420,7 +266,7 @@ function App() {
               <TerminalWindow
                 logs={logs}
                 onClearLogs={handleClearLogs}
-                isEnabled={isDirectoryValid}
+                isEnabled={workingDirectory.isValid}
                 totalLogCount={totalLogCount}
                 maxLogEntries={logConfig.maxEntries}
                 onExportLogs={exportAllLogs}
@@ -443,9 +289,7 @@ function App() {
         <WelcomeSetupModal
           isOpen={showWelcomeModal}
           onComplete={async (directory: string) => {
-            // 验证目录
-            const validation = await FileSystemManager.validateDirectory(directory);
-            await handleDirectoryChange(directory, validation.valid);
+            await validateAndApplyDirectory(directory);
             setShowWelcomeModal(false);
           }}
           onSkip={() => setShowWelcomeModal(false)}

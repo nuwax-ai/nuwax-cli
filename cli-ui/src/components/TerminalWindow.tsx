@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { 
   CommandLineIcon, 
   TrashIcon,
@@ -9,6 +9,7 @@ import {
   PlayIcon,
   ChartBarIcon
 } from '@heroicons/react/24/outline';
+import { FixedSizeList as List, ListOnScrollProps } from 'react-window';
 import { DialogManager } from '../utils/tauri';
 
 interface LogEntry {
@@ -29,6 +30,8 @@ interface TerminalWindowProps {
   onExportLogs: () => Promise<boolean>; // 导出日志函数
 }
 
+const ROW_HEIGHT = 24;
+
 const TerminalWindow: React.FC<TerminalWindowProps> = ({ 
   logs, 
   onClearLogs, 
@@ -38,63 +41,62 @@ const TerminalWindow: React.FC<TerminalWindowProps> = ({
   onExportLogs
 }) => {
   const [autoScroll, setAutoScroll] = useState(true);
-  const logsEndRef = useRef<HTMLDivElement>(null);
+  const [listHeight, setListHeight] = useState(320);
   const containerRef = useRef<HTMLDivElement>(null);
-  const userInteractedRef = useRef(false);  // 跟踪用户是否主动交互
-  const isAutoScrollingRef = useRef(false); // 跟踪是否正在自动滚动
+  const listRef = useRef<List>(null);
+  const userInteractedRef = useRef(false);
+  const isAutoScrollingRef = useRef(false);
 
-  // 自动滚动到底部
+  // 监听容器尺寸变化以适配虚拟列表高度
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => {
+      const rect = el.getBoundingClientRect();
+      setListHeight(rect.height);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  // 新日志时自动滚动到底部
   useEffect(() => {
-    if (autoScroll && logsEndRef.current) {
-      isAutoScrollingRef.current = true;
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
-      // 短暂延迟后重置自动滚动标记
-      setTimeout(() => {
-        isAutoScrollingRef.current = false;
-      }, 100);
-    }
+    if (!autoScroll || logs.length === 0 || !listRef.current) return;
+    isAutoScrollingRef.current = true;
+    listRef.current.scrollToItem(logs.length - 1);
+    setTimeout(() => {
+      isAutoScrollingRef.current = false;
+    }, 50);
   }, [logs, autoScroll]);
 
-  // 检测用户是否手动滚动
-  const handleScroll = () => {
-    // 如果正在自动滚动，忽略这次滚动事件
-    if (isAutoScrollingRef.current) {
-      return;
-    }
-    
-    if (containerRef.current) {
-      const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
-      const isAtBottom = scrollTop + clientHeight >= scrollHeight - 10;
-      
-      // 只有在用户真正交互并且不在底部时才暂停自动滚动
-      if (!isAtBottom && autoScroll && userInteractedRef.current) {
-        setAutoScroll(false);
-      }
+  const handleScroll = (props: ListOnScrollProps) => {
+    if (isAutoScrollingRef.current) return;
+    const { scrollOffset, scrollDirection, scrollUpdateWasRequested } = props;
+    if (scrollUpdateWasRequested) return;
+
+    // 估算是否在底部
+    const maxOffset = Math.max(0, logs.length * ROW_HEIGHT - listHeight);
+    const isAtBottom = scrollOffset >= maxOffset - ROW_HEIGHT;
+    if (!isAtBottom && scrollDirection === 'forward' && userInteractedRef.current) {
+      setAutoScroll(false);
     }
   };
 
-  // 检测用户开始交互
   const handleUserInteraction = () => {
     userInteractedRef.current = true;
-    // 短暂延迟后重置交互标记，允许自动滚动恢复
-    setTimeout(() => {
-      userInteractedRef.current = false;
-    }, 1000);
+    setTimeout(() => { userInteractedRef.current = false; }, 500);
   };
 
-  // 手动滚动到底部
   const scrollToBottom = () => {
-    if (logsEndRef.current) {
-      isAutoScrollingRef.current = true;
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
-      setAutoScroll(true); // 重新启用自动滚动
-      setTimeout(() => {
-        isAutoScrollingRef.current = false;
-      }, 100);
-    }
+    if (!listRef.current) return;
+    isAutoScrollingRef.current = true;
+    listRef.current.scrollToItem(logs.length - 1);
+    setAutoScroll(true);
+    setTimeout(() => { isAutoScrollingRef.current = false; }, 50);
   };
 
-  // 导出日志
   const exportLogs = async () => {
     try {
       const success = await onExportLogs();
@@ -107,14 +109,40 @@ const TerminalWindow: React.FC<TerminalWindowProps> = ({
     }
   };
 
-  // 获取内存使用情况
-  const getMemoryUsage = () => {
-    const currentLogs = logs.length;
-    const percentage = Math.round((currentLogs / maxLogEntries) * 100);
-    return { currentLogs, percentage };
-  };
+  const currentLogs = logs.length;
+  const percentage = Math.round((currentLogs / maxLogEntries) * 100);
 
-  const { currentLogs, percentage } = getMemoryUsage();
+  const renderRow = ({ index, style }: { index: number; style: React.CSSProperties }) => {
+    const log = logs[index];
+    return (
+      <div style={style} className="flex items-start space-x-2 px-4">
+        <span className="text-gray-500 text-xs flex-shrink-0 mt-0.5">
+          {log.timestamp}
+        </span>
+        <div className="flex-1 min-w-0">
+          {log.type === 'command' ? (
+            <div className="text-blue-400 text-sm">
+              <span className="text-gray-500">$</span> {log.command} {log.args?.join(' ')}
+            </div>
+          ) : (
+            <div className={
+              log.type === 'error' ? 'text-red-400 text-sm' :
+              log.type === 'success' ? 'text-green-400 text-sm' :
+              log.type === 'warning' ? 'text-yellow-400 text-sm' :
+              'text-gray-300 text-sm'
+            }>
+              <span className="mr-2">
+                {log.type === 'error' ? '✗' :
+                 log.type === 'success' ? '✓' :
+                 log.type === 'warning' ? '⚠' : 'ℹ'}
+              </span>
+              {log.message}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="bg-white border-t border-gray-200 flex flex-col h-full">
@@ -192,11 +220,10 @@ const TerminalWindow: React.FC<TerminalWindowProps> = ({
       {/* 终端内容区域 */}
       <div 
         ref={containerRef}
-        onScroll={handleScroll}
         onMouseDown={handleUserInteraction}
         onWheel={handleUserInteraction}
         onKeyDown={handleUserInteraction}
-        className="flex-1 overflow-y-auto p-4 bg-gray-900 text-green-400 font-mono text-sm"
+        className="flex-1 overflow-hidden bg-gray-900 text-green-400 font-mono text-sm"
         style={{ minHeight: '300px' }}
       >
         {logs.length === 0 ? (
@@ -211,41 +238,21 @@ const TerminalWindow: React.FC<TerminalWindowProps> = ({
             </div>
           </div>
         ) : (
-          <div className="space-y-1">
-            {logs.map((log) => (
-              <div key={log.id} className="flex items-start space-x-2">
-                <span className="text-gray-500 text-xs flex-shrink-0 mt-0.5">
-                  {log.timestamp}
-                </span>
-                <div className="flex-1 min-w-0">
-                  {log.type === 'command' ? (
-                    <div className="text-blue-400">
-                      <span className="text-gray-500">$</span> {log.command} {log.args?.join(' ')}
-                    </div>
-                  ) : (
-                    <div className={
-                      log.type === 'error' ? 'text-red-400' :
-                      log.type === 'success' ? 'text-green-400' :
-                      log.type === 'warning' ? 'text-yellow-400' :
-                      'text-gray-300'
-                    }>
-                      <span className="mr-2">
-                        {log.type === 'error' ? '✗' :
-                         log.type === 'success' ? '✓' :
-                         log.type === 'warning' ? '⚠' : 'ℹ'}
-                      </span>
-                      {log.message}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-            <div ref={logsEndRef} />
-          </div>
+          <List
+            ref={listRef}
+            height={listHeight}
+            itemCount={logs.length}
+            itemSize={ROW_HEIGHT}
+            width="100%"
+            onScroll={handleScroll}
+            className="outline-none"
+          >
+            {renderRow}
+          </List>
         )}
       </div>
     </div>
   );
 };
 
-export default TerminalWindow; 
+export default TerminalWindow;
