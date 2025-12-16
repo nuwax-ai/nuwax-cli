@@ -19,7 +19,7 @@ impl DockerManager {
         self.ensure_host_volumes_exist().await?;
 
         info!("🎯 步骤3: 执行docker-compose up命令...");
-        let output = self.run_compose_command(&["up", "-d"]).await?;
+        let output = self.run_compose_command(&["up", "-d", "--pull", "always"]).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
