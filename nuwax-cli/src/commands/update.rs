@@ -1,10 +1,7 @@
 use crate::app::CliApp;
 use crate::cli::UpgradeArgs;
 use anyhow::Result;
-use client_core::{
-    upgrade_strategy::UpgradeStrategy,
-    utils::archive,
-};
+use client_core::{upgrade_strategy::UpgradeStrategy, utils::archive};
 use std::{fs, path::PathBuf};
 use tracing::{error, info};
 

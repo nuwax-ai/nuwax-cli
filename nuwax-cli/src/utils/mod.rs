@@ -1,8 +1,6 @@
 use anyhow::Result;
 use client_core::{
-    constants::docker::get_docker_work_dir,
-    upgrade_strategy::UpgradeStrategy,
-    utils::archive,
+    constants::docker::get_docker_work_dir, upgrade_strategy::UpgradeStrategy, utils::archive,
 };
 use std::io::{Read, Write};
 use std::time::Instant;

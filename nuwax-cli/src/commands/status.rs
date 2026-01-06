@@ -89,7 +89,11 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
     info!("💡 状态分析和建议:");
 
     let has_compose = docker_compose_path.exists();
-    let has_package = download_path.as_ref().ok().map(|p| p.exists()).unwrap_or(false);
+    let has_package = download_path
+        .as_ref()
+        .ok()
+        .map(|p| p.exists())
+        .unwrap_or(false);
 
     if !has_compose && !has_package {
         info!("   🆕 您似乎是首次使用");

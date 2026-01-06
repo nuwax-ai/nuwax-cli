@@ -396,10 +396,7 @@ impl AppConfig {
 
         // 验证文件存在
         if !path.exists() {
-            return Err(anyhow::anyhow!(
-                "归档文件不存在: {}",
-                path.display()
-            ));
+            return Err(anyhow::anyhow!("归档文件不存在: {}", path.display()));
         }
 
         Ok(path)
