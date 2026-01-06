@@ -614,7 +614,7 @@ pub async fn extract_docker_service_with_upgrade_strategy(
     upgrade_strategy: UpgradeStrategy,
 ) -> Result<()> {
     //区分升级策略,来进行解压
-    let upgrade_file_zip: Option<PathBuf> = match &upgrade_strategy {
+    let file_zip: PathBuf = match &upgrade_strategy {
         UpgradeStrategy::FullUpgrade {
             target_version,
             download_type,
@@ -625,48 +625,35 @@ pub async fn extract_docker_service_with_upgrade_strategy(
 
             let base_version = target_version.base_version_string();
 
-            let zip_path = app.config.get_version_download_file_path(
+            app.config.get_version_download_file_path(
                 &base_version,
                 &download_type.to_string(),
                 None,
-            );
-            Some(zip_path)
+            )?
         }
         UpgradeStrategy::PatchUpgrade { target_version, .. } => {
             //增量升级
             let base_version = target_version.base_version_string();
             let full_version = target_version.to_string();
 
-            let zip_path = app.config.get_version_download_file_path(
+            app.config.get_version_download_file_path(
                 &base_version,
                 &full_version.to_string(),
                 None,
-            );
-            Some(zip_path)
+            )?
         }
         UpgradeStrategy::NoUpgrade { .. } => {
             // 无需升级
-            None
+            return Ok(());
         }
     };
 
-    // 检查文件是否存在
-    if let Some(file_zip) = upgrade_file_zip {
-        if !file_zip.exists() {
-            error!("❌ Docker服务包文件不存在: {}", file_zip.display());
-            return Err(anyhow::anyhow!(format!(
-                "Docker服务包文件不存在: {}",
-                file_zip.display()
-            )));
-        }
+    info!("📦 找到Docker服务包: {}", file_zip.display());
 
-        info!("📦 找到Docker服务包: {}", file_zip.display());
+    // 使用utils中的解压函数
+    crate::utils::extract_docker_service(&file_zip, &upgrade_strategy).await?;
 
-        // 使用utils中的解压函数
-        crate::utils::extract_docker_service(&file_zip, &upgrade_strategy).await?;
-
-        info!("✅ Docker服务包解压完成");
-    }
+    info!("✅ Docker服务包解压完成");
     Ok(())
 }
 

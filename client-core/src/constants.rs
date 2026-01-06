@@ -517,13 +517,6 @@ pub mod upgrade {
     /// 临时目录名
     pub const TEMP_DIR_NAME: &str = "temp";
 
-    /// 下载的docker服务包文件名,老版本的文件名,包含x86_64 和 arm64 的docker镜像
-    pub const DOCKER_SERVICE_PACKAGE: &str = "docker.zip";
-    /// 下载的docker服务包文件名（arm64）
-    pub const DOCKER_SERVICE_AARCH64_PACKAGE: &str = "docker-aarch64.zip";
-    /// 下载的docker服务包文件名（x86_64）
-    pub const DOCKER_SERVICE_X86_64_PACKAGE: &str = "docker-x86_64.zip";
-
     /// 默认更新包文件名
     pub const DEFAULT_UPDATE_PACKAGE: &str = "update.zip";
 

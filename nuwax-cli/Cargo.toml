@@ -58,6 +58,10 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 # ZIP文件处理
 zip = { workspace = true }
 
+# TAR.GZ文件处理
+flate2 = { workspace = true }
+tar = { workspace = true }
+
 # 执行外部命令检查
 which = { workspace = true }
 

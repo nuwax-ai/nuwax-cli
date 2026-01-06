@@ -66,6 +66,9 @@ zip = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 
+# 文件类型检测 (魔数检测)
+infer = { workspace = true }
+
 # 哈希计算
 sha2 = { workspace = true }
 

@@ -34,12 +34,12 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
     let docker_compose_path = std::path::Path::new(&app.config.docker.compose_file);
     let env_file_path = std::path::Path::new(&app.config.docker.env_file);
 
-    // 使用新的版本化路径检查服务包文件
+    // 使用新的版本化路径检查服务包文件（自动查找 .zip 或 .tar.gz）
     let current_version = &app.config.get_docker_versions();
     let download_path = app.config.get_version_download_file_path(
         current_version,
         "full",
-        Some(client_core::constants::upgrade::DOCKER_SERVICE_PACKAGE),
+        None, // 自动查找归档文件
     );
 
     if docker_compose_path.exists() {
@@ -54,10 +54,13 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
         );
     }
 
-    if download_path.exists() {
-        info!("   ✅ 服务包文件: {}", download_path.display());
-    } else {
-        info!("   ❌ 服务包文件: {} (不存在)", download_path.display());
+    match &download_path {
+        Ok(path) => {
+            info!("   ✅ 服务包文件: {}", path.display());
+        }
+        Err(e) => {
+            info!("   ❌ 服务包文件: (错误: {})", e);
+        }
     }
 
     // Docker服务状态
@@ -85,12 +88,15 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
     // 根据状态提供建议
     info!("💡 状态分析和建议:");
 
-    if !docker_compose_path.exists() && !download_path.exists() {
+    let has_compose = docker_compose_path.exists();
+    let has_package = download_path.as_ref().ok().map(|p| p.exists()).unwrap_or(false);
+
+    if !has_compose && !has_package {
         info!("   🆕 您似乎是首次使用");
         info!("   📝 建议执行以下步骤:");
         info!("      1. nuwax-cli upgrade                  (下载Docker服务包)");
         info!("      2. nuwax-cli docker-service deploy    (部署并启动服务)");
-    } else if !docker_compose_path.exists() && download_path.exists() {
+    } else if !has_compose && has_package {
         info!("   📦 发现服务包文件，但尚未解压");
         info!("   📝 建议执行:");
         info!("      - nuwax-cli docker-service deploy  (完整部署流程)");

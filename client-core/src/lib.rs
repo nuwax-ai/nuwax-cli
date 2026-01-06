@@ -2,6 +2,8 @@ pub mod api;
 pub mod api_config;
 pub mod api_types;
 
+pub mod utils;
+
 // 环境检测模块
 pub mod environment;
 

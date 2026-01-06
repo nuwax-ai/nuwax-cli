@@ -56,3 +56,4 @@ export const useAppInit = (initializeDirectory: DirectoryInitializer) => {
   }, [isInitialized, addLog, initializeDirectory, setAppLoading, setInitialized, setShowWelcomeModal]);
 };
 
+
