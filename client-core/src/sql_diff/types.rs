@@ -55,11 +55,11 @@ impl TableColumn {
                 let norm1 = Self::normalize_default_value(v1);
                 let norm2 = Self::normalize_default_value(v2);
                 norm1 == norm2
-            },
+            }
             // 特殊情况：对于 nullable 列，DEFAULT NULL 等同于没有 DEFAULT
             (Some(v), None) | (None, Some(v)) if nullable => {
                 Self::normalize_default_value(v) == "NULL"
-            },
+            }
             _ => false,
         }
     }
@@ -67,16 +67,19 @@ impl TableColumn {
     /// 标准化默认值
     fn normalize_default_value(value: &str) -> String {
         let trimmed = value.trim();
-        
+
         // 移除数字周围的引号
         if trimmed.starts_with('\'') && trimmed.ends_with('\'') {
-            let inner = &trimmed[1..trimmed.len()-1];
+            let inner = &trimmed[1..trimmed.len() - 1];
             // 如果内容是纯数字，移除引号
-            if inner.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '.') {
+            if inner
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '-' || c == '.')
+            {
                 return inner.to_string();
             }
         }
-        
+
         // 统一大小写（对于关键字）
         trimmed.to_uppercase()
     }

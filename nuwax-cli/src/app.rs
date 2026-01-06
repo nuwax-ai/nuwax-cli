@@ -61,7 +61,7 @@ impl CliApp {
         }
 
         // 创建认证客户端（自动处理注册和认证）
-        let server_base_url = client_core::constants::api::get_base_url().to_string();
+        let server_base_url = client_core::constants::api::get_base_url();
         let authenticated_client =
             Arc::new(AuthenticatedClient::new(database.clone(), server_base_url).await?);
 

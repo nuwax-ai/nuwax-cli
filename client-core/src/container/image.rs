@@ -6,7 +6,6 @@ use tracing::{debug, info, warn};
 impl DockerManager {
     /// 加载 Docker 镜像，返回加载的镜像名称
     pub async fn load_image<P: AsRef<Path>>(&self, image_path: P) -> Result<String> {
-
         let image_path = image_path.as_ref();
         if !image_path.exists() {
             return Err(anyhow::anyhow!("镜像文件不存在: {}", image_path.display()));

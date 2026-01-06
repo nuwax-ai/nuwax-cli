@@ -2,8 +2,8 @@ use anyhow::Result;
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, NetworkCreateRequest};
 use bollard::query_parameters::{
-    CreateImageOptionsBuilder, CreateContainerOptions, StartContainerOptions,
-    ListContainersOptions, StopContainerOptions, RemoveContainerOptions,
+    CreateContainerOptions, CreateImageOptionsBuilder, ListContainersOptions,
+    RemoveContainerOptions, StartContainerOptions, StopContainerOptions,
 };
 use serde_yaml::Value as YamlValue;
 use std::collections::HashMap;
@@ -288,8 +288,14 @@ impl ModernDockerManager {
                     if name.contains(&self.project_name) {
                         info!("🛑 停止容器: {}", name);
                         if let Some(id) = &container.id {
-                            let _ = self.docker.stop_container(id, None::<StopContainerOptions>).await;
-                            let _ = self.docker.remove_container(id, None::<RemoveContainerOptions>).await;
+                            let _ = self
+                                .docker
+                                .stop_container(id, None::<StopContainerOptions>)
+                                .await;
+                            let _ = self
+                                .docker
+                                .remove_container(id, None::<RemoveContainerOptions>)
+                                .await;
                         }
                     }
                 }

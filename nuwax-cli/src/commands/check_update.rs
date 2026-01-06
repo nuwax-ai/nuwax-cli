@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 /// 在编译时从环境变量 CARGO_PKG_REPOSITORY 中提取
 fn parse_github_repo() -> (&'static str, &'static str) {
     const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
-    
+
     // 解析 GitHub URL，支持格式: https://github.com/owner/repo
     if let Some(path) = REPOSITORY.strip_prefix("https://github.com/") {
         if let Some((owner, repo)) = path.split_once('/') {
@@ -19,9 +19,12 @@ fn parse_github_repo() -> (&'static str, &'static str) {
             return (owner, repo);
         }
     }
-    
+
     // 如果解析失败，抛出编译错误
-    panic!("无法从 Cargo.toml 的 repository 字段解析 GitHub 仓库信息: {}", REPOSITORY);
+    panic!(
+        "无法从 Cargo.toml 的 repository 字段解析 GitHub 仓库信息: {}",
+        REPOSITORY
+    );
 }
 
 //cli 命令工具请求的地址
@@ -168,7 +171,6 @@ impl UpdateSourceManager {
             sources: vec![UpdateSource::VersionServer, UpdateSource::GitHub],
         }
     }
-
 
     /// 获取版本信息，按优先级尝试各个源
     pub async fn fetch_latest_version(&self) -> Result<GitHubRelease> {
@@ -605,7 +607,10 @@ pub async fn install_release(url: &str, version: &str) -> Result<()> {
         warn!("清理临时文件失败: {}", e);
     }
 
-    info!("🎉 安装完成！Nuwax Cli  已更新到版本 {}, 可运行'nuwax-cli --version' 验证安装版本", version);
+    info!(
+        "🎉 安装完成！Nuwax Cli  已更新到版本 {}, 可运行'nuwax-cli --version' 验证安装版本",
+        version
+    );
     info!("💡 请再次运行命令 'nuwax-cli auto-upgrade-deploy run' 来完成最终安装部署");
 
     Ok(())

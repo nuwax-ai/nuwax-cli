@@ -69,7 +69,10 @@ mod tests {
     fn test_restart_policy_display() {
         assert_eq!(format!("{:?}", RestartPolicy::No), "不重启");
         assert_eq!(format!("{:?}", RestartPolicy::Always), "总是重启");
-        assert_eq!(format!("{:?}", RestartPolicy::UnlessStopped), "除非手动停止");
+        assert_eq!(
+            format!("{:?}", RestartPolicy::UnlessStopped),
+            "除非手动停止"
+        );
         assert_eq!(format!("{:?}", RestartPolicy::OnFailure), "失败时重启");
         assert_eq!(
             format!("{:?}", RestartPolicy::OnFailureWithRetries(3)),

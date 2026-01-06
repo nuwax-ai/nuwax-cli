@@ -47,7 +47,10 @@ impl DockerManager {
     }
 
     /// 检查 Docker 和 Docker Compose 是否可用（支持自定义路径）
-    pub async fn check_prerequisites_with_path(&self, custom_compose_file: Option<&std::path::PathBuf>) -> Result<()> {
+    pub async fn check_prerequisites_with_path(
+        &self,
+        custom_compose_file: Option<&std::path::PathBuf>,
+    ) -> Result<()> {
         info!("🔍 开始检查Docker环境先决条件...");
 
         // 首先检查 Docker Compose 文件是否存在

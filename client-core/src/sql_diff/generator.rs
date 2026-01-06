@@ -147,7 +147,7 @@ pub async fn generate_live_schema_diff(
     };
 
     info!("Live Diff 完成: {}", description);
-    
+
     Ok(super::types::SchemaDiffResult {
         diff_sql,
         description,

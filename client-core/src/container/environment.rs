@@ -176,8 +176,6 @@ fn is_running_in_wsl() -> bool {
     false
 }
 
-
-
 /// 检测路径格式
 fn detect_path_format(host_os: &HostOs) -> PathFormat {
     match host_os {
@@ -214,8 +212,6 @@ mod tests {
         assert!(!HostOs::LinuxNative.needs_early_mount_check());
         assert!(!HostOs::MacOs.needs_early_mount_check());
     }
-
-
 
     #[test]
     fn test_path_format_display_name() {

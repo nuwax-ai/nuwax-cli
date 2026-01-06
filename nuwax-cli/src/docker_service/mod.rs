@@ -41,13 +41,20 @@ pub struct DockerService;
 impl DockerService {
     /// 创建 Docker 服务管理器实例
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(config: Arc<AppConfig>, docker_manager: Arc<DockerManager>) -> Result<DockerServiceManager> {
+    pub fn new(
+        config: Arc<AppConfig>,
+        docker_manager: Arc<DockerManager>,
+    ) -> Result<DockerServiceManager> {
         let work_dir = docker_manager
             .get_working_directory()
             .ok_or_else(|| anyhow::anyhow!("无法确定 Docker 工作目录"))?
             .to_path_buf();
 
-        Ok(DockerServiceManager::new(config, docker_manager.clone(), work_dir))
+        Ok(DockerServiceManager::new(
+            config,
+            docker_manager.clone(),
+            work_dir,
+        ))
     }
 }
 

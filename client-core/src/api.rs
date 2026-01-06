@@ -26,7 +26,10 @@ pub struct ApiClient {
 
 impl ApiClient {
     /// 创建新的 API 客户端
-    pub fn new(client_id: Option<String>, authenticated_client: Option<Arc<AuthenticatedClient>> ) -> Self {
+    pub fn new(
+        client_id: Option<String>,
+        authenticated_client: Option<Arc<AuthenticatedClient>>,
+    ) -> Self {
         Self {
             client: Client::new(),
             config: Arc::new(ApiConfig::default()),

@@ -102,7 +102,6 @@ mod tests {
         assert!(result.is_ok());
         assert!(!result.unwrap());
 
-
         // 测试不存在的服务
         let result = manager.is_oneshot_service("non-existent").await;
         assert!(result.is_err());

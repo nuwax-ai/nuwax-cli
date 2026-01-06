@@ -339,10 +339,7 @@ impl AppConfig {
         let download_dir = self.cache.download_dir.replace('\\', "/");
 
         TEMPLATE
-            .replace(
-                "{docker_service_version}",
-                &self.get_docker_versions()
-            )
+            .replace("{docker_service_version}", &self.get_docker_versions())
             .replace("{compose_file}", &compose_file)
             .replace("{backup_storage_dir}", &backup_storage_dir)
             .replace("{cache_dir}", &cache_dir)

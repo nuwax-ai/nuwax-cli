@@ -319,7 +319,9 @@ pub async fn execute_duck_cli_sidecar(
                     stream: "stdout".to_string(),
                     chunk: output.to_string(),
                     seq,
-                    timestamp: OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                    timestamp: OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
                 };
                 seq += 1;
                 let _ = app.emit("cli-output", payload);
@@ -332,7 +334,9 @@ pub async fn execute_duck_cli_sidecar(
                     stream: "stderr".to_string(),
                     chunk: output.to_string(),
                     seq,
-                    timestamp: OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                    timestamp: OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
                 };
                 seq += 1;
                 let _ = app.emit("cli-error", payload);
@@ -343,7 +347,9 @@ pub async fn execute_duck_cli_sidecar(
                     command_id: command_id.clone(),
                     exit_code,
                     duration_ms: start.elapsed().as_millis(),
-                    timestamp: OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                    timestamp: OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
                 };
                 let _ = app.emit("cli-complete", done);
                 break;
@@ -402,7 +408,9 @@ pub async fn execute_duck_cli_system(
             stream: "stdout".to_string(),
             chunk: stdout.clone(),
             seq: 0,
-            timestamp: OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+            timestamp: OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
         };
         let _ = app.emit("cli-output", payload);
     }
@@ -412,7 +420,9 @@ pub async fn execute_duck_cli_system(
             stream: "stderr".to_string(),
             chunk: stderr.clone(),
             seq: 1,
-            timestamp: OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+            timestamp: OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
         };
         let _ = app.emit("cli-error", payload);
     }
@@ -420,7 +430,9 @@ pub async fn execute_duck_cli_system(
         command_id: command_id.clone(),
         exit_code,
         duration_ms: start.elapsed().as_millis(),
-        timestamp: OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+        timestamp: OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
     };
     let _ = app.emit("cli-complete", done);
 
@@ -441,7 +453,14 @@ pub async fn execute_duck_cli_smart(
     command_id: Option<String>,
 ) -> Result<CommandResult, String> {
     // 优先使用Sidecar方式
-    match execute_duck_cli_sidecar(app.clone(), args.clone(), working_dir.clone(), command_id.clone()).await {
+    match execute_duck_cli_sidecar(
+        app.clone(),
+        args.clone(),
+        working_dir.clone(),
+        command_id.clone(),
+    )
+    .await
+    {
         Ok(result) => {
             // Sidecar成功，直接返回结果（已发送事件）
             Ok(result)
@@ -453,12 +472,15 @@ pub async fn execute_duck_cli_smart(
                 stream: "stdout".to_string(),
                 chunk: "⚠️ Sidecar方式失败，使用系统命令...".to_string(),
                 seq: 0,
-                timestamp: OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                timestamp: OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
             };
             let _ = app.emit("cli-output", warn_payload);
 
             // 降级到系统命令
-            match execute_duck_cli_system(app.clone(), args, working_dir, command_id.clone()).await {
+            match execute_duck_cli_system(app.clone(), args, working_dir, command_id.clone()).await
+            {
                 Ok(result) => {
                     // System成功，返回结果（已发送事件）
                     Ok(result)
@@ -470,14 +492,18 @@ pub async fn execute_duck_cli_smart(
                         stream: "stderr".to_string(),
                         chunk: "❌ 所有CLI执行方式都失败".to_string(),
                         seq: 1,
-                        timestamp: OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                        timestamp: OffsetDateTime::now_utc()
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap_or_default(),
                     };
                     let _ = app.emit("cli-error", err_payload);
                     let done = CliCompleteEvent {
                         command_id: command_id.clone(),
                         exit_code: -1,
                         duration_ms: 0,
-                        timestamp: OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                        timestamp: OffsetDateTime::now_utc()
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap_or_default(),
                     };
                     let _ = app.emit("cli-complete", done);
 

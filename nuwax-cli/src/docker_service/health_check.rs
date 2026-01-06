@@ -724,10 +724,13 @@ impl HealthChecker {
         match Docker::connect_with_socket_defaults() {
             Ok(docker) => {
                 // 获取容器列表，查找指定容器
-                match docker.list_containers(Some(ListContainersOptions {
-                    all: true,
-                    ..Default::default()
-                })).await {
+                match docker
+                    .list_containers(Some(ListContainersOptions {
+                        all: true,
+                        ..Default::default()
+                    }))
+                    .await
+                {
                     Ok(containers) => {
                         for container in containers {
                             // 检查容器名称是否匹配

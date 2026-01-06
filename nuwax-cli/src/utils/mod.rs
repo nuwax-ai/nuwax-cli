@@ -226,8 +226,11 @@ fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
 /// 判断路径是否属于保护目录 (upload, data 等)
 fn is_upload_directory_path(path: &std::path::Path) -> bool {
     // 判断 [upload, project_workspace, project_zips, project_nginx, project_init, data] 目录
-    path.components()
-        .any(|component| client_core::constants::docker::EXCLUDE_DIRS.iter().any(|d| component.as_os_str() == *d))
+    path.components().any(|component| {
+        client_core::constants::docker::EXCLUDE_DIRS
+            .iter()
+            .any(|d| component.as_os_str() == *d)
+    })
 }
 
 /// 安全删除 docker 目录，保留 upload 目录
@@ -248,7 +251,10 @@ fn safe_remove_docker_directory(output_dir: &std::path::Path) -> Result<()> {
         let file_name = entry.file_name();
 
         // 跳过 [upload, project_workspace, project_zips, project_nginx, project_init, data] 目录
-        if client_core::constants::docker::EXCLUDE_DIRS.iter().any(|d| file_name.as_os_str() == *d) {
+        if client_core::constants::docker::EXCLUDE_DIRS
+            .iter()
+            .any(|d| file_name.as_os_str() == *d)
+        {
             info!("🛡️ 保留目录: {}", path.display());
             continue;
         }

@@ -1145,6 +1145,7 @@ dependencies = [
  "toml 0.9.2",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "walkdir",
  "which",
@@ -4293,7 +4294,7 @@ dependencies = [
 
 [[package]]
 name = "nuwax-cli"
-version = "1.0.67"
+version = "1.0.68"
 dependencies = [
  "anyhow",
  "bollard",

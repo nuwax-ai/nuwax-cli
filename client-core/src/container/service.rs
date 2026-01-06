@@ -19,7 +19,8 @@ impl DockerManager {
         self.ensure_host_volumes_exist().await?;
 
         info!("🎯 步骤3: 执行docker-compose up命令...");
-        let output = self.run_compose_command(&["up", "-d", "--pull", "always"]).await?;
+        // let output = self.run_compose_command(&["up", "-d", "--pull", "always"]).await?;
+        let output = self.run_compose_command(&["up", "-d"]).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -112,7 +113,6 @@ impl DockerManager {
 
     /// 获取服务状态 - 使用 ducker 库实现，只返回docker-compose中定义的服务
     pub async fn get_services_status(&self) -> Result<Vec<ServiceInfo>> {
-
         info!("使用 ducker 库获取容器状态...");
 
         // 1. 获取docker-compose.yml中定义的服务名称
@@ -418,10 +418,7 @@ impl DockerManager {
                                     .await
                                     .unwrap_or(false)
                                 {
-                                    debug!(
-                                        "服务 {} 是一次性任务，已正常退出",
-                                        service.name
-                                    );
+                                    debug!("服务 {} 是一次性任务，已正常退出", service.name);
                                 } else {
                                     failed_services.push(service.name.clone());
                                 }

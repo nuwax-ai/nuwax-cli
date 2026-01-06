@@ -447,7 +447,7 @@ fn is_column_primary_key(column: &ColumnDef) -> bool {
 }
 
 /// 从 IndexColumn 列表中提取列名
-/// 
+///
 /// 处理三种情况：
 /// 1. 简单列名：`column_name`
 /// 2. 复合标识符：`table.column` (只取最后一部分)
@@ -457,9 +457,7 @@ fn extract_index_columns(index_columns: &[sqlparser::ast::IndexColumn]) -> Vec<S
         .iter()
         .filter_map(|index_col| {
             match &index_col.column.expr {
-                sqlparser::ast::Expr::Identifier(ident) => {
-                    Some(strip_backticks(&ident.value))
-                }
+                sqlparser::ast::Expr::Identifier(ident) => Some(strip_backticks(&ident.value)),
                 sqlparser::ast::Expr::CompoundIdentifier(idents) => {
                     // 处理 table.column 格式，只取最后一个部分
                     idents.last().map(|id| strip_backticks(&id.value))
@@ -474,14 +472,14 @@ fn extract_index_columns(index_columns: &[sqlparser::ast::IndexColumn]) -> Vec<S
 }
 
 /// 解析独立的 CREATE INDEX 语句并添加到表定义中
-/// 
+///
 /// 使用 sqlparser 库正确解析 SQL 语法
-/// 
+///
 /// 格式示例：
 /// ```sql
 /// create index idx_space_id
 ///     on agent_config (space_id);
-/// 
+///
 /// create unique index uk_name
 ///     on users (username);
 /// ```
@@ -569,7 +567,7 @@ fn parse_standalone_indexes(
 }
 
 /// 提取所有 CREATE INDEX 语句
-/// 
+///
 /// 使用简单的状态机来识别完整的 CREATE INDEX 语句
 fn extract_create_index_statements(sql_content: &str) -> Result<Vec<String>, DuckError> {
     let mut statements = Vec::new();

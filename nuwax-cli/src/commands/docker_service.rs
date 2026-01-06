@@ -69,7 +69,12 @@ pub async fn run_docker_service_command(app: &CliApp, cmd: DockerServiceCommand)
 }
 
 /// 部署 Docker 服务
-pub async fn deploy_docker_services(app: &CliApp, frontend_port: Option<u16>, config_file: Option<PathBuf>, project_name: Option<String>) -> Result<()> {
+pub async fn deploy_docker_services(
+    app: &CliApp,
+    frontend_port: Option<u16>,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+) -> Result<()> {
     info!("🚀 开始部署 Docker 服务...");
 
     // 如果指定了端口，先设置端口配置
@@ -82,20 +87,22 @@ pub async fn deploy_docker_services(app: &CliApp, frontend_port: Option<u16>, co
     let mut docker_service_manager = if let Some(compose_path) = config_file {
         // 使用自定义的compose文件路径创建DockerManager
         let env_path = client_core::constants::docker::get_env_file_path();
-        let custom_docker_manager = std::sync::Arc::new(
-            client_core::container::DockerManager::with_project(&compose_path, &env_path, project_name)?
-        );
+        let custom_docker_manager =
+            std::sync::Arc::new(client_core::container::DockerManager::with_project(
+                &compose_path,
+                &env_path,
+                project_name,
+            )?);
         DockerService::new(app.config.clone(), custom_docker_manager)?
     } else {
         // 如果没有指定config文件，但有project name，创建带project name的DockerManager
         if let Some(project_name) = project_name {
-            let custom_docker_manager = std::sync::Arc::new(
-                client_core::container::DockerManager::with_project(
+            let custom_docker_manager =
+                std::sync::Arc::new(client_core::container::DockerManager::with_project(
                     client_core::constants::docker::get_compose_file_path(),
                     client_core::constants::docker::get_env_file_path(),
                     Some(project_name),
-                )?
-            );
+                )?);
             DockerService::new(app.config.clone(), custom_docker_manager)?
         } else {
             // 使用默认的DockerManager
@@ -122,7 +129,8 @@ pub async fn deploy_docker_services(app: &CliApp, frontend_port: Option<u16>, co
                 info!("  • 整体状态: {}", report.finalize().display_name());
                 info!(
                     "  • 运行中容器: {}/{}",
-                    report.get_running_count(), report.get_total_count()
+                    report.get_running_count(),
+                    report.get_total_count()
                 );
 
                 if !report.containers.is_empty() {
@@ -148,26 +156,32 @@ pub async fn deploy_docker_services(app: &CliApp, frontend_port: Option<u16>, co
 }
 
 /// 启动 Docker 服务
-pub async fn start_docker_services(app: &CliApp, config_file: Option<PathBuf>, project_name: Option<String>) -> Result<()> {
+pub async fn start_docker_services(
+    app: &CliApp,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+) -> Result<()> {
     info!("▶️ 启动 Docker 服务...");
 
     let mut docker_service_manager = if let Some(compose_path) = config_file {
         // 使用自定义的compose文件路径创建DockerManager
         let env_path = client_core::constants::docker::get_env_file_path();
-        let custom_docker_manager = std::sync::Arc::new(
-            client_core::container::DockerManager::with_project(&compose_path, &env_path, project_name)?
-        );
+        let custom_docker_manager =
+            std::sync::Arc::new(client_core::container::DockerManager::with_project(
+                &compose_path,
+                &env_path,
+                project_name,
+            )?);
         DockerService::new(app.config.clone(), custom_docker_manager)?
     } else {
         // 如果没有指定config文件，但有project name，创建带project name的DockerManager
         if let Some(project_name) = project_name {
-            let custom_docker_manager = std::sync::Arc::new(
-                client_core::container::DockerManager::with_project(
+            let custom_docker_manager =
+                std::sync::Arc::new(client_core::container::DockerManager::with_project(
                     client_core::constants::docker::get_compose_file_path(),
                     client_core::constants::docker::get_env_file_path(),
                     Some(project_name),
-                )?
-            );
+                )?);
             DockerService::new(app.config.clone(), custom_docker_manager)?
         } else {
             // 使用默认的DockerManager
@@ -189,24 +203,30 @@ pub async fn start_docker_services(app: &CliApp, config_file: Option<PathBuf>, p
 }
 
 /// 停止 Docker 服务
-pub async fn stop_docker_services(app: &CliApp, config_file: Option<PathBuf>, project_name: Option<String>) -> Result<()> {
+pub async fn stop_docker_services(
+    app: &CliApp,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+) -> Result<()> {
     let docker_service_manager = if let Some(compose_path) = config_file {
         // 使用自定义的compose文件路径创建DockerManager
         let env_path = client_core::constants::docker::get_env_file_path();
-        let custom_docker_manager = std::sync::Arc::new(
-            client_core::container::DockerManager::with_project(&compose_path, &env_path, project_name)?
-        );
+        let custom_docker_manager =
+            std::sync::Arc::new(client_core::container::DockerManager::with_project(
+                &compose_path,
+                &env_path,
+                project_name,
+            )?);
         DockerService::new(app.config.clone(), custom_docker_manager)?
     } else {
         // 如果没有指定config文件，但有project name，创建带project name的DockerManager
         if let Some(project_name) = project_name {
-            let custom_docker_manager = std::sync::Arc::new(
-                client_core::container::DockerManager::with_project(
+            let custom_docker_manager =
+                std::sync::Arc::new(client_core::container::DockerManager::with_project(
                     client_core::constants::docker::get_compose_file_path(),
                     client_core::constants::docker::get_env_file_path(),
                     Some(project_name),
-                )?
-            );
+                )?);
             DockerService::new(app.config.clone(), custom_docker_manager)?
         } else {
             // 使用默认的DockerManager
@@ -228,17 +248,17 @@ pub async fn stop_docker_services(app: &CliApp, config_file: Option<PathBuf>, pr
 }
 
 /// 停止 Docker 服务并等待确认（统一的公共方法）
-/// 
+///
 /// 这是一个完整的停止流程，包括：
 /// 1. 检查服务是否在运行
 /// 2. 执行停止命令
 /// 3. 等待服务完全停止
-/// 
+///
 /// # 参数
 /// - `app`: 应用实例
 /// - `config_file`: 可选的 docker-compose 配置文件路径
 /// - `project_name`: 可选的项目名称
-/// 
+///
 /// # 返回
 /// - `Ok(true)`: 服务已停止（或本来就没运行）
 /// - `Ok(false)`: 等待停止超时，但可以继续
@@ -250,28 +270,24 @@ pub async fn stop_docker_services_and_wait(
 ) -> Result<bool> {
     use crate::docker_service::health_check::HealthChecker;
     use client_core::constants::timeout;
-    use tokio::time::{sleep, Duration, Instant};
+    use tokio::time::{Duration, Instant, sleep};
 
     info!("🔍 检查Docker服务状态...");
 
     // 1. 创建 DockerManager（用于 HealthChecker）
     let docker_manager = if let Some(ref compose_path) = config_file {
         let env_path = client_core::constants::docker::get_env_file_path();
-        std::sync::Arc::new(
-            client_core::container::DockerManager::with_project(
-                compose_path,
-                &env_path,
-                project_name.clone(),
-            )?
-        )
+        std::sync::Arc::new(client_core::container::DockerManager::with_project(
+            compose_path,
+            &env_path,
+            project_name.clone(),
+        )?)
     } else if let Some(ref proj_name) = project_name {
-        std::sync::Arc::new(
-            client_core::container::DockerManager::with_project(
-                client_core::constants::docker::get_compose_file_path(),
-                client_core::constants::docker::get_env_file_path(),
-                Some(proj_name.clone()),
-            )?
-        )
+        std::sync::Arc::new(client_core::container::DockerManager::with_project(
+            client_core::constants::docker::get_compose_file_path(),
+            client_core::constants::docker::get_env_file_path(),
+            Some(proj_name.clone()),
+        )?)
     } else {
         app.docker_manager.clone()
     };
@@ -294,21 +310,21 @@ pub async fn stop_docker_services_and_wait(
 
     // 4. 等待服务完全停止（使用 HealthChecker 精确检查）
     info!("⏳ 等待Docker服务完全停止...");
-    
+
     let start_time = Instant::now();
     let timeout_duration = Duration::from_secs(timeout::SERVICE_STOP_TIMEOUT);
     let check_interval = Duration::from_secs(timeout::SERVICE_CHECK_INTERVAL);
-    
+
     loop {
         // 每次循环都重新检查服务状态
         let report = health_checker.health_check().await?;
         let running_count = report.get_running_count();
-        
+
         if running_count == 0 {
             info!("✅ Docker服务已成功停止");
             return Ok(true);
         }
-        
+
         // 检查是否超时
         if start_time.elapsed() >= timeout_duration {
             warn!(
@@ -317,7 +333,7 @@ pub async fn stop_docker_services_and_wait(
                 "⚠️ 等待服务停止超时，还有 {} 个服务在运行，但可以继续",
                 running_count
             );
-            
+
             // 显示哪些服务还在运行
             info!("📋 仍在运行的服务:");
             for container in &report.containers {
@@ -325,36 +341,42 @@ pub async fn stop_docker_services_and_wait(
                     info!("  • {} ({})", container.name, container.image);
                 }
             }
-            
+
             return Ok(false);
         }
-        
+
         info!("⏳ 还有 {} 个服务在运行，继续等待...", running_count);
         sleep(check_interval).await;
     }
 }
 
 /// 重启 Docker 服务
-pub async fn restart_docker_services(app: &CliApp, config_file: Option<PathBuf>, project_name: Option<String>) -> Result<()> {
+pub async fn restart_docker_services(
+    app: &CliApp,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+) -> Result<()> {
     info!("🔄 重启 Docker 服务...");
 
     let mut docker_service_manager = if let Some(compose_path) = config_file {
         // 使用自定义的compose文件路径创建DockerManager
         let env_path = client_core::constants::docker::get_env_file_path();
-        let custom_docker_manager = std::sync::Arc::new(
-            client_core::container::DockerManager::with_project(&compose_path, &env_path, project_name)?
-        );
+        let custom_docker_manager =
+            std::sync::Arc::new(client_core::container::DockerManager::with_project(
+                &compose_path,
+                &env_path,
+                project_name,
+            )?);
         DockerService::new(app.config.clone(), custom_docker_manager)?
     } else {
         // 如果没有指定config文件，但有project name，创建带project name的DockerManager
         if let Some(project_name) = project_name {
-            let custom_docker_manager = std::sync::Arc::new(
-                client_core::container::DockerManager::with_project(
+            let custom_docker_manager =
+                std::sync::Arc::new(client_core::container::DockerManager::with_project(
                     client_core::constants::docker::get_compose_file_path(),
                     client_core::constants::docker::get_env_file_path(),
                     Some(project_name),
-                )?
-            );
+                )?);
             DockerService::new(app.config.clone(), custom_docker_manager)?
         } else {
             // 使用默认的DockerManager
@@ -404,18 +426,20 @@ pub async fn check_docker_services_status(app: &CliApp) -> Result<()> {
 }
 
 /// 检查 Docker 服务状态（支持项目名称）
-pub async fn check_docker_services_status_with_project(app: &CliApp, project_name: Option<String>) -> Result<()> {
+pub async fn check_docker_services_status_with_project(
+    app: &CliApp,
+    project_name: Option<String>,
+) -> Result<()> {
     info!("📊 检查 Docker 服务状态...");
 
     // 创建支持项目名称的 DockerService
     let docker_service_manager = if let Some(project_name) = project_name {
-        let custom_docker_manager = std::sync::Arc::new(
-            client_core::container::DockerManager::with_project(
+        let custom_docker_manager =
+            std::sync::Arc::new(client_core::container::DockerManager::with_project(
                 client_core::constants::docker::get_compose_file_path(),
                 client_core::constants::docker::get_env_file_path(),
                 Some(project_name),
-            )?
-        );
+            )?);
         DockerService::new(app.config.clone(), custom_docker_manager)?
     } else {
         DockerService::new(app.config.clone(), app.docker_manager.clone())?
@@ -431,7 +455,8 @@ pub async fn check_docker_services_status_with_project(app: &CliApp, project_nam
             info!("整体状态: {}", report.finalize().display_name());
             info!(
                 "运行统计: {}/{} 个容器正在运行",
-                report.get_running_count(), report.get_total_count()
+                report.get_running_count(),
+                report.get_total_count()
             );
 
             if !report.containers.is_empty() {
