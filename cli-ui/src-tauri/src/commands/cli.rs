@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::process::{Command as StdCommand, Stdio};
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, command};
 use tauri_plugin_shell::{ShellExt, process::CommandEvent};
+use time::OffsetDateTime;
 
 /// 调试环境变量和命令可用性
 #[tauri::command]
@@ -158,6 +160,23 @@ pub struct ProcessCheckResult {
     pub message: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct CliStreamEvent {
+    pub command_id: Option<String>,
+    pub stream: String,
+    pub chunk: String,
+    pub seq: u64,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CliCompleteEvent {
+    pub command_id: Option<String>,
+    pub exit_code: i32,
+    pub duration_ms: u128,
+    pub timestamp: String,
+}
+
 /// 获取用户的完整环境变量（包括shell配置）
 fn get_user_environment() -> std::collections::HashMap<String, String> {
     let mut env = std::env::vars().collect::<std::collections::HashMap<String, String>>();
@@ -260,6 +279,7 @@ pub async fn execute_duck_cli_sidecar(
     app: AppHandle,
     args: Vec<String>,
     working_dir: Option<String>,
+    command_id: Option<String>,
 ) -> Result<CommandResult, String> {
     let shell = app.shell();
 
@@ -286,24 +306,52 @@ pub async fn execute_duck_cli_sidecar(
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut exit_code = 0;
+    let mut seq: u64 = 0;
+    let start = Instant::now();
 
     while let Some(event) = rx.recv().await {
         match event {
             CommandEvent::Stdout(data) => {
                 let output = String::from_utf8_lossy(&data);
                 stdout.push_str(&output);
-                // 实时发送输出到前端
-                let _ = app.emit("cli-output", &output);
+                let payload = CliStreamEvent {
+                    command_id: command_id.clone(),
+                    stream: "stdout".to_string(),
+                    chunk: output.to_string(),
+                    seq,
+                    timestamp: OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
+                };
+                seq += 1;
+                let _ = app.emit("cli-output", payload);
             }
             CommandEvent::Stderr(data) => {
                 let output = String::from_utf8_lossy(&data);
                 stderr.push_str(&output);
-                // 实时发送错误到前端
-                let _ = app.emit("cli-error", &output);
+                let payload = CliStreamEvent {
+                    command_id: command_id.clone(),
+                    stream: "stderr".to_string(),
+                    chunk: output.to_string(),
+                    seq,
+                    timestamp: OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
+                };
+                seq += 1;
+                let _ = app.emit("cli-error", payload);
             }
             CommandEvent::Terminated(payload) => {
                 exit_code = payload.code.unwrap_or(-1);
-                let _ = app.emit("cli-complete", exit_code);
+                let done = CliCompleteEvent {
+                    command_id: command_id.clone(),
+                    exit_code,
+                    duration_ms: start.elapsed().as_millis(),
+                    timestamp: OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
+                };
+                let _ = app.emit("cli-complete", done);
                 break;
             }
             _ => {}
@@ -324,6 +372,7 @@ pub async fn execute_duck_cli_system(
     app: AppHandle,
     args: Vec<String>,
     working_dir: Option<String>,
+    command_id: Option<String>,
 ) -> Result<CommandResult, String> {
     let shell = app.shell();
 
@@ -343,6 +392,7 @@ pub async fn execute_duck_cli_system(
         cmd = cmd.env(key, value);
     }
 
+    let start = Instant::now();
     let output = cmd
         .output()
         .await
@@ -352,14 +402,39 @@ pub async fn execute_duck_cli_system(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let exit_code = output.status.code().unwrap_or(-1);
 
-    // 发送输出到前端
     if !stdout.is_empty() {
-        let _ = app.emit("cli-output", &stdout);
+        let payload = CliStreamEvent {
+            command_id: command_id.clone(),
+            stream: "stdout".to_string(),
+            chunk: stdout.clone(),
+            seq: 0,
+            timestamp: OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        };
+        let _ = app.emit("cli-output", payload);
     }
     if !stderr.is_empty() {
-        let _ = app.emit("cli-error", &stderr);
+        let payload = CliStreamEvent {
+            command_id: command_id.clone(),
+            stream: "stderr".to_string(),
+            chunk: stderr.clone(),
+            seq: 1,
+            timestamp: OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        };
+        let _ = app.emit("cli-error", payload);
     }
-    let _ = app.emit("cli-complete", exit_code);
+    let done = CliCompleteEvent {
+        command_id: command_id.clone(),
+        exit_code,
+        duration_ms: start.elapsed().as_millis(),
+        timestamp: OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
+    };
+    let _ = app.emit("cli-complete", done);
 
     Ok(CommandResult {
         success: exit_code == 0,
@@ -375,27 +450,62 @@ pub async fn execute_duck_cli_smart(
     app: AppHandle,
     args: Vec<String>,
     working_dir: Option<String>,
+    command_id: Option<String>,
 ) -> Result<CommandResult, String> {
     // 优先使用Sidecar方式
-    match execute_duck_cli_sidecar(app.clone(), args.clone(), working_dir.clone()).await {
+    match execute_duck_cli_sidecar(
+        app.clone(),
+        args.clone(),
+        working_dir.clone(),
+        command_id.clone(),
+    )
+    .await
+    {
         Ok(result) => {
             // Sidecar成功，直接返回结果（已发送事件）
             Ok(result)
         }
         Err(sidecar_error) => {
             // 发送降级通知
-            let _ = app.emit("cli-output", "⚠️ Sidecar方式失败，使用系统命令...");
+            let warn_payload = CliStreamEvent {
+                command_id: command_id.clone(),
+                stream: "stdout".to_string(),
+                chunk: "⚠️ Sidecar方式失败，使用系统命令...".to_string(),
+                seq: 0,
+                timestamp: OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+            };
+            let _ = app.emit("cli-output", warn_payload);
 
             // 降级到系统命令
-            match execute_duck_cli_system(app.clone(), args, working_dir).await {
+            match execute_duck_cli_system(app.clone(), args, working_dir, command_id.clone()).await
+            {
                 Ok(result) => {
                     // System成功，返回结果（已发送事件）
                     Ok(result)
                 }
                 Err(system_error) => {
                     // 发送失败通知
-                    let _ = app.emit("cli-error", "❌ 所有CLI执行方式都失败");
-                    let _ = app.emit("cli-complete", -1);
+                    let err_payload = CliStreamEvent {
+                        command_id: command_id.clone(),
+                        stream: "stderr".to_string(),
+                        chunk: "❌ 所有CLI执行方式都失败".to_string(),
+                        seq: 1,
+                        timestamp: OffsetDateTime::now_utc()
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap_or_default(),
+                    };
+                    let _ = app.emit("cli-error", err_payload);
+                    let done = CliCompleteEvent {
+                        command_id: command_id.clone(),
+                        exit_code: -1,
+                        duration_ms: 0,
+                        timestamp: OffsetDateTime::now_utc()
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap_or_default(),
+                    };
+                    let _ = app.emit("cli-complete", done);
 
                     Err(format!(
                         "所有CLI执行方式都失败 - Sidecar: {sidecar_error} | System: {system_error}"
@@ -409,7 +519,7 @@ pub async fn execute_duck_cli_smart(
 /// 检查CLI工具版本
 #[command]
 pub async fn get_cli_version(app: AppHandle) -> Result<CliVersion, String> {
-    match execute_duck_cli_smart(app, vec!["--version".to_string()], None).await {
+    match execute_duck_cli_smart(app, vec!["--version".to_string()], None, None).await {
         Ok(result) => {
             if result.success {
                 // 从输出中提取版本号

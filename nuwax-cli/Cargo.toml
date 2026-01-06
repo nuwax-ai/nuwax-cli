@@ -1,6 +1,6 @@
 [package]
 name = "nuwax-cli"
-version = "1.0.66"
+version = "1.0.68"
 edition = "2024"
 description = "Docker 服务管理和升级工具"
 authors = ["soddygo"]
@@ -57,6 +57,10 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 
 # ZIP文件处理
 zip = { workspace = true }
+
+# TAR.GZ文件处理
+flate2 = { workspace = true }
+tar = { workspace = true }
 
 # 执行外部命令检查
 which = { workspace = true }

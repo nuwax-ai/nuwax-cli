@@ -36,7 +36,7 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            base_url: api::get_base_url().to_string(),
+            base_url: api::get_base_url(),
             endpoints: ApiEndpoints {
                 client_register: api::endpoints::CLIENT_REGISTER.to_string(),
                 announcements: api::endpoints::ANNOUNCEMENTS.to_string(),

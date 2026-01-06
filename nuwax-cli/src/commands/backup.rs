@@ -29,9 +29,6 @@ pub struct JsonBackupListResponse {
     pub error: Option<String>,
 }
 
-
-
-
 /// 创建备份
 pub async fn run_backup(app: &CliApp) -> Result<()> {
     // 1. 检查Docker环境

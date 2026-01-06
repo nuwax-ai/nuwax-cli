@@ -66,6 +66,9 @@ zip = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 
+# 文件类型检测 (魔数检测)
+infer = { workspace = true }
+
 # 哈希计算
 sha2 = { workspace = true }
 
@@ -74,7 +77,7 @@ base64 = "0.22"
 
 # OSS 依赖
 # aliyun-oss-rust-sdk = { version = "0.2.1", features = ["blocking"] }
-# url = "2.5.0"
+url = { workspace = true }
 
 # Optional dependency
 indicatif = { workspace = true, optional = true }

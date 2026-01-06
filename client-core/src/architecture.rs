@@ -6,7 +6,6 @@
 //! - 架构支持检查
 //! - 友好的错误处理
 
-use crate::constants::upgrade::{DOCKER_SERVICE_AARCH64_PACKAGE, DOCKER_SERVICE_X86_64_PACKAGE};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
@@ -42,25 +41,6 @@ impl Architecture {
             warn!("检测到未知架构: {}", arch_str);
             Self::Unsupported(arch_str.to_string())
         })
-    }
-
-    /// 获取 Docker 文件名
-    ///
-    /// 根据当前架构生成对应的 Docker 文件名
-    ///
-    /// # 示例
-    /// ```
-    /// use client_core::architecture::Architecture;
-    ///
-    /// let arch = Architecture::X86_64;
-    /// assert_eq!(arch.get_docker_file_name(), "docker-x86_64.zip");
-    /// ```
-    pub fn get_docker_file_name(&self) -> String {
-        match self {
-            Self::X86_64 => DOCKER_SERVICE_X86_64_PACKAGE.to_string(),
-            Self::Aarch64 => DOCKER_SERVICE_AARCH64_PACKAGE.to_string(),
-            Self::Unsupported(arch) => format!("docker-{arch}.zip"),
-        }
     }
 
     /// 转换为字符串表示

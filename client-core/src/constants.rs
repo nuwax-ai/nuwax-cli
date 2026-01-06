@@ -257,18 +257,34 @@ pub mod docker {
 /// API服务相关常量
 pub mod api {
     use crate::environment::Environment;
+    use url::Url;
+
+    /// 环境变量名称：自定义 API 服务器地址
+    pub const NUWAX_API_BASE_URL_ENV: &str = "NUWAX_API_BASE_URL";
 
     /// 生产环境API服务器地址
     const PRODUCTION_BASE_URL: &str = "https://api-version.nuwax.com";
 
     /// 测试环境API服务器地址
-    const TESTING_BASE_URL: &str = "http://192.168.1.6:3000";
+    const TESTING_BASE_URL: &str = "http://192.168.32.226:3000";
+
+    /// 验证 URL 格式是否有效（使用 url crate）
+    fn is_valid_url(url: &str) -> bool {
+        Url::parse(url).map_or(false, |parsed_url| {
+            // 确保是 http 或 https 协议
+            matches!(parsed_url.scheme(), "http" | "https")
+        })
+    }
 
     /// 获取当前环境的API基础URL
     ///
-    /// 根据环境变量 NUWAX_CLI_ENV 返回对应的API地址：
-    /// - Production (默认): https://api-version.nuwax.com
-    /// - Testing: http://192.168.2.244:3000
+    /// 优先级顺序：
+    /// 1. NUWAX_API_BASE_URL 环境变量（最高优先级，允许自定义服务器地址）
+    /// 2. NUWAX_CLI_ENV=test/testing → TESTING_BASE_URL
+    /// 3. 默认 → PRODUCTION_BASE_URL
+    ///
+    /// 当使用自定义 URL 时，会记录 info 级别日志。
+    /// 如果自定义 URL 格式无效，会记录 warn 级别日志并回退到原有逻辑。
     ///
     /// # Examples
     /// ```
@@ -279,21 +295,38 @@ pub mod api {
     ///
     /// // 测试环境（需要设置环境变量）
     /// std::env::set_var("NUWAX_CLI_ENV", "testing");
-    /// let url = get_base_url(); // "http://192.168.2.244:3000"
+    /// let url = get_base_url(); // "http://192.168.32.226:3000"
+    ///
+    /// // 自定义服务器地址（最高优先级）
+    /// std::env::set_var("NUWAX_API_BASE_URL", "http://localhost:8080");
+    /// let url = get_base_url(); // "http://localhost:8080"
     /// ```
-    pub fn get_base_url() -> &'static str {
+    pub fn get_base_url() -> String {
+        // 优先检查自定义 API 服务器地址
+        if let Ok(custom_url) = std::env::var(NUWAX_API_BASE_URL_ENV) {
+            if is_valid_url(&custom_url) {
+                tracing::info!("使用自定义 API 服务器: {}", custom_url);
+                return custom_url;
+            } else {
+                tracing::warn!(
+                    "NUWAX_API_BASE_URL 格式无效: '{}'. 预期 http:// 或 https:// 开头。回退到环境模式。",
+                    custom_url
+                );
+            }
+        }
+
+        // 回退到原有逻辑
         match Environment::from_env() {
-            Environment::Test => TESTING_BASE_URL,
-            Environment::Production => PRODUCTION_BASE_URL,
+            Environment::Test => TESTING_BASE_URL.to_string(),
+            Environment::Production => PRODUCTION_BASE_URL.to_string(),
         }
     }
 
     /// 获取当前环境的API基础URL（动态分配）
     ///
-    /// 与 `get_base_url()` 不同，此函数返回 String 类型，
-    /// 适合需要动态构造URL的场景
+    /// 此函数是 get_base_url() 的别名，保持向后兼容
     pub fn get_base_url_dynamic() -> String {
-        get_base_url().to_string()
+        get_base_url()
     }
 
     /// 获取生产环境API基础URL（用于特殊场景）
@@ -352,6 +385,93 @@ pub mod api {
         /// User-Agent头
         pub const USER_AGENT: &str = "nuwax-cli/1.0";
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_get_base_url_production_default() {
+            unsafe {
+                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
+                std::env::remove_var("NUWAX_CLI_ENV");
+            }
+            assert_eq!(get_base_url(), PRODUCTION_BASE_URL);
+        }
+
+        #[test]
+        fn test_get_base_url_testing_env() {
+            unsafe {
+                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
+                std::env::set_var("NUWAX_CLI_ENV", "testing");
+            }
+            assert_eq!(get_base_url(), TESTING_BASE_URL);
+            unsafe {
+                std::env::remove_var("NUWAX_CLI_ENV");
+            }
+        }
+
+        #[test]
+        fn test_custom_url_overrides_env() {
+            unsafe {
+                std::env::set_var(NUWAX_API_BASE_URL_ENV, "http://custom.example.com:8080");
+                std::env::set_var("NUWAX_CLI_ENV", "testing");
+            }
+            assert_eq!(get_base_url(), "http://custom.example.com:8080");
+            unsafe {
+                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
+                std::env::remove_var("NUWAX_CLI_ENV");
+            }
+        }
+
+        #[test]
+        fn test_invalid_custom_url_falls_back() {
+            unsafe {
+                std::env::set_var(NUWAX_API_BASE_URL_ENV, "ftp://invalid.com");
+                std::env::set_var("NUWAX_CLI_ENV", "testing");
+            }
+            assert_eq!(get_base_url(), TESTING_BASE_URL);
+            unsafe {
+                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
+                std::env::remove_var("NUWAX_CLI_ENV");
+            }
+        }
+
+        #[test]
+        fn test_is_valid_url() {
+            assert!(is_valid_url("http://example.com"));
+            assert!(is_valid_url("https://example.com"));
+            assert!(is_valid_url("http://localhost:8080"));
+            assert!(is_valid_url("https://192.168.1.1:3000"));
+            assert!(!is_valid_url("ftp://example.com"));
+            assert!(!is_valid_url("example.com"));
+            assert!(!is_valid_url(""));
+        }
+
+        #[test]
+        fn test_empty_custom_url_falls_back() {
+            unsafe {
+                std::env::set_var(NUWAX_API_BASE_URL_ENV, "");
+                std::env::set_var("NUWAX_CLI_ENV", "testing");
+            }
+            assert_eq!(get_base_url(), TESTING_BASE_URL);
+            unsafe {
+                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
+                std::env::remove_var("NUWAX_CLI_ENV");
+            }
+        }
+
+        #[test]
+        fn test_custom_url_with_path() {
+            unsafe {
+                std::env::set_var(NUWAX_API_BASE_URL_ENV, "http://example.com/api/v1");
+            }
+            assert_eq!(get_base_url(), "http://example.com/api/v1");
+            unsafe {
+                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
+            }
+        }
+    }
 }
 
 /// 备份相关常量
@@ -396,13 +516,6 @@ pub mod upgrade {
 
     /// 临时目录名
     pub const TEMP_DIR_NAME: &str = "temp";
-
-    /// 下载的docker服务包文件名,老版本的文件名,包含x86_64 和 arm64 的docker镜像
-    pub const DOCKER_SERVICE_PACKAGE: &str = "docker.zip";
-    /// 下载的docker服务包文件名（arm64）
-    pub const DOCKER_SERVICE_AARCH64_PACKAGE: &str = "docker-aarch64.zip";
-    /// 下载的docker服务包文件名（x86_64）
-    pub const DOCKER_SERVICE_X86_64_PACKAGE: &str = "docker-x86_64.zip";
 
     /// 默认更新包文件名
     pub const DEFAULT_UPDATE_PACKAGE: &str = "update.zip";

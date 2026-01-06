@@ -339,10 +339,7 @@ impl AppConfig {
         let download_dir = self.cache.download_dir.replace('\\', "/");
 
         TEMPLATE
-            .replace(
-                "{docker_service_version}",
-                &self.get_docker_versions()
-            )
+            .replace("{docker_service_version}", &self.get_docker_versions())
             .replace("{compose_file}", &compose_file)
             .replace("{backup_storage_dir}", &backup_storage_dir)
             .replace("{cache_dir}", &cache_dir)
@@ -370,24 +367,39 @@ impl AppConfig {
     }
 
     /// 获取指定版本的全量下载文件路径
+    ///
+    /// 返回 Result，如果找不到归档文件则返回错误
     pub fn get_version_download_file_path(
         &self,
         version: &str,
         download_type: &str,
         filename: Option<&str>,
-    ) -> PathBuf {
-        match filename {
-            Some(filename) => self
-                .get_version_download_dir(version, download_type)
-                .join(filename),
-            None => {
-                //根据当前系统架构,使用不同的docker全量升级包的文件名
-                let docker_file_name = Architecture::detect().get_docker_file_name();
+    ) -> Result<PathBuf> {
+        let download_dir = self.get_version_download_dir(version, download_type);
 
-                self.get_version_download_dir(version, download_type)
-                    .join(docker_file_name)
+        let path = match filename {
+            Some(filename) => download_dir.join(filename),
+            None => {
+                // 自动查找目录中的归档文件
+                match find_archive_file(&download_dir) {
+                    Some(found) => download_dir.join(found),
+                    None => {
+                        // 未找到归档文件，返回错误
+                        return Err(anyhow::anyhow!(
+                            "未找到归档文件，目录: {}，支持的格式: .zip, .tar.gz",
+                            download_dir.display()
+                        ));
+                    }
+                }
             }
+        };
+
+        // 验证文件存在
+        if !path.exists() {
+            return Err(anyhow::anyhow!("归档文件不存在: {}", path.display()));
         }
+
+        Ok(path)
     }
 
     /// 确保指定版本的下载目录存在
@@ -410,6 +422,8 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use tempfile::TempDir;
 
     #[test]
     fn test_version_config_new() {
@@ -655,4 +669,88 @@ mod tests {
         println!("   - ✅ get_current_version方法正常工作");
         println!("   - ✅ 配置迁移逻辑（向后兼容）正常工作");
     }
+
+    // 测试 find_archive_file 函数
+    #[test]
+    fn test_find_archive_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+
+        // 创建测试文件
+        File::create(dir.join("docker-aarch64.zip")).unwrap();
+        File::create(dir.join("docker-x86_64.tar.gz")).unwrap();
+        File::create(dir.join("other.txt")).unwrap();
+        File::create(dir.join("archive.zip")).unwrap(); // 不以 docker- 开头
+
+        // 查找应该返回第一个匹配的文件
+        let result = find_archive_file(dir);
+        assert_eq!(result, Some("docker-aarch64.zip".to_string()));
+    }
+
+    #[test]
+    fn test_find_archive_file_no_match() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+
+        // 创建不以 docker- 开头的文件
+        File::create(dir.join("archive.zip")).unwrap();
+        File::create(dir.join("other.txt")).unwrap();
+
+        // 查找应该返回 None
+        let result = find_archive_file(dir);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_archive_file_empty_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+
+        // 空目录
+        let result = find_archive_file(dir);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_archive_file_tar_gz() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+
+        // 创建 .tar.gz 文件
+        File::create(dir.join("docker-aarch64.tar.gz")).unwrap();
+
+        let result = find_archive_file(dir);
+        assert_eq!(result, Some("docker-aarch64.tar.gz".to_string()));
+    }
+}
+
+/// 在指定目录中查找归档文件（.zip 或 .tar.gz）
+///
+/// 查找规则：
+/// 1. 文件名以 `docker-` 开头
+/// 2. 扩展名为 `.zip` 或 `.tar.gz`
+/// 3. 返回第一个匹配的文件
+fn find_archive_file(dir: &Path) -> Option<String> {
+    let entries = fs::read_dir(dir).ok()?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let file_name = path.file_name()?.to_str()?;
+
+        // 检查文件名是否以 docker- 开头
+        if !file_name.starts_with("docker-") {
+            continue;
+        }
+
+        // 检查扩展名
+        if file_name.ends_with(".zip") || file_name.ends_with(".tar.gz") {
+            return Some(file_name.to_string());
+        }
+    }
+
+    None
 }

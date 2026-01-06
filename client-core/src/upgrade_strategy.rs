@@ -64,7 +64,7 @@ impl UpgradeStrategy {
     ///获取此次升级,变更的文件,或者目录,使用相对工作目录的路径,工作目录是:./docker ,如果是全量升级,只备份: ./data 目录; 增量升级,还需要额外备份增量升级变更的文件或者目录
     pub fn get_changed_files(&self) -> Vec<PathBuf> {
         let change_files = match self {
-            UpgradeStrategy::FullUpgrade { .. } => vec!["data".to_string(),"upload".to_string()],
+            UpgradeStrategy::FullUpgrade { .. } => vec!["data".to_string(), "upload".to_string()],
             UpgradeStrategy::PatchUpgrade { patch_info, .. } => patch_info.get_changed_files(),
             UpgradeStrategy::NoUpgrade { .. } => {
                 vec![]

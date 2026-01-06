@@ -1,7 +1,7 @@
 use crate::app::CliApp;
 use crate::cli::UpgradeArgs;
 use anyhow::Result;
-use client_core::{architecture::Architecture, upgrade_strategy::UpgradeStrategy};
+use client_core::{upgrade_strategy::UpgradeStrategy, utils::archive};
 use std::{fs, path::PathBuf};
 use tracing::{error, info};
 
@@ -30,23 +30,41 @@ async fn handle_service_download(
     let version_download_dir =
         create_version_download_dir(download_dir, version_str, download_type)?;
 
-    // 检查文件是否已存在（智能下载会处理这个检查）
-    info!("   文件路径: {}", version_download_dir.to_string_lossy());
+    // 总是先下载到临时文件
+    let temp_path = version_download_dir.join("temp_download");
 
-    //根据当前架构获取docker文件名
-    let docker_file_name = Architecture::detect().get_docker_file_name();
-
-    let download_path = version_download_dir.join(docker_file_name);
+    info!("   下载到临时文件: {}", temp_path.display());
 
     let download_result = app
         .api_client
-        .download_service_update_optimized(&download_path, Some(version_str), url)
+        .download_service_update_optimized(&temp_path, Some(version_str), url)
         .await;
 
     match download_result {
         Ok(_) => {
+            // 魔数检测格式
+            let format = archive::detect_format_by_magic(&temp_path)?;
+            info!("   检测到文件格式: {:?}", format);
+
+            // 获取架构
+            let arch = client_core::architecture::Architecture::detect();
+            let arch_str = match arch {
+                client_core::architecture::Architecture::Aarch64 => "aarch64",
+                client_core::architecture::Architecture::X86_64 => "x86_64",
+                _ => "unknown",
+            };
+
+            // 生成正确文件名
+            let filename = archive::generate_docker_filename(arch_str, format);
+            info!("   重命名为: {}", filename);
+
+            let final_path = version_download_dir.join(&filename);
+
+            // 重命名
+            std::fs::rename(&temp_path, &final_path)?;
+
             info!("✅ 服务包已准备就绪!");
-            info!("   文件位置: {}", download_path.display());
+            info!("   文件位置: {}", final_path.display());
             info!("   下载版本: {}", target_version.to_string());
             info!("   当前部署版本: {}", app.config.get_docker_versions());
             info!("📝 下一步: 运行 'nuwax-cli docker-service deploy' 来部署服务");

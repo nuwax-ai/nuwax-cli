@@ -301,7 +301,7 @@ impl ImageLoader {
                 }
                 Err(e) => {
                     error!("{} ✗ 镜像加载失败: {} - {}", progress, file_name, e);
-                    
+
                     // 立即返回错误，停止后续镜像加载
                     return Err(DockerServiceError::ImageLoading(format!(
                         "镜像加载失败: {} - {}。已成功加载 {} 个镜像，剩余 {} 个镜像未加载",
@@ -401,7 +401,6 @@ impl ImageLoader {
         debug!("未找到架构后缀，返回原镜像名称: {}", image_name);
         image_name.to_string()
     }
-
 
     /// 为单个镜像设置标签
     async fn tag_image(&self, source_tag: &str, target_tag: &str) -> DockerServiceResult<()> {

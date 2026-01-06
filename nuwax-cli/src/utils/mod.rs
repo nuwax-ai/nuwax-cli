@@ -1,5 +1,7 @@
 use anyhow::Result;
-use client_core::{constants::docker::get_docker_work_dir, upgrade_strategy::UpgradeStrategy};
+use client_core::{
+    constants::docker::get_docker_work_dir, upgrade_strategy::UpgradeStrategy, utils::archive,
+};
 use std::io::{Read, Write};
 use std::time::Instant;
 use tracing::{error, info};
@@ -226,8 +228,11 @@ fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
 /// 判断路径是否属于保护目录 (upload, data 等)
 fn is_upload_directory_path(path: &std::path::Path) -> bool {
     // 判断 [upload, project_workspace, project_zips, project_nginx, project_init, data] 目录
-    path.components()
-        .any(|component| client_core::constants::docker::EXCLUDE_DIRS.iter().any(|d| component.as_os_str() == *d))
+    path.components().any(|component| {
+        client_core::constants::docker::EXCLUDE_DIRS
+            .iter()
+            .any(|d| component.as_os_str() == *d)
+    })
 }
 
 /// 安全删除 docker 目录，保留 upload 目录
@@ -248,7 +253,10 @@ fn safe_remove_docker_directory(output_dir: &std::path::Path) -> Result<()> {
         let file_name = entry.file_name();
 
         // 跳过 [upload, project_workspace, project_zips, project_nginx, project_init, data] 目录
-        if client_core::constants::docker::EXCLUDE_DIRS.iter().any(|d| file_name.as_os_str() == *d) {
+        if client_core::constants::docker::EXCLUDE_DIRS
+            .iter()
+            .any(|d| file_name.as_os_str() == *d)
+        {
             info!("🛡️ 保留目录: {}", path.display());
             continue;
         }
@@ -267,23 +275,44 @@ fn safe_remove_docker_directory(output_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// 解压Docker服务包 - 简化版本
+/// 解压Docker服务包 - 支持 ZIP 和 TAR.GZ
 pub async fn extract_docker_service(
-    zip_path: &std::path::Path,
+    archive_path: &std::path::Path,
     upgrade_strategy: &UpgradeStrategy,
 ) -> Result<()> {
     let extract_start = Instant::now();
 
-    info!("📦 开始解压Docker服务包: {}", zip_path.display());
+    info!("📦 开始解压Docker服务包: {}", archive_path.display());
 
-    // 检查ZIP文件是否存在
-    if !zip_path.exists() {
+    // 检查文件是否存在
+    if !archive_path.exists() {
         return Err(anyhow::anyhow!(format!(
-            "ZIP文件不存在: {}",
-            zip_path.display()
+            "文件不存在: {}",
+            archive_path.display()
         )));
     }
 
+    // 检测文件格式
+    let format = archive::detect_format_by_magic(archive_path)?;
+    info!("✅ 检测到文件格式: {:?}", format);
+
+    // 根据格式选择解压方法
+    match format {
+        client_core::utils::archive::ArchiveFormat::Zip => {
+            extract_zip_archive(archive_path, upgrade_strategy, extract_start).await
+        }
+        client_core::utils::archive::ArchiveFormat::TarGz => {
+            extract_tar_gz_archive(archive_path, upgrade_strategy, extract_start).await
+        }
+    }
+}
+
+/// 解压 ZIP 格式归档
+async fn extract_zip_archive(
+    zip_path: &std::path::Path,
+    upgrade_strategy: &UpgradeStrategy,
+    extract_start: Instant,
+) -> Result<()> {
     // 打开ZIP文件
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -535,6 +564,118 @@ pub async fn extract_docker_service(
     }
 
     Ok(())
+}
+
+/// 解压 TAR.GZ 格式归档
+async fn extract_tar_gz_archive(
+    tar_gz_path: &std::path::Path,
+    upgrade_strategy: &UpgradeStrategy,
+    extract_start: Instant,
+) -> Result<()> {
+    let tar_gz_path = tar_gz_path.to_path_buf();
+    let strategy = upgrade_strategy.clone();
+
+    tokio::task::spawn_blocking(move || {
+        extract_tar_gz_blocking(&tar_gz_path, &strategy, extract_start)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("解压任务失败: {}", e))?
+}
+
+/// TAR.GZ 解压实现（阻塞）
+fn extract_tar_gz_blocking(
+    tar_gz_path: &std::path::Path,
+    upgrade_strategy: &UpgradeStrategy,
+    extract_start: Instant,
+) -> Result<()> {
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+
+    let tar_gz = std::fs::File::open(tar_gz_path)?;
+    let decoder = GzDecoder::new(tar_gz);
+    let mut archive = Archive::new(decoder);
+
+    let output_dir = std::path::Path::new("docker");
+    let mut extracted_files = 0;
+    let mut extracted_size = 0u64;
+
+    match upgrade_strategy {
+        UpgradeStrategy::FullUpgrade { .. } => {
+            // 全量升级：清空 docker 目录（保留 upload 目录）
+            if output_dir.exists() {
+                safe_remove_docker_directory(output_dir)?;
+            } else {
+                std::fs::create_dir_all(output_dir)?;
+            }
+
+            info!("🚀 开始解压 TAR.GZ 文件...");
+
+            for entry in archive.entries()? {
+                let mut entry: tar::Entry<flate2::read::GzDecoder<std::fs::File>> = entry?;
+                let path = entry.path()?;
+
+                // 跳过 __MACOSX 等系统文件
+                if should_skip_tar_entry(&path) {
+                    continue;
+                }
+
+                // 移除 docker/ 前缀（如果存在）
+                let clean_path = path.strip_prefix("docker").unwrap_or(&path);
+                let target_path = output_dir.join(clean_path);
+
+                // 保护 upload 目录
+                if is_upload_directory_path(&target_path) && target_path.exists() {
+                    info!("🛡️ 保护现有目录，跳过: {}", target_path.display());
+                    continue;
+                }
+
+                // 确保父目录存在
+                if let Some(parent) = target_path.parent() {
+                    if !parent.exists() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+
+                // 解压文件
+                entry.unpack(&target_path)?;
+                extracted_files += 1;
+                extracted_size += entry.size();
+
+                // 每解压10%的文件显示进度
+                if extracted_files % 10 == 0 {
+                    info!(
+                        "📁 解压进度: {} 个文件 ({:.1} MB)",
+                        extracted_files,
+                        extracted_size as f64 / 1024.0 / 1024.0
+                    );
+                }
+            }
+
+            let elapsed = extract_start.elapsed();
+            info!("🎉 Docker服务包解压完成!");
+            info!("   📁 解压文件: {} 个", extracted_files);
+            info!(
+                "   📏 总数据量: {:.1} MB",
+                extracted_size as f64 / 1024.0 / 1024.0
+            );
+            info!("   ⏱️  耗时: {:.2} 秒", elapsed.as_secs_f64());
+        }
+        UpgradeStrategy::PatchUpgrade { .. } => {
+            // 增量升级目前不支持 TAR.GZ
+            return Err(anyhow::anyhow!("TAR.GZ 格式暂不支持增量升级"));
+        }
+        UpgradeStrategy::NoUpgrade { .. } => {
+            return Err(anyhow::anyhow!("无需升级,不支持的解压操作"));
+        }
+    }
+
+    Ok(())
+}
+
+/// 判断 TAR 条目是否应该跳过
+fn should_skip_tar_entry(path: &std::path::Path) -> bool {
+    let s = path.to_string_lossy();
+    s.contains("__MACOSX") || s.contains(".DS_Store") || s.contains("._")
 }
 
 /// 设置日志记录系统

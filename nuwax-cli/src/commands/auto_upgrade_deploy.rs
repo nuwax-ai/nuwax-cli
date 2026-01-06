@@ -56,18 +56,18 @@ fn create_docker_manager(
 ///
 /// # 错误
 /// 如果保存配置文件失败会返回错误
-fn update_config_version(config: &mut Arc<client_core::config::AppConfig>, version: &str) -> Result<()> {
+fn update_config_version(
+    config: &mut Arc<client_core::config::AppConfig>,
+    version: &str,
+) -> Result<()> {
     let config_mut = Arc::make_mut(config);
     config_mut.write_docker_versions(version.to_string());
-    
+
     config_mut
         .save_to_file("config.toml")
         .context("保存配置文件失败")?;
-    
-    info!(
-        version = version,
-        "✅ 配置文件版本号已更新并保存"
-    );
+
+    info!(version = version, "✅ 配置文件版本号已更新并保存");
     Ok(())
 }
 
@@ -161,7 +161,6 @@ pub async fn run_auto_upgrade_deploy(
             project_name.clone(),
         )
         .await?;
-
     }
 
     // 5. 🔍 提前检查并创建挂载目录（重要：Windows Podman Desktop 需要）
@@ -474,7 +473,7 @@ pub async fn show_status(app: &mut CliApp) -> Result<()> {
 }
 
 /// 检查Docker服务状态（是否有服务在运行）
-/// 
+///
 /// 返回 true 表示有服务在运行，false 表示没有服务在运行
 async fn check_docker_service_status(
     _app: &mut CliApp,
@@ -493,10 +492,10 @@ async fn check_docker_service_status(
     let docker_manager = create_docker_manager(config_file, project_name)?;
     let health_checker = HealthChecker::new(docker_manager);
     let report = health_checker.health_check().await?;
-    
+
     // 检查是否有运行中的容器（而不是检查是否所有服务都健康）
     let running_count = report.get_running_count();
-    
+
     if running_count > 0 {
         info!("🔍 发现 {} 个运行中的服务", running_count);
         Ok(true)
@@ -505,8 +504,6 @@ async fn check_docker_service_status(
         Ok(false)
     }
 }
-
-
 
 /// 格式化时间间隔为可读字符串
 #[allow(dead_code)]
@@ -550,8 +547,6 @@ async fn is_first_deployment() -> bool {
     false
 }
 
-
-
 /// 递归复制目录
 #[allow(dead_code)]
 fn copy_dir_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -575,8 +570,6 @@ fn copy_dir_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
 
     Ok(())
 }
-
-
 
 //批量删除文件,或者目录
 async fn safe_remove_file_or_dir(paths: &[&Path]) -> Result<()> {
@@ -656,7 +649,10 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
                     let file_name_str = file_name.to_string_lossy();
 
                     // 排除指定目录，不进行删除
-                    if client_core::constants::docker::EXCLUDE_DIRS.contains(&file_name_str.as_ref()) && entry_path.is_dir() {
+                    if client_core::constants::docker::EXCLUDE_DIRS
+                        .contains(&file_name_str.as_ref())
+                        && entry_path.is_dir()
+                    {
                         info!(
                             path = %entry_path.display(),
                             "📁 跳过保护目录"
@@ -740,7 +736,7 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
 }
 
 /// 归档差异SQL文件
-/// 
+///
 /// # 参数
 /// - `diff_sql_path`: 差异SQL文件路径
 /// - `status`: 状态标识 ("executed", "failed", "no_exec")
@@ -778,7 +774,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     let diff_sql_path = temp_sql_dir.join(sql::DIFF_SQL_FILE);
     let new_sql_path = temp_sql_dir.join(sql::NEW_SQL_FILE);
 
-      // 创建临时SQL目录
+    // 创建临时SQL目录
     if !temp_sql_dir.exists() {
         fs::create_dir_all(temp_sql_dir)?;
         info!("📁 创建临时SQL目录: {}", temp_sql_dir.display());
@@ -793,7 +789,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         info!("📄 新版本没有SQL文件，跳过差异生成");
         return Ok(());
     }
-    
+
     // 读取模板SQL（严格失败策略）
     if !new_sql_path.exists() {
         return Err(anyhow::anyhow!(
@@ -840,7 +836,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     let diff_result = generate_live_schema_diff(&executor, &new_sql_content, "目标版本")
         .await
         .context("生成在线差异SQL失败")?;
-    
+
     info!(
         description = %diff_result.description,
         has_executable_sql = diff_result.has_executable_sql,
@@ -856,8 +852,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     }
 
     // 保存差异SQL文件（无论是否有可执行SQL，都保存以便查看）
-    fs::write(&diff_sql_path, &diff_result.diff_sql)
-        .context("保存差异SQL文件失败")?;
+    fs::write(&diff_sql_path, &diff_result.diff_sql).context("保存差异SQL文件失败")?;
     info!("📄 差异SQL文件已保存: {}", diff_sql_path.display());
 
     // 判断差异类型并输出相应提示
@@ -871,7 +866,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
             // 情况2：完全没有差异（既没有可执行SQL，也没有警告）
             info!("📄 数据库架构无差异，无需执行升级");
         }
-        
+
         // 统一归档差异SQL文件
         archive_diff_sql_file(&diff_sql_path, "no_exec").await?;
         return Ok(());
@@ -879,27 +874,28 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     // 情况3：有可执行的SQL语句（可能同时包含警告）
     // 再次确认是否真的有可执行的SQL语句（排除全是注释的情况）
-    let executable_lines: Vec<&str> = diff_result.diff_sql
+    let executable_lines: Vec<&str> = diff_result
+        .diff_sql
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
             !trimmed.is_empty() && !trimmed.starts_with("--") && !trimmed.starts_with("/*")
         })
         .collect();
-    
+
     if executable_lines.is_empty() {
         // 虽然 has_executable_sql 为 true，但实际没有可执行的SQL（可能是逻辑错误）
         warn!("⚠️  检测到差异但没有实际可执行的SQL语句");
         archive_diff_sql_file(&diff_sql_path, "no_exec").await?;
         return Ok(());
     }
-    
+
     info!(
         sql_lines = executable_lines.len(),
         has_warnings = diff_result.has_warnings,
         "🔄 开始执行数据库升级"
     );
-    
+
     // 如果同时包含警告，提示用户注意（这是混合场景：既有新增/修改，又有删除）
     if diff_result.has_warnings {
         warn!("⚠️  注意: 差异中同时包含可执行SQL和删除操作警告");
@@ -907,24 +903,18 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         warn!("   ✗ 删除操作已跳过，需手动执行");
         warn!("   📄 详情请查看: {}", diff_sql_path.display());
     }
-    
-    info!(
-        retry_count = sql::DEFAULT_RETRY_COUNT,
-        "🚀 开始执行差异SQL"
-    );
+
+    info!(retry_count = sql::DEFAULT_RETRY_COUNT, "🚀 开始执行差异SQL");
     match executor
         .execute_diff_sql_with_retry(&diff_result.diff_sql, sql::DEFAULT_RETRY_COUNT)
         .await
     {
         Ok(results) => {
-            info!(
-                executed_statements = results.len(),
-                "✅ 数据库升级成功"
-            );
+            info!(executed_statements = results.len(), "✅ 数据库升级成功");
             for result in results {
                 info!("  {}", result);
             }
-            
+
             // 归档已执行的差异SQL文件
             archive_diff_sql_file(&diff_sql_path, "executed").await?;
         }
@@ -1012,8 +1002,6 @@ async fn fix_script_permissions() -> Result<()> {
     Ok(())
 }
 
-
-
 /// 检查并安装 nuwax-cli 更新（独立函数，用于早期检查）
 /// 这个函数可以在数据库初始化之前调用，避免数据库锁冲突
 pub async fn check_and_install_nuwax_cli_update_early() -> Result<()> {
@@ -1066,5 +1054,3 @@ pub async fn check_and_install_nuwax_cli_update_early() -> Result<()> {
 
     Ok(())
 }
-
-
