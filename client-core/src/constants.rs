@@ -243,7 +243,7 @@ pub mod docker {
     /// - `project_init`: 项目初始化文件
     /// - `uv_cache`: UV缓存目录
     /// - `data`: 数据库和持久化数据
-    pub const EXCLUDE_DIRS: [&str; 7] = [
+    pub const EXCLUDE_DIRS: [&str; 8] = [
         "upload",
         "project_workspace",
         "computer-project-workspace",
