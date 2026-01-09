@@ -246,6 +246,7 @@ pub mod docker {
     pub const EXCLUDE_DIRS: [&str; 7] = [
         "upload",
         "project_workspace",
+        "computer-project-workspace",
         "project_zips",
         "project_nginx",
         "project_init",
