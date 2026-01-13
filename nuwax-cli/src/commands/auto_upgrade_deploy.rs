@@ -774,16 +774,61 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     let diff_sql_path = temp_sql_dir.join(sql::DIFF_SQL_FILE);
     let new_sql_path = temp_sql_dir.join(sql::NEW_SQL_FILE);
 
-    // 创建临时SQL目录
-    if !temp_sql_dir.exists() {
-        fs::create_dir_all(temp_sql_dir)?;
-        info!("📁 创建临时SQL目录: {}", temp_sql_dir.display());
+    // 如果 temp_sql 目录已存在，先归档到 history_sql
+    if temp_sql_dir.exists() {
+        let history_dir = Path::new("history_sql");
+        if !history_dir.exists() {
+            fs::create_dir_all(history_dir)?;
+            info!("📁 创建历史SQL目录: {}", history_dir.display());
+        }
+
+        // 生成带时间戳的目录名
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let archive_name = format!("temp_sql_{}", timestamp);
+        let archive_path = history_dir.join(&archive_name);
+
+        // 移动 temp_sql 目录到 history_sql（带降级处理）
+        match fs::rename(&temp_sql_dir, &archive_path) {
+            Ok(_) => {
+                info!("📦 已归档旧的temp_sql目录到: {}", archive_path.display());
+            }
+            Err(e) => {
+                warn!("⚠️ 归档temp_sql目录失败: {}, 尝试直接清理", e);
+                // 降级：直接删除旧目录
+                if let Err(e2) = fs::remove_dir_all(&temp_sql_dir) {
+                    warn!("⚠️ 清理temp_sql目录失败: {}, 继续执行", e2);
+                } else {
+                    info!("✅ 已清理旧的temp_sql目录");
+                }
+            }
+        }
     }
 
-    // 复制新版本的SQL文件
-    let current_sql_path = Path::new("docker/config/init_mysql.sql");
+    // 创建临时SQL目录
+    fs::create_dir_all(temp_sql_dir)?;
+    info!("📁 创建临时SQL目录: {}", temp_sql_dir.display());
+
+    // 复制新版本的SQL文件（使用常量路径）
+    let current_sql_path = Path::new(sql::CURRENT_SQL_PATH);
     if current_sql_path.exists() {
-        fs::copy(current_sql_path, &new_sql_path)?;
+        // 先删除目标文件（如果存在），确保复制操作成功
+        if new_sql_path.exists() {
+            fs::remove_file(&new_sql_path)?;
+            info!("🗑️ 已删除旧的SQL文件: {}", new_sql_path.display());
+        }
+
+        fs::copy(current_sql_path, &new_sql_path)
+            .context(format!("复制SQL文件失败: {} -> {}", current_sql_path.display(), new_sql_path.display()))?;
+
+        // 验证文件复制成功
+        if !new_sql_path.exists() {
+            return Err(anyhow::anyhow!(
+                "SQL文件复制后不存在: {} (源文件: {})",
+                new_sql_path.display(),
+                current_sql_path.display()
+            ));
+        }
+
         info!("📄 已复制新版本SQL文件: {}", new_sql_path.display());
     } else {
         info!("📄 新版本没有SQL文件，跳过差异生成");

@@ -556,6 +556,26 @@ async fn extract_zip_archive(
                     }
                 }
             }
+
+            // 🔧 强制更新关键配置文件（无论是否在变更列表中）
+            // 这些文件对于数据库升级至关重要，必须始终保持最新
+            use client_core::constants::sql::CRITICAL_UPGRADE_FILES;
+            for critical_file in CRITICAL_UPGRADE_FILES {
+                let zip_path = format!("docker/{}", critical_file);
+                let dst_path = work_dir.join(critical_file);
+
+                match archive.by_name(&zip_path) {
+                    Ok(mut entry) => {
+                        info!("🔧 强制更新关键文件: {}", critical_file);
+                        force_extract_file(&mut entry, &dst_path)?;
+                        info!("✅ 关键文件已更新: {}", critical_file);
+                    }
+                    Err(_) => {
+                        // 压缩包中没有这个文件，跳过
+                        info!("⏭️  压缩包中不存在关键文件: {}", zip_path);
+                    }
+                }
+            }
         }
         UpgradeStrategy::NoUpgrade { .. } => {
             // 无需升级,不应该走到这里的解压逻辑

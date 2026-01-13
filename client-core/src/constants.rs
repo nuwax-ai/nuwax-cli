@@ -606,6 +606,15 @@ pub mod sql {
     /// 当前 SQL 文件路径
     pub const CURRENT_SQL_PATH: &str = "docker/config/init_mysql.sql";
 
+    /// 关键升级文件列表（增量升级时必须强制更新）
+    /// 这些文件对于数据库升级至关重要，必须始终保持最新版本
+    pub const CRITICAL_UPGRADE_FILES: &[&str] = &[
+        "config/init_mysql.sql",
+        // 未来可以添加其他关键文件，例如：
+        // "config/schema.json",
+        // "config/migration_rules.yml",
+    ];
+
     /// 目录清理最大重试次数
     pub const MAX_CLEANUP_ATTEMPTS: usize = 3;
 }
