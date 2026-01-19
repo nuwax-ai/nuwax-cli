@@ -86,7 +86,7 @@ uuid = { version = "1", features = ["v7"] }
 
 # 数据库
 # sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
-duckdb = { version = "1.3", features = ["bundled", "chrono", "uuid"] }
+duckdb = { version = "1.3", features = ["bundled", "chrono", "uuid", "json"] }
 
 # 自更新 - 已移除，现在使用基于 GitHub API 的更新机制
 
