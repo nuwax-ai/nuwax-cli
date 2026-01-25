@@ -4,7 +4,7 @@ use crate::commands::{backup, docker_service, update};
 use crate::docker_service::health_check::HealthChecker;
 use crate::docker_utils;
 use anyhow::{Context, Result};
-use client_core::constants::{sql, timeout};
+use client_core::constants::sql;
 use client_core::container::DockerManager;
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
 use client_core::sql_diff::generate_live_schema_diff;
@@ -284,19 +284,39 @@ pub async fn run_auto_upgrade_deploy(
     info!("▶️ 正在启动Docker服务...");
     docker_service::start_docker_services(app, config_file.clone(), project_name.clone()).await?;
 
-    // 等待服务启动完成（最多等待90秒，因为部署后启动可能需要更长时间）
-    info!("⏳ 等待Docker服务完全启动...");
+    // 获取 compose 文件路径
     let compose_path = get_compose_file_path(&config_file);
-    if docker_utils::wait_for_compose_services_started(&compose_path, timeout::DEPLOY_START_TIMEOUT)
+
+    // 🔄 分阶段等待服务启动（解决 MySQL-Java 死锁问题）
+    // 死锁原因：Java 容器健康检查依赖 MySQL 表结构升级，但 SQL 升级要等所有服务就绪后才执行
+    // 解决方案：先等待 MySQL → 执行 SQL 升级 → 再等待其他服务
+    if !is_first_deployment {
+        // 阶段 1/2: 仅等待 MySQL 容器就绪
+        info!("⏳ 阶段 1/2: 等待 MySQL 服务就绪...");
+        let mysql_ready =
+            docker_utils::wait_for_mysql_ready(&compose_path, sql::MYSQL_READY_TIMEOUT).await?;
+
+        if mysql_ready {
+            info!("✅ MySQL 服务已就绪");
+        } else {
+            warn!("⚠️ 等待 MySQL 服务超时，仍尝试执行 SQL 升级...");
+        }
+
+        // 阶段 2/2（前半部分）: 执行 SQL 升级
+        info!("🔄 执行数据库升级...");
+        execute_sql_diff_upgrade(&config_file).await?;
+    }
+
+    // 等待所有服务完全启动（Java 等现在可以正常启动）
+    if is_first_deployment {
+        info!("⏳ 等待所有服务完全启动...");
+    } else {
+        info!("⏳ 阶段 2/2: 等待所有服务完全启动...");
+    }
+    if docker_utils::wait_for_compose_services_started(&compose_path, sql::OTHER_SERVICES_TIMEOUT)
         .await?
     {
         info!("✅ 自动升级部署完成，服务已成功启动");
-
-        // 🔄 执行数据库升级（仅在升级部署时）
-        if !is_first_deployment {
-            execute_sql_diff_upgrade(&config_file).await?;
-        }
-
         info!("🎉 自动升级部署流程成功完成");
     } else {
         warn!("⚠️ 等待服务启动超时，请手动检查服务状态");
@@ -305,11 +325,6 @@ pub async fn run_auto_upgrade_deploy(
         match check_docker_service_status(app, &config_file, &project_name).await {
             Ok(true) => {
                 info!("🔍 最终检查：服务似乎已正常启动");
-
-                // 🔄 如果服务正常，尝试执行数据库升级
-                if !is_first_deployment {
-                    execute_sql_diff_upgrade(&config_file).await?;
-                }
             }
             Ok(false) => {
                 info!("🔍 最终检查：服务可能未正常启动");

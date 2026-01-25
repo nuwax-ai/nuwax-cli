@@ -591,6 +591,12 @@ pub mod sql {
     /// MySQL 容器默认映射端口
     pub const DEFAULT_MYSQL_CONTAINER_PORT: u16 = 13306;
 
+    /// MySQL 服务等待超时（秒）- 用于等待 MySQL 容器就绪
+    pub const MYSQL_READY_TIMEOUT: u64 = 60;
+
+    /// 其他服务启动等待超时（秒）- SQL 升级后等待 Java 等服务
+    pub const OTHER_SERVICES_TIMEOUT: u64 = 120;
+
     /// 临时 SQL 目录名
     pub const TEMP_SQL_DIR: &str = "temp_sql";
 

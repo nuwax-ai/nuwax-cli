@@ -270,3 +270,23 @@ pub async fn wait_for_compose_services_started(
     let filter = create_compose_filter(compose_file_path).await?;
     wait_for_services_started(&filter, timeout_secs).await
 }
+
+/// 等待 MySQL 服务就绪
+///
+/// 使用服务名 "mysql" 过滤容器，等待 MySQL 容器启动完成。
+/// 此函数用于解决 MySQL-Java 服务启动死锁问题：
+/// - Java 容器健康检查依赖 MySQL 表结构升级
+/// - SQL 升级需要 MySQL 先就绪
+///
+/// # 参数
+/// - `_compose_path`: docker-compose 文件路径（保留以便未来扩展）
+/// - `timeout_secs`: 超时时间（秒）
+///
+/// # 返回
+/// - `Ok(true)`: MySQL 服务已启动
+/// - `Ok(false)`: 超时，MySQL 服务未能启动
+/// - `Err`: 检查过程中发生错误
+pub async fn wait_for_mysql_ready(_compose_path: &Path, timeout_secs: u64) -> Result<bool> {
+    let filter = ServiceFilter::NameContains(vec!["mysql".to_string()]);
+    wait_for_services_started(&filter, timeout_secs).await
+}
