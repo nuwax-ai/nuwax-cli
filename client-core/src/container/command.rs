@@ -66,24 +66,27 @@ impl DockerManager {
         // 检查 Docker 状态
         self.check_docker_status().await?;
 
-        // 检查 docker-compose 或 docker compose 命令
+        // 检查 docker compose 或 docker-compose 命令
         info!("🔍 检查Docker Compose命令可用性...");
-        debug!("尝试检查docker-compose命令...");
+        debug!("优先检查docker compose子命令...");
 
-        let standalone_available = Command::new("docker-compose")
-            .args(["--version"])
-            .output()
-            .await
-            .is_ok();
+        // 优先检查 docker compose（子命令，现代 Docker 推荐）
         let subcommand_available = self
             .run_docker_command(&["compose", "--version"])
             .await
             .is_ok();
 
-        if standalone_available {
-            info!("✅ 找到docker-compose独立命令");
-        } else if subcommand_available {
+        // 回退检查 docker-compose（独立命令，旧版本）
+        let standalone_available = Command::new("docker-compose")
+            .args(["--version"])
+            .output()
+            .await
+            .is_ok();
+
+        if subcommand_available {
             info!("✅ 找到docker compose子命令");
+        } else if standalone_available {
+            info!("✅ 找到docker-compose独立命令");
         } else {
             warn!("❌ Docker Compose命令不可用");
             return Err(anyhow::anyhow!("Docker Compose 未安装或不可用"));
