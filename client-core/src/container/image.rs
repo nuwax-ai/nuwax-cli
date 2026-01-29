@@ -55,7 +55,8 @@ impl DockerManager {
 
     /// 拉取最新镜像
     pub async fn pull_images(&self) -> Result<()> {
-        self.check_prerequisites().await?;
+        // 跳过环境先决条件检查，避免 Docker 命令导致的高磁盘 IO
+        // self.check_prerequisites().await?;
 
         let output = self.run_compose_command(&["pull"]).await?;
 

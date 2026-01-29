@@ -105,11 +105,14 @@ impl DockerServiceManager {
     pub async fn check_environment(&self) -> DockerServiceResult<()> {
         info!("检查 Docker 环境...");
 
-        // 检查 Docker 是否安装和运行
-        self.docker_manager
-            .check_docker_status()
-            .await
-            .map_err(|e| DockerServiceError::EnvironmentCheck(e.to_string()))?;
+        // 跳过 Docker 状态检查，避免高磁盘 IO 问题
+        // Docker 29+ 版本中，docker info、docker --version 等命令会扫描大量数据
+        // 导致部署过程中磁盘 IO 飙升，影响性能
+        // 如果 Docker 未运行，后续操作会自然暴露错误
+        // self.docker_manager
+        //     .check_docker_status()
+        //     .await
+        //     .map_err(|e| DockerServiceError::EnvironmentCheck(e.to_string()))?;
 
         // 检查工作目录
         if !self.work_dir.exists() {

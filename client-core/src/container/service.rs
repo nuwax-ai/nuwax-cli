@@ -12,13 +12,14 @@ impl DockerManager {
     pub async fn start_services(&self) -> Result<()> {
         info!("🚀 开始启动Docker服务...");
 
-        info!("📋 步骤1: 检查环境先决条件...");
-        self.check_prerequisites().await?;
+        // 跳过环境先决条件检查，避免 Docker 命令导致的高磁盘 IO
+        // info!("📋 步骤1: 检查环境先决条件...");
+        // self.check_prerequisites().await?;
 
-        info!("📁 步骤2: 检查并创建宿主机挂载目录...");
+        info!("📁 步骤1: 检查并创建宿主机挂载目录...");
         self.ensure_host_volumes_exist().await?;
 
-        info!("🎯 步骤3: 执行docker-compose up命令...");
+        info!("🎯 步骤2: 执行docker-compose up命令...");
         // let output = self.run_compose_command(&["up", "-d", "--pull", "always"]).await?;
         let output = self.run_compose_command(&["up", "-d"]).await?;
 
@@ -47,7 +48,8 @@ impl DockerManager {
 
     /// 停止所有服务
     pub async fn stop_services(&self) -> Result<()> {
-        self.check_prerequisites().await?;
+        // 跳过环境先决条件检查，避免 Docker 命令导致的高磁盘 IO
+        // self.check_prerequisites().await?;
 
         let output = self.run_compose_command(&["down"]).await?;
 
@@ -76,7 +78,8 @@ impl DockerManager {
 
     /// 重启单个服务
     pub async fn restart_service(&self, service_name: &str) -> Result<()> {
-        self.check_prerequisites().await?;
+        // 跳过环境先决条件检查，避免 Docker 命令导致的高磁盘 IO
+        // self.check_prerequisites().await?;
 
         // 先停止指定服务
         let output = self.run_compose_command(&["stop", service_name]).await?;
@@ -190,7 +193,8 @@ impl DockerManager {
 
     /// 获取所有容器状态（包括非compose容器）- 保留原有功能
     pub async fn get_all_containers_status(&self) -> Result<Vec<ServiceInfo>> {
-        self.check_prerequisites().await?;
+        // 跳过环境先决条件检查，避免 Docker 命令导致的高磁盘 IO
+        // self.check_prerequisites().await?;
 
         info!("使用 ducker 库获取所有容器状态...");
 
