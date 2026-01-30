@@ -11,6 +11,9 @@ pub mod volumes;
 mod modern_docker;
 
 // 重新导出公共API
-pub use environment::{HostOs, PathFormat, RuntimeEnvironment, detect_runtime_environment};
+pub use environment::{
+    ComposeCommandType, HostOs, PathFormat, RuntimeEnvironment, detect_compose_command_type,
+    detect_runtime_environment, get_compose_command_type, set_compose_command_type,
+};
 pub use path_utils::{PathProcessor, PathUtilsError};
 pub use types::{DockerManager, ServiceConfig, ServiceInfo, ServiceStatus};

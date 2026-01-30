@@ -7,7 +7,91 @@
 //! 支持 Docker 和 Podman（Docker 兼容模式），因此不需要区分底层容器引擎类型。
 
 use std::env;
-use tracing::{debug, info};
+use std::sync::OnceLock;
+use tokio::process::Command;
+use tracing::{debug, info, warn};
+
+/// 全局存储检测到的 Docker Compose 命令类型
+static COMPOSE_COMMAND_TYPE: OnceLock<ComposeCommandType> = OnceLock::new();
+
+/// Docker Compose 命令类型
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ComposeCommandType {
+    /// 使用 docker compose 子命令（Docker 20.10.13+）
+    DockerComposeSubcommand,
+    /// 使用独立的 docker-compose 命令
+    DockerComposeStandalone,
+    /// 未检测（默认值）
+    #[default]
+    Unknown,
+}
+
+/// 检测 docker compose 命令类型（执行命令检测）
+pub async fn detect_compose_command_type() -> ComposeCommandType {
+    info!("🔍 检测 Docker Compose 命令类型...");
+
+    // 1. 尝试 docker compose version（新语法）
+    let output = Command::new("docker")
+        .args(["compose", "version"])
+        .output()
+        .await;
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let version_info = String::from_utf8_lossy(&output.stdout);
+            info!(
+                "   ✅ 使用 docker compose 子命令: {}",
+                version_info.trim()
+            );
+            return ComposeCommandType::DockerComposeSubcommand;
+        }
+        debug!(
+            "   docker compose version 返回非零退出码: {:?}",
+            output.status
+        );
+    }
+
+    // 2. 回退到 docker-compose --version（旧语法）
+    debug!("   尝试 docker-compose 独立命令...");
+    let output = Command::new("docker-compose")
+        .arg("--version")
+        .output()
+        .await;
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let version_info = String::from_utf8_lossy(&output.stdout);
+            info!(
+                "   ✅ 使用 docker-compose 独立命令: {}",
+                version_info.trim()
+            );
+            return ComposeCommandType::DockerComposeStandalone;
+        }
+    }
+
+    warn!("   ⚠️ 未检测到可用的 Docker Compose 命令");
+    ComposeCommandType::Unknown
+}
+
+/// 设置全局 Docker Compose 命令类型（仅能设置一次）
+///
+/// 在命令入口处（如 main.rs）调用 detect_compose_command_type() 后，
+/// 使用此函数存储检测结果，后续无需再次检测。
+pub fn set_compose_command_type(compose_type: ComposeCommandType) {
+    if COMPOSE_COMMAND_TYPE.set(compose_type).is_err() {
+        debug!("Compose 命令类型已设置，忽略重复设置");
+    }
+}
+
+/// 获取已检测的 Docker Compose 命令类型
+///
+/// 返回已检测的命令类型，如果未检测则返回 Unknown
+pub fn get_compose_command_type() -> ComposeCommandType {
+    COMPOSE_COMMAND_TYPE
+        .get()
+        .copied()
+        .unwrap_or(ComposeCommandType::Unknown)
+}
 
 /// 主机操作系统类型
 #[derive(Debug, Clone, PartialEq)]
@@ -274,5 +358,54 @@ mod tests {
             path_format: PathFormat::Posix,
         };
         assert!(!env_macos.needs_special_handling());
+    }
+
+    #[test]
+    fn test_compose_command_type_default() {
+        assert_eq!(ComposeCommandType::default(), ComposeCommandType::Unknown);
+    }
+
+    #[test]
+    fn test_compose_command_type_equality() {
+        assert_eq!(
+            ComposeCommandType::DockerComposeSubcommand,
+            ComposeCommandType::DockerComposeSubcommand
+        );
+        assert_eq!(
+            ComposeCommandType::DockerComposeStandalone,
+            ComposeCommandType::DockerComposeStandalone
+        );
+        assert_eq!(ComposeCommandType::Unknown, ComposeCommandType::Unknown);
+
+        assert_ne!(
+            ComposeCommandType::DockerComposeSubcommand,
+            ComposeCommandType::DockerComposeStandalone
+        );
+        assert_ne!(
+            ComposeCommandType::DockerComposeSubcommand,
+            ComposeCommandType::Unknown
+        );
+    }
+
+    #[test]
+    fn test_compose_command_type_clone_copy() {
+        let original = ComposeCommandType::DockerComposeSubcommand;
+        let cloned = original.clone();
+        let copied = original;
+
+        assert_eq!(original, cloned);
+        assert_eq!(original, copied);
+    }
+
+    #[test]
+    fn test_compose_command_type_debug() {
+        // 测试 Debug trait 实现
+        let subcommand = ComposeCommandType::DockerComposeSubcommand;
+        let standalone = ComposeCommandType::DockerComposeStandalone;
+        let unknown = ComposeCommandType::Unknown;
+
+        assert_eq!(format!("{:?}", subcommand), "DockerComposeSubcommand");
+        assert_eq!(format!("{:?}", standalone), "DockerComposeStandalone");
+        assert_eq!(format!("{:?}", unknown), "Unknown");
     }
 }

@@ -1,4 +1,5 @@
 use clap::Parser;
+use client_core::container::{detect_compose_command_type, set_compose_command_type};
 use client_core::{DuckError, environment::Environment};
 use nuwax_cli::{
     Cli, CliApp, Commands, check_and_install_nuwax_cli_update_early, run_diff_sql, run_init,
@@ -98,6 +99,10 @@ async fn main() {
         }
         // 如果有更新，上面的函数会直接退出进程，不会继续执行到这里
         info!("✅ CLI 版本检查完成，继续执行 AutoUpgradeDeploy 命令");
+
+        // 🔍 检测 Docker Compose 命令类型（仅在此处检测一次，后续直接使用）
+        let compose_type = detect_compose_command_type().await;
+        set_compose_command_type(compose_type);
     }
 
     // 对于其他所有命令，我们需要加载配置并初始化App
