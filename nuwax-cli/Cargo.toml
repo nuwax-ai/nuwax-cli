@@ -68,7 +68,7 @@ which = { workspace = true }
 # 集成的 ducker Docker TUI
 ducker = { workspace = true }
 
-# Docker API 客户端 (与ducker兼容的版本)
+# Docker API 客户端
 bollard = { workspace = true }
 
 # HTTP 客户端

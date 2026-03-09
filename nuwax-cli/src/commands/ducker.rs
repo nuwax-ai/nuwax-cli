@@ -12,7 +12,7 @@ pub struct DuckerArgs {
     pub log_path: Option<PathBuf>,
 }
 
-/// 集成ducker命令 - 提供Docker TUI界面（直接集成，不需要外部安装）
+/// 集成ducker命令 - 提供Docker TUI界面（直接集成,不需要外部安装）
 pub async fn run_ducker(args: Vec<String>) -> Result<()> {
     info!("启动ducker Docker TUI工具...");
 
