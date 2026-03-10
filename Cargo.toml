@@ -5,8 +5,8 @@ members = ["client-core", "nuwax-cli", "cli-ui/src-tauri"]
 
 [workspace.dependencies]
 
-# 集成的 ducker Docker TUI (锁定 v0.5.7 版本以兼容 bollard 0.19)
-ducker = { git = "https://github.com/robertpsoane/ducker.git", tag = "v0.5.7" }
+# 集成的 ducker Docker TUI (锁定 v0.5.5 版本以兼容 bollard 0.19 和 ratatui 0.29)
+ducker = { git = "https://github.com/robertpsoane/ducker.git", tag = "v0.5.5" }
 
 # 异步运行时
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread"] }
@@ -128,7 +128,7 @@ url = "2.5"
 winnow = "0.7"
 
 
-# Docker API 客户端 (与ducker v0.5.7 兼容)
+# Docker API 客户端 (与ducker v0.5.5 兼容)
 bollard = "0.19"
 
 # MySQL Async 客户端,用于连接mysql,执行差异sql,升级库表结构
