@@ -4,6 +4,7 @@ use client_core::{
     config::AppConfig, constants::config, container::DockerManager, database::Database,
     upgrade::UpgradeManager,
 };
+use rust_i18n::t;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -56,7 +57,7 @@ impl CliApp {
         // 检查数据库是否已经初始化
         if !database.is_database_initialized().await? {
             return Err(anyhow::anyhow!(
-                "数据库未初始化。请先运行 'nuwax-cli init' 命令来初始化数据库。".to_string(),
+                t!("app.database_not_initialized").to_string(),
             ));
         }
 
@@ -111,12 +112,12 @@ impl CliApp {
             Commands::CheckUpdate(check_update_cmd) => {
                 commands::handle_check_update_command(check_update_cmd)
                     .await
-                    .map_err(|e| anyhow::anyhow!(format!("检查更新失败: {e}")))
+                    .map_err(|e| anyhow::anyhow!(t!("app.check_update_failed", error = e.to_string()).to_string()))
             }
             Commands::Upgrade { args } => {
                 commands::run_upgrade(self, args)
                     .await
-                    .map_err(|e| client_core::error::DuckError::custom(format!("升级失败: {e}")))?;
+                    .map_err(|e| client_core::DuckError::custom(t!("app.upgrade_failed", error = e.to_string()).to_string()))?;
                 Ok(())
             }
             Commands::ListBackups => commands::run_list_backups(self).await,

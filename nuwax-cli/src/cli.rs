@@ -2,67 +2,67 @@ use crate::project_info::{metadata, version_info};
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
-/// 升级相关参数
+/// Upgrade related parameters
 #[derive(Args, Debug)]
 pub struct UpgradeArgs {
-    /// 强制重新下载（用于文件损坏时）,会重新下载完整的服务包
+    /// Force re-download (for corrupted files), will download complete service package
     #[arg(long)]
     pub force: bool,
 
-    /// 只检查是否有可用的升级版本，不执行下载
+    /// Only check for available upgrade versions, do not download
     #[arg(long)]
     pub check: bool,
 }
 
-/// 自动备份相关命令
+/// Auto backup related commands
 #[derive(Subcommand, Debug)]
 pub enum AutoBackupCommand {
-    /// 立即执行一次手动备份
+    /// Execute a manual backup immediately
     Run,
-    /// 显示备份状态和历史记录
+    /// Show backup status and history
     Status,
 }
 
-/// 自动升级部署相关命令
+/// Auto upgrade deploy related commands
 #[derive(Subcommand, Debug)]
 pub enum AutoUpgradeDeployCommand {
-    /// 立即执行自动升级部署
+    /// Execute auto upgrade deploy immediately
     Run {
-        /// 指定frontend服务的端口号（默认80端口）
+        /// Specify frontend service port (default: port 80)
         #[arg(
             long,
-            help = "指定frontend服务的端口号，对应docker-compose.yml中的FRONTEND_HOST_PORT变量（默认: 80端口）"
+            help = "Specify frontend service port, corresponds to FRONTEND_HOST_PORT variable in docker-compose.yml (default: port 80)"
         )]
         port: Option<u16>,
-        /// 指定自定义的docker-compose配置文件路径
+        /// Specify custom docker-compose config file path
         #[arg(
             long,
-            help = "指定自定义的docker-compose配置文件路径（默认: docker/docker-compose.yml）"
+            help = "Specify custom docker-compose config file path (default: docker/docker-compose.yml)"
         )]
         config: Option<PathBuf>,
-        /// 指定docker-compose的项目名称
+        /// Specify docker-compose project name
         #[arg(
             short = 'p',
             long,
-            help = "指定docker-compose的项目名称（默认: 从compose文件读取或使用'docker'）"
+            help = "Specify docker-compose project name (default: read from compose file or use 'docker')"
         )]
         project: Option<String>,
     },
-    /// 显示当前自动升级配置
+    /// Show current auto upgrade configuration
     Status,
 }
 
-/// 客户端更新相关命令
+/// Client update related commands
 #[derive(Subcommand, Debug)]
 pub enum CheckUpdateCommand {
-    /// 检查最新版本信息
+    /// Check latest version information
     Check,
-    /// 安装指定版本或最新版本
+    /// Install specified version or latest version
     Install {
-        /// 指定版本号（如不指定则安装最新版本）
+        /// Specify version number (install latest if not specified)
         #[arg(long)]
         version: Option<String>,
-        /// 强制重新安装（即使当前已是最新版本）
+        /// Force reinstall even if already latest version
         #[arg(long)]
         force: bool,
     },
@@ -70,79 +70,79 @@ pub enum CheckUpdateCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum DockerServiceCommand {
-    /// 启动Docker服务
+    /// Start Docker services
     Start {
-        /// 指定docker-compose的项目名称
+        /// Specify docker-compose project name
         #[arg(
             short = 'p',
             long,
-            help = "指定docker-compose的项目名称（默认: 从compose文件读取或使用'docker'）"
+            help = "Specify docker-compose project name (default: read from compose file or use 'docker')"
         )]
         project: Option<String>,
     },
-    /// 停止Docker服务
+    /// Stop Docker services
     Stop {
-        /// 指定docker-compose的项目名称
+        /// Specify docker-compose project name
         #[arg(
             short = 'p',
             long,
-            help = "指定docker-compose的项目名称（默认: 从compose文件读取或使用'docker'）"
+            help = "Specify docker-compose project name (default: read from compose file or use 'docker')"
         )]
         project: Option<String>,
     },
-    /// 重启Docker服务
+    /// Restart Docker services
     Restart {
-        /// 指定docker-compose的项目名称
+        /// Specify docker-compose project name
         #[arg(
             short = 'p',
             long,
-            help = "指定docker-compose的项目名称（默认: 从compose文件读取或使用'docker'）"
+            help = "Specify docker-compose project name (default: read from compose file or use 'docker')"
         )]
         project: Option<String>,
     },
-    /// 检查服务状态
+    /// Check service status
     Status {
-        /// 指定docker-compose的项目名称
+        /// Specify docker-compose project name
         #[arg(
             short = 'p',
             long,
-            help = "指定docker-compose的项目名称（默认: 从compose文件读取或使用'docker'）"
+            help = "Specify docker-compose project name (default: read from compose file or use 'docker')"
         )]
         project: Option<String>,
     },
-    /// 重启指定容器
+    /// Restart specified container
     RestartContainer {
-        /// 容器名称
+        /// Container name
         container_name: String,
     },
-    /// 加载Docker镜像
+    /// Load Docker images
     LoadImages,
-    /// 设置镜像标签
+    /// Setup image tags
     SetupTags,
-    /// 显示架构信息
+    /// Show architecture information
     ArchInfo,
-    /// 列出Docker镜像（使用ducker）
+    /// List Docker images (using ducker)
     ListImages,
-    /// 检查并创建docker-compose.yml中的挂载目录
+    /// Check and create mount directories in docker-compose.yml
     CheckMountDirs,
 }
 
-/// 缓存管理相关命令
+/// Cache management related commands
 #[derive(Subcommand, Debug)]
 pub enum CacheCommand {
-    /// 清理所有缓存文件
+    /// Clear all cache files
     Clear,
-    /// 显示缓存使用情况
+    /// Show cache usage
     Status,
-    /// 清理下载缓存（保留最新版本）
+    /// Clean download cache (keep latest versions)
     CleanDownloads {
-        /// 保留的版本数量
-        #[arg(long, default_value = "3", help = "保留的版本数量")]
+        /// Number of versions to keep
+        #[arg(long, default_value = "3", help = "Number of versions to keep")]
         keep: u32,
     },
 }
 
-/// Nuwax Cli ent CLI - Docker 服务管理和升级工具
+/// Nuwax CLI - Docker service management and upgrade tool
 #[derive(Parser)]
 #[command(name = "nuwax-cli")]
 #[command(about = metadata::PROJECT_DESCRIPTION)]
@@ -150,13 +150,17 @@ pub enum CacheCommand {
 #[command(long_about = metadata::display::DESCRIPTION_LONG)]
 #[command(author = metadata::PROJECT_AUTHORS)]
 pub struct Cli {
-    /// 配置文件路径
+    /// Configuration file path
     #[arg(short, long, default_value = "config.toml")]
     pub config: PathBuf,
 
-    /// 详细输出
+    /// Verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Language setting (zh-CN, zh-TW, en)
+    #[arg(long, global = true)]
+    pub lang: Option<String>,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -164,79 +168,79 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// 显示服务状态和版本信息
+    /// Show service status and version information
     Status,
-    /// 首次使用时初始化客户端，创建配置文件和数据库
+    /// Initialize client on first use, create configuration file and database
     Init {
-        /// 如果配置文件已存在，强制覆盖
+        /// Force overwrite if configuration file already exists
         #[arg(long)]
         force: bool,
     },
-    /// 检查客户端更新
+    /// Check client updates
     #[command(subcommand)]
     CheckUpdate(CheckUpdateCommand),
-    /// 显示当前API配置信息
+    /// Show current API configuration
     ApiInfo,
-    /// 下载Docker服务文件
+    /// Download Docker service files
     Upgrade {
         #[command(flatten)]
         args: UpgradeArgs,
     },
-    /// 列出所有备份
+    /// List all backups
     ListBackups,
-    /// 从备份恢复
+    /// Restore from backup
     Rollback {
-        /// 备份 ID（可选，不提供时将显示交互式选择界面）
+        /// Backup ID (optional, will show interactive selection if not provided)
         backup_id: Option<i64>,
-        /// 强制覆盖
+        /// Force overwrite
         #[arg(long)]
         force: bool,
-        /// 输出 JSON 格式的备份列表（用于 GUI 集成）
+        /// Output JSON format backup list (for GUI integration)
         #[arg(long)]
         list_json: bool,
-        /// 是否回滚数据,默认不会滚数据文件
-        #[arg(long, default_value = "false", help = "是否回滚数据文件，默认不回滚")]
+        /// Whether to rollback data files, default no
+        #[arg(long, default_value = "false", help = "Whether to rollback data files, default no")]
         rollback_data: bool,
     },
-    /// Docker服务相关命令
+    /// Docker service related commands
     #[command(subcommand)]
     DockerService(DockerServiceCommand),
 
-    /// 🐋 一个用于管理 Docker 容器的终端应用
+    /// 🐋 A terminal application for managing Docker containers
     Ducker {
-        /// 传递给ducker的参数
+        /// Arguments passed to ducker
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
 
-    /// 自动备份管理
+    /// Auto backup management
     #[command(subcommand)]
     AutoBackup(AutoBackupCommand),
 
-    /// 自动升级部署
+    /// Auto upgrade deploy
     #[command(subcommand)]
     AutoUpgradeDeploy(AutoUpgradeDeployCommand),
 
-    /// 缓存管理
+    /// Cache management
     #[command(subcommand)]
     Cache(CacheCommand),
 
-    /// 对比两个SQL文件并生成差异SQL
+    /// Compare two SQL files and generate diff SQL
     DiffSql {
-        /// 旧版本SQL文件路径
-        #[arg(help = "旧版本SQL文件路径")]
+        /// Old version SQL file path
+        #[arg(help = "Old version SQL file path")]
         old_sql: PathBuf,
-        /// 新版本SQL文件路径
-        #[arg(help = "新版本SQL文件路径")]
+        /// New version SQL file path
+        #[arg(help = "New version SQL file path")]
         new_sql: PathBuf,
-        /// 旧版本号（可选）
-        #[arg(long, help = "旧版本号，用于生成差异描述")]
+        /// Old version number (optional)
+        #[arg(long, help = "Old version number for diff description")]
         old_version: Option<String>,
-        /// 新版本号（可选）
-        #[arg(long, help = "新版本号，用于生成差异描述")]
+        /// New version number (optional)
+        #[arg(long, help = "New version number for diff description")]
         new_version: Option<String>,
-        /// 输出文件名（可选，默认为upgrade_diff.sql）
-        #[arg(long, default_value = "upgrade_diff.sql", help = "差异SQL输出文件名")]
+        /// Output file name (optional, default: upgrade_diff.sql)
+        #[arg(long, default_value = "upgrade_diff.sql", help = "Diff SQL output file name")]
         output: String,
     },
 }

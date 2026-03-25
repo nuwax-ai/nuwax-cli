@@ -3,55 +3,55 @@ use thiserror::Error;
 /// Docker 服务相关的错误类型
 #[derive(Error, Debug)]
 pub enum DockerServiceError {
-    #[error("架构检测失败: {0}")]
+    #[error("{}", t!("docker_error.architecture_detection", details = 0))]
     ArchitectureDetection(String),
 
-    #[error("镜像加载失败: {0}")]
+    #[error("{}", t!("docker_error.image_loading", details = 0))]
     ImageLoading(String),
 
-    #[error("环境检查失败: {0}")]
+    #[error("{}", t!("docker_error.environment_check", details = 0))]
     EnvironmentCheck(String),
 
-    #[error("服务管理失败: {0}")]
+    #[error("{}", t!("docker_error.service_management", details = 0))]
     ServiceManagement(String),
 
-    #[error("目录设置失败: {0}")]
+    #[error("{}", t!("docker_error.directory_setup", details = 0))]
     DirectorySetup(String),
 
-    #[error("配置错误: {0}")]
+    #[error("{}", t!("docker_error.configuration", details = 0))]
     Configuration(String),
 
-    #[error("健康检查失败: {0}")]
+    #[error("{}", t!("docker_error.health_check", details = 0))]
     HealthCheck(String),
 
-    #[error("端口管理失败: {0}")]
+    #[error("{}", t!("docker_error.port_management", details = 0))]
     PortManagement(String),
 
-    #[error("Docker 命令执行失败: {0}")]
+    #[error("{}", t!("docker_error.docker_command", details = 0))]
     DockerCommand(String),
 
-    #[error("文件系统错误: {0}")]
+    #[error("{}", t!("docker_error.file_system", details = 0))]
     FileSystem(String),
 
-    #[error("超时错误: {operation} 操作超时 ({timeout_seconds}秒)")]
+    #[error("{}", t!("docker_error.timeout", operation = operation, seconds = timeout_seconds))]
     Timeout {
         operation: String,
         timeout_seconds: u64,
     },
 
-    #[error("资源不足: {0}")]
+    #[error("{}", t!("docker_error.insufficient_resources", details = 0))]
     InsufficientResources(String),
 
-    #[error("依赖缺失: {0}")]
+    #[error("{}", t!("docker_error.missing_dependency", details = 0))]
     MissingDependency(String),
 
-    #[error("网络错误: {0}")]
+    #[error("{}", t!("docker_error.network", details = 0))]
     Network(String),
 
-    #[error("权限错误: {0}")]
+    #[error("{}", t!("docker_error.permission", details = 0))]
     Permission(String),
 
-    #[error("未知错误: {0}")]
+    #[error("{}", t!("docker_error.unknown", details = 0))]
     Unknown(String),
 }
 

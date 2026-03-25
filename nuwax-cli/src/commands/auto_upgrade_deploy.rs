@@ -9,6 +9,7 @@ use client_core::container::DockerManager;
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
 use client_core::sql_diff::generate_live_schema_diff;
 use client_core::upgrade_strategy::UpgradeStrategy;
+use rust_i18n::t;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -65,9 +66,9 @@ fn update_config_version(
 
     config_mut
         .save_to_file("config.toml")
-        .context("保存配置文件失败")?;
+        .context(t!("auto_upgrade_deploy.save_config_failed"))?;
 
-    info!(version = version, "✅ 配置文件版本号已更新并保存");
+    info!(version = version, "{}", t!("auto_upgrade_deploy.config_version_updated"));
     Ok(())
 }
 
@@ -82,11 +83,11 @@ pub async fn handle_auto_upgrade_deploy_command(
             config,
             project,
         } => {
-            info!("🚀 开始自动升级部署流程...");
+            info!("{}", t!("auto_upgrade_deploy.start_process"));
             run_auto_upgrade_deploy(app, port, config, project).await
         }
         AutoUpgradeDeployCommand::Status => {
-            info!("显示自动升级部署状态");
+            info!("{}", t!("auto_upgrade_deploy.show_status"));
             show_status(app).await
         }
     }
@@ -99,23 +100,23 @@ pub async fn run_auto_upgrade_deploy(
     config_file: Option<PathBuf>,
     project_name: Option<String>,
 ) -> Result<()> {
-    info!("🚀 开始自动升级部署流程...");
+    info!("{}", t!("auto_upgrade_deploy.start_process"));
 
     // 如果指定了端口，显示端口信息
     if let Some(port) = frontend_port {
-        info!("🔌 自定义frontend端口: {}", port);
+        info!("{}", t!("auto_upgrade_deploy.custom_frontend_port", port = port));
     }
 
     // 如果指定了配置文件，显示配置文件信息
     if let Some(config_path) = &config_file {
-        info!("📄 自定义docker-compose配置文件: {}", config_path.display());
+        info!("{}", t!("auto_upgrade_deploy.custom_compose_file", path = config_path.display()));
     }
 
     // 注意：CLI版本检查已经在 main.rs 中优先处理，这里不再重复检查
-    info!("✅ CLI 版本已完成预检查，开始执行升级部署流程");
+    info!("{}", t!("auto_upgrade_deploy.cli_check_done"));
 
     // 1. 获取最新版本信息并下载
-    info!("📥 正在下载最新的Docker服务版本...");
+    info!("{}", t!("auto_upgrade_deploy.downloading_latest"));
 
     // 获取最新版本信息
     let latest_version = match app.api_client.get_enhanced_service_manifest().await {
@@ -125,7 +126,7 @@ pub async fn run_auto_upgrade_deploy(
             info!(
                 current_version = %app.config.get_docker_versions(),
                 target_version = %latest_version,
-                "📋 检测到版本信息"
+                "{}", t!("auto_upgrade_deploy.version_detected")
             );
             latest_version
         }
@@ -133,7 +134,7 @@ pub async fn run_auto_upgrade_deploy(
             warn!(
                 error = %e,
                 fallback_version = %app.config.get_docker_versions(),
-                "⚠️ 获取版本信息失败，使用配置版本"
+                "{}", t!("auto_upgrade_deploy.version_fetch_failed")
             );
             app.config.get_docker_versions()
         }
@@ -150,9 +151,9 @@ pub async fn run_auto_upgrade_deploy(
     let is_first_deployment = is_first_deployment().await;
 
     if is_first_deployment {
-        info!("🆕 检测到第一次部署，使用全新初始化");
+        info!("{}", t!("auto_upgrade_deploy.first_deployment_detected"));
     } else {
-        info!("🔄 检测到升级部署，需要先停止服务");
+        info!("{}", t!("auto_upgrade_deploy.upgrade_deployment_detected"));
 
         // 3. 🛑 停止服务并等待（使用统一的公共方法）
         docker_service::stop_docker_services_and_wait(
@@ -164,7 +165,7 @@ pub async fn run_auto_upgrade_deploy(
     }
 
     // 5. 🔍 提前检查并创建挂载目录（重要：Windows Podman Desktop 需要）
-    info!("🔍 检查并创建挂载目录...");
+    info!("{}", t!("auto_upgrade_deploy.check_mount_dirs"));
 
     let docker_manager = create_docker_manager(&config_file, &project_name)?;
 
@@ -172,22 +173,22 @@ pub async fn run_auto_upgrade_deploy(
     let runtime_env = docker_manager.get_runtime_environment();
 
     if runtime_env.needs_special_handling() {
-        info!("⚠️ 检测到 Windows Podman Desktop 环境，提前创建挂载目录");
-        info!("   环境信息: {}", runtime_env.summary());
-        info!("   Podman Desktop 不会自动创建挂载目录，需要手动创建");
+        info!("{}", t!("auto_upgrade_deploy.windows_podman_detected"));
+        info!("{}", t!("auto_upgrade_deploy.env_info", env = runtime_env.summary()));
+        info!("{}", t!("auto_upgrade_deploy.podman_no_auto_create"));
 
         if let Err(e) = docker_manager.ensure_host_volumes_exist().await {
-            warn!("⚠️ 挂载目录检查/创建失败: {}", e);
-            warn!("   继续执行，但可能会遇到容器启动失败");
+            warn!("{}", t!("auto_upgrade_deploy.mount_dir_check_failed", error = e.to_string()));
+            warn!("{}", t!("auto_upgrade_deploy.mount_dir_check_failed_hint"));
         } else {
-            info!("✅ 挂载目录检查完成");
+            info!("{}", t!("auto_upgrade_deploy.mount_dir_check_done"));
         }
     } else {
-        info!("ℹ️ 当前环境: {} (无需特殊处理)", runtime_env.summary());
+        info!("{}", t!("auto_upgrade_deploy.current_env", env = runtime_env.summary()));
     }
 
     // 6. 📦 解压新的Docker服务包（在服务停止后）
-    info!("📦 正在解压Docker服务包...");
+    info!("{}", t!("auto_upgrade_deploy.extracting_docker_package"));
 
     // 清理现有的docker目录以避免路径冲突
     let docker_dir = std::path::Path::new("docker");
@@ -208,30 +209,31 @@ pub async fn run_auto_upgrade_deploy(
                     remove_file_or_dir.iter().map(|p| p.as_path()).collect();
                 match safe_remove_file_or_dir(&remove_file_or_dir).await {
                     Ok(_) => info!(
-                        "✅ 清理文件/目录成功: {}",
-                        &remove_file_or_dir
-                            .iter()
-                            .map(|p| p.to_string_lossy())
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        "{}",
+                        t!("auto_upgrade_deploy.clean_files_success",
+                            files = &remove_file_or_dir
+                                .iter()
+                                .map(|p| p.to_string_lossy())
+                                .collect::<Vec<_>>()
+                                .join(", "))
                     ),
-                    Err(e) => warn!("⚠️ 清理文件/目录失败: {}, 尝试继续解压", e),
+                    Err(e) => warn!("{}", t!("auto_upgrade_deploy.clean_files_failed", error = e.to_string())),
                 }
             }
             UpgradeStrategy::FullUpgrade { .. } => {
                 // 全量升级逻辑
-                info!("🧹 清理现有docker目录以避免文件冲突...");
+                info!("{}", t!("auto_upgrade_deploy.cleaning_docker_dir"));
                 match safe_remove_docker_directory(docker_dir).await {
-                    Ok(_) => info!("✅ docker目录清理完成"),
+                    Ok(_) => info!("{}", t!("auto_upgrade_deploy.docker_dir_cleaned")),
                     Err(e) => {
-                        warn!("⚠️ 清理docker目录失败: {}, 尝试继续解压", e);
-                        return Err(anyhow::anyhow!(format!("清理docker目录失败: {e}")));
+                        warn!("{}", t!("auto_upgrade_deploy.clean_docker_dir_failed", error = e.to_string()));
+                        return Err(anyhow::anyhow!(t!("auto_upgrade_deploy.clean_docker_dir_error", error = e.to_string())));
                     }
                 }
             }
             UpgradeStrategy::NoUpgrade { .. } => {
                 //do nothing
-                info!("版本一致,无需升级更新")
+                info!("{}", t!("auto_upgrade_deploy.version_unchanged"))
             }
         }
     }
@@ -240,7 +242,7 @@ pub async fn run_auto_upgrade_deploy(
     match docker_service::extract_docker_service_with_upgrade_strategy(app, upgrade_strategy).await
     {
         Ok(_) => {
-            info!("✅ Docker服务包解压完成");
+            info!("{}", t!("auto_upgrade_deploy.docker_extract_done"));
 
             // 🔧 自动修复关键脚本文件权限
             fix_script_permissions().await?;
@@ -250,7 +252,7 @@ pub async fn run_auto_upgrade_deploy(
                 info!(
                     from_version = %app.config.get_docker_versions(),
                     to_version = %latest_version,
-                    "📝 更新Docker服务版本"
+                    "{}", t!("auto_upgrade_deploy.updating_docker_version")
                 );
 
                 // 更新版本号并保存到配置文件
@@ -258,20 +260,20 @@ pub async fn run_auto_upgrade_deploy(
             } else {
                 info!(
                     version = %latest_version,
-                    "📝 版本号无需更新（已是最新版本）"
+                    "{}", t!("auto_upgrade_deploy.version_no_update")
                 );
             }
 
             // 📊 SQL差异将在服务启动后通过 Live Diff 生成和执行
         }
         Err(e) => {
-            error!("❌ Docker服务包解压失败: {}", e);
+            error!("{}", t!("auto_upgrade_deploy.docker_extract_failed", error = e.to_string()));
             return Err(e);
         }
     }
 
     // 6. 🔄 自动部署服务
-    info!("🔄 正在部署Docker服务...");
+    info!("{}", t!("auto_upgrade_deploy.deploying_services"));
     docker_service::deploy_docker_services(
         app,
         frontend_port,
@@ -281,7 +283,7 @@ pub async fn run_auto_upgrade_deploy(
     .await?;
 
     // 7. ▶️ 启动服务
-    info!("▶️ 正在启动Docker服务...");
+    info!("{}", t!("auto_upgrade_deploy.starting_services"));
     docker_service::start_docker_services(app, config_file.clone(), project_name.clone()).await?;
 
     // 获取 compose 文件路径
@@ -292,46 +294,46 @@ pub async fn run_auto_upgrade_deploy(
     // 解决方案：先等待 MySQL → 执行 SQL 升级 → 再等待其他服务
     if !is_first_deployment {
         // 阶段 1/2: 仅等待 MySQL 容器就绪
-        info!("⏳ 阶段 1/2: 等待 MySQL 服务就绪...");
+        info!("{}", t!("auto_upgrade_deploy.phase1_wait_mysql"));
         let mysql_ready =
             docker_utils::wait_for_mysql_ready(&compose_path, sql::MYSQL_READY_TIMEOUT).await?;
 
         if mysql_ready {
-            info!("✅ MySQL 服务已就绪");
+            info!("{}", t!("auto_upgrade_deploy.mysql_ready"));
         } else {
-            warn!("⚠️ 等待 MySQL 服务超时，仍尝试执行 SQL 升级...");
+            warn!("{}", t!("auto_upgrade_deploy.mysql_wait_timeout"));
         }
 
         // 阶段 2/2（前半部分）: 执行 SQL 升级
-        info!("🔄 执行数据库升级...");
+        info!("{}", t!("auto_upgrade_deploy.executing_db_upgrade"));
         execute_sql_diff_upgrade(&config_file).await?;
     }
 
     // 等待所有服务完全启动（Java 等现在可以正常启动）
     if is_first_deployment {
-        info!("⏳ 等待所有服务完全启动...");
+        info!("{}", t!("auto_upgrade_deploy.waiting_all_services"));
     } else {
-        info!("⏳ 阶段 2/2: 等待所有服务完全启动...");
+        info!("{}", t!("auto_upgrade_deploy.phase2_wait_all"));
     }
     if docker_utils::wait_for_compose_services_started(&compose_path, sql::OTHER_SERVICES_TIMEOUT)
         .await?
     {
-        info!("✅ 自动升级部署完成，服务已成功启动");
-        info!("🎉 自动升级部署流程成功完成");
+        info!("{}", t!("auto_upgrade_deploy.deploy_complete_services_started"));
+        info!("{}", t!("auto_upgrade_deploy.deploy_success"));
     } else {
-        warn!("⚠️ 等待服务启动超时，请手动检查服务状态");
+        warn!("{}", t!("auto_upgrade_deploy.wait_timeout"));
 
         // 最后再检查一次状态
         match check_docker_service_status(app, &config_file, &project_name).await {
             Ok(true) => {
-                info!("🔍 最终检查：服务似乎已正常启动");
+                info!("{}", t!("auto_upgrade_deploy.final_check_running"));
             }
             Ok(false) => {
-                info!("🔍 最终检查：服务可能未正常启动");
-                info!("📊 详细状态检查:");
+                info!("{}", t!("auto_upgrade_deploy.final_check_not_running"));
+                info!("{}", t!("auto_upgrade_deploy.detailed_status_check"));
                 let _ = docker_service::check_docker_services_status(app).await;
             }
-            Err(e) => warn!("🔍 最终检查失败: {}", e),
+            Err(e) => warn!("{}", t!("auto_upgrade_deploy.final_check_failed", error = e.to_string())),
         }
     }
 
@@ -347,9 +349,10 @@ pub async fn schedule_delayed_deploy(app: &mut CliApp, time: u32, unit: &str) ->
         "hours" | "hour" | "h" => time * 3600,
         "days" | "day" | "d" => time * 86400,
         _ => {
-            error!("不支持的时间单位: {}", unit);
-            return Err(anyhow::anyhow!(format!(
-                "不支持的时间单位: {unit}，支持的单位: hours, minutes, days"
+            error!("{}", t!("auto_upgrade_deploy.unsupported_time_unit", unit = unit));
+            return Err(anyhow::anyhow!(t!(
+                "auto_upgrade_deploy.unsupported_time_unit_error",
+                unit = unit
             )));
         }
     };
@@ -377,18 +380,20 @@ pub async fn schedule_delayed_deploy(app: &mut CliApp, time: u32, unit: &str) ->
         config_manager.create_auto_upgrade_task(&task).await?
     };
 
-    info!("⏰ 已安排延迟执行自动升级部署");
-    info!("   任务ID: {}", task.task_id);
-    info!("   延迟时间: {} {}", time, unit);
-    println!("   预计执行时间: {} 后", format_duration(delay_duration));
+    info!("{}", t!("auto_upgrade_deploy.delayed_scheduled"));
+    info!("{}", t!("auto_upgrade_deploy.task_id", id = task.task_id));
+    info!("{}", t!("auto_upgrade_deploy.delay_time", time = time, unit = unit));
+    println!("   {}", t!("auto_upgrade_deploy.estimated_exec_time", duration = format_duration(delay_duration)));
     info!(
-        "   计划执行时间: {}",
-        scheduled_at.format("%Y-%m-%d %H:%M:%S UTC")
+        "{}",
+        t!("auto_upgrade_deploy.scheduled_exec_time",
+            time = scheduled_at.format("%Y-%m-%d %H:%M:%S UTC"))
     );
 
     info!(
-        "安排延迟执行自动升级部署: {} {}，任务ID: {}",
-        time, unit, task.task_id
+        "{}",
+        t!("auto_upgrade_deploy.delayed_deploy_scheduled",
+            time = time, unit = unit, task_id = task.task_id)
     );
 
     // 更新任务状态为进行中
@@ -401,13 +406,13 @@ pub async fn schedule_delayed_deploy(app: &mut CliApp, time: u32, unit: &str) ->
     }
 
     // 开始延迟等待
-    info!("⏳ 等待中...");
+    info!("{}", t!("auto_upgrade_deploy.waiting"));
 
     // 这里可以优化为后台任务，避免阻塞
     sleep(delay_duration).await;
 
-    info!("🔔 延迟时间到，开始执行自动升级部署");
-    info!("延迟时间到，开始执行自动升级部署，任务ID: {}", task.task_id);
+    info!("{}", t!("auto_upgrade_deploy.delay_time_reached"));
+    info!("{}", t!("auto_upgrade_deploy.delayed_deploy_starting", task_id = task.task_id));
 
     // 执行自动升级部署
     match run_auto_upgrade_deploy(app, None, None, None).await {
@@ -417,7 +422,7 @@ pub async fn schedule_delayed_deploy(app: &mut CliApp, time: u32, unit: &str) ->
             config_manager
                 .update_upgrade_task_status(&task.task_id, "completed", Some(100), None)
                 .await?;
-            info!("✅ 延迟升级部署任务完成");
+            info!("{}", t!("auto_upgrade_deploy.delayed_task_completed"));
         }
         Err(e) => {
             let config_manager =
@@ -425,7 +430,7 @@ pub async fn schedule_delayed_deploy(app: &mut CliApp, time: u32, unit: &str) ->
             config_manager
                 .update_upgrade_task_status(&task.task_id, "failed", None, Some(&e.to_string()))
                 .await?;
-            error!("延迟升级部署任务失败: {}", e);
+            error!("{}", t!("auto_upgrade_deploy.delayed_task_failed", error = e.to_string()));
             return Err(e);
         }
     }
@@ -438,50 +443,51 @@ pub async fn show_status(app: &mut CliApp) -> Result<()> {
     let config_manager =
         client_core::config_manager::ConfigManager::new_with_database(app.database.clone());
 
-    info!("📊 自动升级部署状态信息:");
-    info!("   功能状态: 已实现");
-    info!("   流程说明: 下载最新版本 -> 智能备份 -> 部署服务 -> 启动服务");
+    info!("{}", t!("auto_upgrade_deploy.status_title"));
+    info!("{}", t!("auto_upgrade_deploy.feature_status"));
+    info!("{}", t!("auto_upgrade_deploy.process_desc"));
 
     // 显示待执行的升级任务
     match config_manager.get_pending_upgrade_tasks().await {
         Ok(tasks) => {
             if tasks.is_empty() {
-                info!("📋 升级任务: 当前没有待执行的升级任务");
+                info!("{}", t!("auto_upgrade_deploy.no_pending_tasks"));
             } else {
-                info!("📋 待执行的升级任务:");
+                info!("{}", t!("auto_upgrade_deploy.pending_tasks_title"));
                 for task in tasks {
-                    info!("   - 任务ID: {}", task.task_id);
-                    info!("     名称: {}", task.task_name);
-                    info!("     类型: {}", task.upgrade_type);
-                    info!("     状态: {}", task.status);
+                    info!("{}", t!("auto_upgrade_deploy.task_id_item", id = task.task_id));
+                    info!("{}", t!("auto_upgrade_deploy.task_name_item", name = task.task_name));
+                    info!("{}", t!("auto_upgrade_deploy.task_type_item", type_name = task.upgrade_type));
+                    info!("{}", t!("auto_upgrade_deploy.task_status_item", status = task.status));
                     info!(
-                        "     计划执行时间: {}",
-                        task.schedule_time.format("%Y-%m-%d %H:%M:%S UTC")
+                        "{}",
+                        t!("auto_upgrade_deploy.task_schedule_time",
+                            time = task.schedule_time.format("%Y-%m-%d %H:%M:%S UTC"))
                     );
                     if let Some(target_version) = &task.target_version {
-                        info!("     目标版本: {}", target_version);
+                        info!("{}", t!("auto_upgrade_deploy.task_target_version", version = target_version));
                     }
                     if let Some(progress) = task.progress {
-                        info!("     进度: {}%", progress);
+                        info!("{}", t!("auto_upgrade_deploy.task_progress", progress = progress));
                     }
                     if let Some(error) = &task.error_message {
-                        warn!("     错误信息: {}", error);
+                        warn!("{}", t!("auto_upgrade_deploy.task_error_message", error = error));
                     }
                 }
             }
         }
         Err(e) => {
-            warn!("⚠️  获取升级任务信息失败: {}", e);
-            info!("   注意: 当前版本的任务查询功能有限");
+            warn!("{}", t!("auto_upgrade_deploy.get_tasks_failed", error = e.to_string()));
+            info!("{}", t!("auto_upgrade_deploy.task_query_limited"));
         }
     }
 
     // 显示当前Docker服务状态
-    info!("🐳 当前Docker服务状态:");
+    info!("{}", t!("auto_upgrade_deploy.docker_status_title"));
     docker_service::check_docker_services_status(app).await?;
 
     // 显示最近的备份
-    info!("📝 最近的备份:");
+    info!("{}", t!("auto_upgrade_deploy.recent_backups_title"));
     backup::run_list_backups(app).await?;
 
     Ok(())
@@ -499,7 +505,7 @@ async fn check_docker_service_status(
 
     // 如果compose文件不存在，直接返回false（服务未运行）
     if !compose_path.exists() {
-        info!("📝 docker-compose.yml文件不存在，服务未运行");
+        info!("{}", t!("auto_upgrade_deploy.compose_not_exists"));
         return Ok(false);
     }
 
@@ -512,10 +518,10 @@ async fn check_docker_service_status(
     let running_count = report.get_running_count();
 
     if running_count > 0 {
-        info!("🔍 发现 {} 个运行中的服务", running_count);
+        info!("{}", t!("auto_upgrade_deploy.found_running_services", count = running_count));
         Ok(true)
     } else {
-        info!("🔍 没有发现运行中的服务");
+        info!("{}", t!("auto_upgrade_deploy.no_running_services"));
         Ok(false)
     }
 }
@@ -526,13 +532,13 @@ fn format_duration(duration: Duration) -> String {
     let seconds = duration.as_secs();
 
     if seconds >= 86400 {
-        format!("{} 天", seconds / 86400)
+        t!("auto_upgrade_deploy.days", count = seconds / 86400).to_string()
     } else if seconds >= 3600 {
-        format!("{} 小时", seconds / 3600)
+        t!("auto_upgrade_deploy.hours", count = seconds / 3600).to_string()
     } else if seconds >= 60 {
-        format!("{} 分钟", seconds / 60)
+        t!("auto_upgrade_deploy.minutes", count = seconds / 60).to_string()
     } else {
-        format!("{seconds} 秒")
+        t!("auto_upgrade_deploy.seconds", count = seconds).to_string()
     }
 }
 
@@ -550,7 +556,7 @@ async fn is_first_deployment() -> bool {
     // 🔧 关键修复：如果docker-compose.yml文件不存在，视为首次部署
     // 因为没有compose文件就无法管理现有服务
     if !docker_compose_file.exists() {
-        info!("📝 未找到docker-compose.yml文件，视为首次部署");
+        info!("{}", t!("auto_upgrade_deploy.compose_not_found_first_deploy"));
         return true;
     }
 
@@ -617,20 +623,19 @@ async fn safe_remove_docker_directory(path: &Path) -> Result<()> {
         // 首先尝试安全删除（保留upload目录）
         if let Err(e) = force_cleanup_directory(path).await {
             warn!(
-                "⚠️ 安全删除目录失败 (尝试 {}/{}): {}",
-                attempts, MAX_ATTEMPTS, e
+                "{}",
+                t!("auto_upgrade_deploy.safe_delete_failed",
+                    attempts = attempts, max = MAX_ATTEMPTS, error = e.to_string())
             );
 
             if attempts >= MAX_ATTEMPTS {
-                return Err(anyhow::anyhow!(format!(
-                    "在 {} 次尝试后，目录 {} 仍无法删除: {}",
-                    MAX_ATTEMPTS,
-                    path.display(),
-                    e
+                return Err(anyhow::anyhow!(t!(
+                    "auto_upgrade_deploy.safe_delete_max_attempts",
+                    max = MAX_ATTEMPTS, path = path.display(), error = e.to_string()
                 )));
             }
         } else {
-            info!("✅ 成功安全删除目录: {}", path.display());
+            info!("{}", t!("auto_upgrade_deploy.safe_delete_success", path = path.display()));
             return Ok(());
         }
     }
@@ -642,7 +647,7 @@ async fn safe_remove_docker_directory(path: &Path) -> Result<()> {
 async fn force_cleanup_directory(path: &Path) -> Result<()> {
     info!(
         path = %path.display(),
-        "🧹 尝试强制清理目录内容"
+        "{}", t!("auto_upgrade_deploy.trying_force_cleanup")
     );
 
     if !path.exists() {
@@ -670,7 +675,7 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
                     {
                         info!(
                             path = %entry_path.display(),
-                            "📁 跳过保护目录"
+                            "{}", t!("auto_upgrade_deploy.skipping_protected_dir")
                         );
                         skipped_count += 1;
                         continue;
@@ -682,7 +687,7 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
                             warn!(
                                 path = %entry_path.display(),
                                 error = %e,
-                                "📁 删除子目录失败"
+                                "{}", t!("auto_upgrade_deploy.delete_subdir_failed")
                             );
                             failed_items.push((entry_path.clone(), e.to_string()));
                         }
@@ -693,7 +698,7 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
                                 warn!(
                                     path = %entry_path.display(),
                                     error = %e,
-                                    "📁 删除空目录失败"
+                                    "{}", t!("auto_upgrade_deploy.delete_empty_dir_failed")
                                 );
                                 failed_items.push((entry_path, e.to_string()));
                             }
@@ -705,7 +710,7 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
                             warn!(
                                 path = %entry_path.display(),
                                 error = %e,
-                                "📄 删除文件失败"
+                                "{}", t!("auto_upgrade_deploy.delete_file_failed")
                             );
                             failed_items.push((entry_path, e.to_string()));
                         } else {
@@ -719,7 +724,7 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
             warn!(
                 path = %path.display(),
                 error = %e,
-                "📂 读取目录内容失败"
+                "{}", t!("auto_upgrade_deploy.read_dir_failed")
             );
             return Err(e.into());
         }
@@ -731,19 +736,19 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
             failed_count = failed_items.len(),
             deleted_count = deleted_count,
             skipped_count = skipped_count,
-            "⚠️ 目录清理完成，但有部分失败"
+            "{}", t!("auto_upgrade_deploy.dir_cleanup_partial")
         );
         for (path, error) in failed_items.iter().take(5) {
             warn!("  - {}: {}", path.display(), error);
         }
         if failed_items.len() > 5 {
-            warn!("  ... 还有 {} 个失败项", failed_items.len() - 5);
+            warn!("{}", t!("auto_upgrade_deploy.more_failed_items", count = failed_items.len() - 5));
         }
     } else {
         info!(
             deleted_count = deleted_count,
             skipped_count = skipped_count,
-            "✅ 目录清理成功"
+            "{}", t!("auto_upgrade_deploy.dir_cleanup_success")
         );
     }
 
@@ -768,16 +773,16 @@ async fn archive_diff_sql_file(diff_sql_path: &Path, status: &str) -> Result<()>
     match fs::rename(diff_sql_path, &new_path) {
         Ok(_) => {
             let status_desc = match status {
-                "executed" => "已执行",
-                "failed" => "执行失败",
-                "no_exec" => "未执行",
-                _ => "已归档",
+                "executed" => t!("auto_upgrade_deploy.diff_sql_executed"),
+                "failed" => t!("auto_upgrade_deploy.diff_sql_failed"),
+                "no_exec" => t!("auto_upgrade_deploy.diff_sql_no_exec"),
+                _ => t!("auto_upgrade_deploy.diff_sql_archived"),
             };
-            info!("📝 {} 差异SQL文件: {}", status_desc, new_path.display());
+            info!("{}", t!("auto_upgrade_deploy.diff_sql_file_status", status = status_desc, path = new_path.display()));
             Ok(())
         }
         Err(e) => {
-            warn!("⚠️ 归档差异SQL文件失败: {}", e);
+            warn!("{}", t!("auto_upgrade_deploy.archive_diff_sql_failed", error = e.to_string()));
             Ok(()) // 归档失败不影响主流程
         }
     }
@@ -794,7 +799,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         let history_dir = Path::new("history_sql");
         if !history_dir.exists() {
             fs::create_dir_all(history_dir)?;
-            info!("📁 创建历史SQL目录: {}", history_dir.display());
+            info!("{}", t!("auto_upgrade_deploy.create_history_sql_dir", path = history_dir.display()));
         }
 
         // 生成带时间戳的目录名
@@ -805,15 +810,15 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         // 移动 temp_sql 目录到 history_sql（带降级处理）
         match fs::rename(&temp_sql_dir, &archive_path) {
             Ok(_) => {
-                info!("📦 已归档旧的temp_sql目录到: {}", archive_path.display());
+                info!("{}", t!("auto_upgrade_deploy.archived_temp_sql", path = archive_path.display()));
             }
             Err(e) => {
-                warn!("⚠️ 归档temp_sql目录失败: {}, 尝试直接清理", e);
+                warn!("{}", t!("auto_upgrade_deploy.archive_temp_sql_failed", error = e.to_string()));
                 // 降级：直接删除旧目录
                 if let Err(e2) = fs::remove_dir_all(&temp_sql_dir) {
-                    warn!("⚠️ 清理temp_sql目录失败: {}, 继续执行", e2);
+                    warn!("{}", t!("auto_upgrade_deploy.cleanup_temp_sql_failed", error = e2.to_string()));
                 } else {
-                    info!("✅ 已清理旧的temp_sql目录");
+                    info!("{}", t!("auto_upgrade_deploy.cleaned_old_temp_sql"));
                 }
             }
         }
@@ -821,7 +826,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     // 创建临时SQL目录
     fs::create_dir_all(temp_sql_dir)?;
-    info!("📁 创建临时SQL目录: {}", temp_sql_dir.display());
+    info!("{}", t!("auto_upgrade_deploy.create_temp_sql_dir", path = temp_sql_dir.display()));
 
     // 复制新版本的SQL文件（使用常量路径）
     let current_sql_path = Path::new(sql::CURRENT_SQL_PATH);
@@ -829,33 +834,33 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         // 先删除目标文件（如果存在），确保复制操作成功
         if new_sql_path.exists() {
             fs::remove_file(&new_sql_path)?;
-            info!("🗑️ 已删除旧的SQL文件: {}", new_sql_path.display());
+            info!("{}", t!("auto_upgrade_deploy.deleted_old_sql_file", path = new_sql_path.display()));
         }
 
         fs::copy(current_sql_path, &new_sql_path)
-            .context(format!("复制SQL文件失败: {} -> {}", current_sql_path.display(), new_sql_path.display()))?;
+            .context(t!("auto_upgrade_deploy.copy_sql_failed",
+                src = current_sql_path.display(), dst = new_sql_path.display()))?;
 
         // 验证文件复制成功
         if !new_sql_path.exists() {
-            return Err(anyhow::anyhow!(
-                "SQL文件复制后不存在: {} (源文件: {})",
-                new_sql_path.display(),
-                current_sql_path.display()
-            ));
+            return Err(anyhow::anyhow!(t!(
+                "auto_upgrade_deploy.sql_copy_not_found",
+                dst = new_sql_path.display(), src = current_sql_path.display()
+            )));
         }
 
-        info!("📄 已复制新版本SQL文件: {}", new_sql_path.display());
+        info!("{}", t!("auto_upgrade_deploy.copied_new_sql_file", path = new_sql_path.display()));
     } else {
-        info!("📄 新版本没有SQL文件，跳过差异生成");
+        info!("{}", t!("auto_upgrade_deploy.no_sql_file_skip"));
         return Ok(());
     }
 
     // 读取模板SQL（严格失败策略）
     if !new_sql_path.exists() {
-        return Err(anyhow::anyhow!(
-            "未找到模板SQL文件: {}",
-            new_sql_path.display()
-        ));
+        return Err(anyhow::anyhow!(t!(
+            "auto_upgrade_deploy.template_sql_not_found",
+            path = new_sql_path.display()
+        )));
     }
     let new_sql_content = fs::read_to_string(&new_sql_path)?;
 
@@ -867,64 +872,65 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     let env_file = client_core::constants::docker::get_env_file_path();
     let compose_file_str = compose_file
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("无法将 docker-compose.yml 路径转换为字符串"))?;
+        .ok_or_else(|| anyhow::anyhow!(t!("auto_upgrade_deploy.compose_path_to_string_failed")))?;
     let env_file_str = env_file
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("无法将 .env 文件路径转换为字符串"))?;
+        .ok_or_else(|| anyhow::anyhow!(t!("auto_upgrade_deploy.env_path_to_string_failed")))?;
 
     let config = MySqlConfig::for_container(Some(compose_file_str), Some(env_file_str))
         .await
-        .context("创建 MySQL 配置失败")?;
+        .context(t!("auto_upgrade_deploy.create_mysql_config_failed"))?;
     let executor = MySqlExecutor::new(config);
 
-    info!("🔌 正在连接到MySQL数据库...");
+    info!("{}", t!("auto_upgrade_deploy.connecting_mysql"));
     if let Err(e) = executor.test_connection().await {
         error!(
             error = %e,
             port = sql::DEFAULT_MYSQL_CONTAINER_PORT,
-            "❌ 数据库连接失败"
+            "{}", t!("auto_upgrade_deploy.db_connection_failed")
         );
         error!(
-            "🏃 请确保MySQL容器正在运行并且端口 {} 可访问",
-            sql::DEFAULT_MYSQL_CONTAINER_PORT
+            "{}",
+            t!("auto_upgrade_deploy.ensure_mysql_running",
+                port = sql::DEFAULT_MYSQL_CONTAINER_PORT)
         );
         return Err(e.into());
     }
 
     // 基于在线架构与模板生成差异SQL
-    info!("📊 正在基于在线架构生成SQL差异...");
+    info!("{}", t!("auto_upgrade_deploy.generating_sql_diff"));
     let diff_result = generate_live_schema_diff(&executor, &new_sql_content, "目标版本")
         .await
-        .context("生成在线差异SQL失败")?;
+        .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?;
 
     info!(
         description = %diff_result.description,
         has_executable_sql = diff_result.has_executable_sql,
         has_warnings = diff_result.has_warnings,
-        "📋 差异生成完成"
+        "{}", t!("auto_upgrade_deploy.diff_generation_complete")
     );
 
     // 保存从 MySQL 读取的原始 CREATE TABLE 语句到 init_mysql_old.sql
     if let Some(live_sql) = &diff_result.live_sql {
         let old_sql_path = temp_sql_dir.join(sql::OLD_SQL_FILE);
         fs::write(&old_sql_path, live_sql)?;
-        info!("📄 已保存在线架构SQL文件: {}", old_sql_path.display());
+        info!("{}", t!("auto_upgrade_deploy.saved_live_schema_sql", path = old_sql_path.display()));
     }
 
     // 保存差异SQL文件（无论是否有可执行SQL，都保存以便查看）
-    fs::write(&diff_sql_path, &diff_result.diff_sql).context("保存差异SQL文件失败")?;
-    info!("📄 差异SQL文件已保存: {}", diff_sql_path.display());
+    fs::write(&diff_sql_path, &diff_result.diff_sql).context(t!("auto_upgrade_deploy.save_diff_sql_failed"))?;
+    info!("{}", t!("auto_upgrade_deploy.saved_diff_sql_file", path = diff_sql_path.display()));
 
     // 判断差异类型并输出相应提示
     if !diff_result.has_executable_sql {
         // 没有可执行SQL（可能有警告，也可能完全无差异）
         if diff_result.has_warnings {
             // 情况1：只有删除操作警告，没有可执行的新增/修改SQL
-            info!("⚠️  检测到架构差异：仅包含删除操作（已跳过）");
-            info!("💡 删除操作需要手动执行，请查看差异文件中的说明");
+            info!("{}", t!("auto_upgrade_deploy.diff_only_deletions"));
+            info!("{}", t!("auto_upgrade_deploy.deletions_need_manual"));
         } else {
             // 情况2：完全没有差异（既没有可执行SQL，也没有警告）
-            info!("📄 数据库架构无差异，无需执行升级");
+            info!("{}", t!("auto_upgrade_deploy.no_db_diff"));
         }
 
         // 统一归档差异SQL文件
@@ -945,7 +951,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     if executable_lines.is_empty() {
         // 虽然 has_executable_sql 为 true，但实际没有可执行的SQL（可能是逻辑错误）
-        warn!("⚠️  检测到差异但没有实际可执行的SQL语句");
+        warn!("{}", t!("auto_upgrade_deploy.diff_no_executable_sql"));
         archive_diff_sql_file(&diff_sql_path, "no_exec").await?;
         return Ok(());
     }
@@ -953,24 +959,24 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     info!(
         sql_lines = executable_lines.len(),
         has_warnings = diff_result.has_warnings,
-        "🔄 开始执行数据库升级"
+        "{}", t!("auto_upgrade_deploy.start_db_upgrade")
     );
 
     // 如果同时包含警告，提示用户注意（这是混合场景：既有新增/修改，又有删除）
     if diff_result.has_warnings {
-        warn!("⚠️  注意: 差异中同时包含可执行SQL和删除操作警告");
-        warn!("   ✓ 新增/修改操作将正常执行");
-        warn!("   ✗ 删除操作已跳过，需手动执行");
-        warn!("   📄 详情请查看: {}", diff_sql_path.display());
+        warn!("{}", t!("auto_upgrade_deploy.diff_mixed_warnings"));
+        warn!("{}", t!("auto_upgrade_deploy.add_modify_will_execute"));
+        warn!("{}", t!("auto_upgrade_deploy.deletions_skipped"));
+        warn!("{}", t!("auto_upgrade_deploy.see_diff_file", path = diff_sql_path.display()));
     }
 
-    info!(retry_count = sql::DEFAULT_RETRY_COUNT, "🚀 开始执行差异SQL");
+    info!(retry_count = sql::DEFAULT_RETRY_COUNT, "{}", t!("auto_upgrade_deploy.start_execute_diff_sql"));
     match executor
         .execute_diff_sql_with_retry(&diff_result.diff_sql, sql::DEFAULT_RETRY_COUNT)
         .await
     {
         Ok(results) => {
-            info!(executed_statements = results.len(), "✅ 数据库升级成功");
+            info!(executed_statements = results.len(), "{}", t!("auto_upgrade_deploy.db_upgrade_success"));
             for result in results {
                 info!("  {}", result);
             }
@@ -981,7 +987,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         Err(e) => {
             error!(
                 error = %e,
-                "❌ 数据库升级失败"
+                "{}", t!("auto_upgrade_deploy.db_upgrade_failed")
             );
             // 归档执行失败的差异SQL文件
             archive_diff_sql_file(&diff_sql_path, "failed").await?;
@@ -994,7 +1000,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
 /// 自动修复关键脚本文件权限
 async fn fix_script_permissions() -> Result<()> {
-    info!("🔧 正在修复关键脚本文件权限...");
+    info!("{}", t!("auto_upgrade_deploy.fixing_script_permissions"));
 
     // 需要修复权限的脚本文件列表
     let script_files = ["docker/config/docker-entrypoint.sh"];
@@ -1019,44 +1025,45 @@ async fn fix_script_permissions() -> Result<()> {
                         // 如果没有执行权限，添加执行权限
                         if current_mode & 0o111 == 0 {
                             info!(
-                                "🔒 修复权限: {} (当前: {:o} -> 目标: 755)",
-                                path.display(),
-                                current_mode
+                                "{}",
+                                t!("auto_upgrade_deploy.fixing_permission",
+                                    path = path.display(), current = format!("{:o}", current_mode))
                             );
 
                             let new_permissions = std::fs::Permissions::from_mode(0o755);
                             if let Err(e) = std::fs::set_permissions(path, new_permissions) {
-                                warn!("⚠️ 修复权限失败 {}: {}", path.display(), e);
+                                warn!("{}", t!("auto_upgrade_deploy.fix_permission_failed", path = path.display(), error = e.to_string()));
                             } else {
                                 fixed_count += 1;
-                                info!("✅ 权限修复成功: {}", path.display());
+                                info!("{}", t!("auto_upgrade_deploy.permission_fixed", path = path.display()));
                             }
                         } else {
-                            info!("✓ 权限正常: {} ({:o})", path.display(), current_mode);
+                            info!("{}", t!("auto_upgrade_deploy.permission_ok", path = path.display(), mode = format!("{:o}", current_mode)));
                         }
                     }
 
                     #[cfg(not(unix))]
                     {
-                        info!("ℹ️ 非Unix系统，跳过权限修复: {}", path.display());
+                        info!("{}", t!("auto_upgrade_deploy.non_unix_skip_permission", path = path.display()));
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️ 无法读取文件元数据 {}: {}", path.display(), e);
+                    warn!("{}", t!("auto_upgrade_deploy.read_metadata_failed", path = path.display(), error = e.to_string()));
                 }
             }
         } else {
-            info!("📄 脚本文件不存在，跳过: {}", script_path);
+            info!("{}", t!("auto_upgrade_deploy.script_not_exists_skip", path = script_path));
         }
     }
 
     if total_count > 0 {
         info!(
-            "🔧 权限修复完成: {}/{} 个脚本文件已修复",
-            fixed_count, total_count
+            "{}",
+            t!("auto_upgrade_deploy.permission_fix_complete",
+                fixed = fixed_count, total = total_count)
         );
     } else {
-        info!("📄 未找到需要修复权限的脚本文件");
+        info!("{}", t!("auto_upgrade_deploy.no_scripts_to_fix"));
     }
 
     Ok(())
@@ -1067,19 +1074,20 @@ async fn fix_script_permissions() -> Result<()> {
 pub async fn check_and_install_nuwax_cli_update_early() -> Result<()> {
     use crate::commands::check_update::{check_for_updates, install_release};
 
-    info!("🔍 优先检查 nuwax-cli 版本更新（在任何数据库初始化之前）...");
+    info!("{}", t!("auto_upgrade_deploy.priority_cli_version_check"));
 
     // 检查更新
     let version_info = match check_for_updates().await {
         Ok(info) => {
             info!(
-                "✅ 版本检查完成: 当前={}, 最新={}",
-                info.current_version, info.latest_version
+                "{}",
+                t!("auto_upgrade_deploy.version_check_complete",
+                    current = info.current_version, latest = info.latest_version)
             );
             info
         }
         Err(e) => {
-            error!("❌ 检查更新失败: {}", e);
+            error!("{}", t!("auto_upgrade_deploy.version_check_failed", error = e.to_string()));
             return Err(e);
         }
     };
@@ -1087,10 +1095,11 @@ pub async fn check_and_install_nuwax_cli_update_early() -> Result<()> {
     // 如果有更新，进行安装
     if version_info.is_update_available {
         info!(
-            "🚀 发现 nuwax-cli 新版本: {} -> {}",
-            version_info.current_version, version_info.latest_version
+            "{}",
+            t!("auto_upgrade_deploy.new_cli_version_found",
+                current = version_info.current_version, latest = version_info.latest_version)
         );
-        info!("📥 开始自动安装更新...");
+        info!("{}", t!("auto_upgrade_deploy.start_auto_install"));
 
         match install_release(
             &version_info.download_url.unwrap_or_default(),
@@ -1099,17 +1108,17 @@ pub async fn check_and_install_nuwax_cli_update_early() -> Result<()> {
         .await
         {
             Ok(_) => {
-                info!("✅ nuwax-cli 更新成功！程序将重启以使用新版本");
+                info!("{}", t!("auto_upgrade_deploy.cli_update_success"));
                 std::process::exit(0);
             }
             Err(e) => {
-                error!("❌ nuwax-cli 自动更新失败: {}", e);
-                error!("请检查网络连接或手动运行: nuwax-cli check-update install");
+                error!("{}", t!("auto_upgrade_deploy.cli_auto_update_failed", error = e.to_string()));
+                error!("{}", t!("auto_upgrade_deploy.manual_check_update_hint"));
                 return Err(e);
             }
         }
     } else {
-        info!("✅ nuwax-cli 已是最新版本，无需更新");
+        info!("{}", t!("auto_upgrade_deploy.cli_already_latest"));
     }
 
     Ok(())

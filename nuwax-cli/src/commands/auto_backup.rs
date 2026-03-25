@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::app::CliApp;
 use crate::cli::AutoBackupCommand;
@@ -7,6 +7,7 @@ use crate::docker_service::health_check::HealthChecker;
 use crate::docker_utils;
 use anyhow::Result;
 use client_core::constants::timeout;
+use rust_i18n::t;
 
 use tracing::{debug, error, info, warn};
 
@@ -14,7 +15,7 @@ use tracing::{debug, error, info, warn};
 pub async fn handle_auto_backup(app: &mut CliApp, command: &AutoBackupCommand) -> Result<()> {
     match command {
         AutoBackupCommand::Run => {
-            info!("执行自动备份");
+            info!("{}", t!("auto_backup.execute"));
             run_auto_backup(app).await
         }
         // TODO: 未来版本实现内置定时调度器后启用这些命令
@@ -28,7 +29,7 @@ pub async fn handle_auto_backup(app: &mut CliApp, command: &AutoBackupCommand) -
 ///
 /// 使用 app.config 中配置的 docker-compose 文件和项目名称
 pub async fn run_auto_backup(app: &mut CliApp) -> Result<()> {
-    info!("开始自动备份流程");
+    info!("{}", t!("auto_backup.start_process"));
 
     let backup_start_time = chrono::Utc::now();
     let mut backup_success = false;
@@ -53,19 +54,19 @@ pub async fn run_auto_backup(app: &mut CliApp) -> Result<()> {
         )
         .await?;
     } else {
-        info!("Docker服务未运行，直接进行备份");
+        info!("{}", t!("auto_backup.docker_not_running"));
     }
 
     // 2. 执行备份
-    info!("开始执行备份操作");
+    info!("{}", t!("auto_backup.start_backup"));
     let mut backup_error_message: String = String::new();
     match backup::run_backup(app).await {
         Ok(_) => {
             backup_success = true;
-            info!("备份执行成功");
+            info!("{}", t!("auto_backup.backup_success"));
         }
         Err(e) => {
-            error!(error = %e, "备份执行失败");
+            error!(error = %e, "{}", t!("auto_backup.backup_failed"));
             backup_error_message = format!("{e}");
             // 记录失败但继续执行后续步骤
         }
@@ -73,17 +74,17 @@ pub async fn run_auto_backup(app: &mut CliApp) -> Result<()> {
 
     // 记录备份执行时间和结果
     if let Err(e) = update_last_backup_time(app, backup_start_time, backup_success).await {
-        warn!(error = %e, "记录备份时间失败");
+        warn!(error = %e, "{}", t!("auto_backup.record_time_failed"));
     }
 
     if service_running {
         // 4. 重新启动Docker服务
-        info!("重新启动Docker服务");
+        info!("{}", t!("auto_backup.restart_docker"));
         docker_service::start_docker_services(app, compose_file.clone(), project_name.clone())
             .await?;
 
         // 等待服务启动完成
-        info!("等待Docker服务完全启动");
+        info!("{}", t!("auto_backup.wait_docker_start"));
         let compose_path =
             compose_file.unwrap_or_else(|| PathBuf::from(&app.config.docker.compose_file));
         if docker_utils::wait_for_compose_services_started(
@@ -93,37 +94,37 @@ pub async fn run_auto_backup(app: &mut CliApp) -> Result<()> {
         .await?
         {
             if backup_success {
-                info!("自动备份流程完成，服务已重新启动");
+                info!("{}", t!("auto_backup.process_complete_service_restarted"));
             } else {
-                warn!("自动备份流程完成（备份失败），服务已重新启动");
+                warn!("{}", t!("auto_backup.process_complete_backup_failed"));
             }
         } else {
-            warn!("等待服务启动超时，需要手动检查服务状态");
+            warn!("{}", t!("auto_backup.wait_timeout"));
 
             // 最后再检查一次状态
             match check_docker_service_status(app).await {
                 Ok(true) => {
-                    debug!("最终检查：服务已正常启动");
+                    debug!("{}", t!("auto_backup.final_check_started"));
                 }
                 Ok(false) => {
-                    debug!("最终检查：服务未正常启动");
+                    debug!("{}", t!("auto_backup.final_check_not_started"));
                 }
                 Err(e) => {
-                    error!(error = %e, "最终检查失败");
+                    error!(error = %e, "{}", t!("auto_backup.final_check_failed"));
                 }
             }
         }
     } else if backup_success {
-        info!("自动备份流程完成");
+        info!("{}", t!("auto_backup.process_complete"));
     } else {
-        warn!("自动备份流程完成（备份失败）");
+        warn!("{}", t!("auto_backup.process_complete_backup_failed_simple"));
     }
 
     // 如果备份失败，返回错误
     if !backup_success {
         return Err(anyhow::anyhow!(
-            "自动备份执行失败, {}",
-            backup_error_message
+            "{}",
+            t!("auto_backup.execution_failed", error = backup_error_message)
         ));
     }
 
@@ -132,18 +133,18 @@ pub async fn run_auto_backup(app: &mut CliApp) -> Result<()> {
 
 /// 显示备份状态和历史记录
 pub async fn show_status(app: &mut CliApp) -> Result<()> {
-    debug!("显示备份状态和历史记录");
+    debug!("{}", t!("auto_backup.show_status_debug"));
 
-    info!("📦 备份管理");
-    info!("============");
+    info!("{}", t!("auto_backup.backup_management"));
+    info!("{}", t!("auto_backup.separator"));
 
     // 显示备份历史记录（包含完整的操作列表）
     backup::run_list_backups(app).await?;
 
     // 添加手动备份特定的操作提示
     info!("");
-    info!("🔧 快捷操作:");
-    info!("   - 立即执行备份: nuwax-cli auto-backup run");
+    info!("{}", t!("auto_backup.quick_actions"));
+    info!("{}", t!("auto_backup.run_backup_hint"));
 
     Ok(())
 }
@@ -177,10 +178,10 @@ async fn check_docker_service_status(app: &mut CliApp) -> Result<bool> {
     let running_count = report.get_running_count();
 
     if running_count > 0 {
-        info!("🔍 发现 {} 个运行中的服务", running_count);
+        info!("{}", t!("auto_backup.found_running_services", count = running_count));
         Ok(true)
     } else {
-        info!("🔍 没有发现运行中的服务");
+        info!("{}", t!("auto_backup.no_running_services"));
         Ok(false)
     }
 }

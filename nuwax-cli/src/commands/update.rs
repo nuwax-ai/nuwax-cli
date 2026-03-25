@@ -2,6 +2,7 @@ use crate::app::CliApp;
 use crate::cli::UpgradeArgs;
 use anyhow::Result;
 use client_core::{upgrade_strategy::UpgradeStrategy, utils::archive};
+use rust_i18n::t;
 use std::{fs, path::PathBuf};
 use tracing::{error, info};
 
@@ -33,7 +34,7 @@ async fn handle_service_download(
     // 总是先下载到临时文件
     let temp_path = version_download_dir.join("temp_download");
 
-    info!("   下载到临时文件: {}", temp_path.display());
+    info!("{}", t!("update.download_to_temp", path = temp_path.display()));
 
     let download_result = app
         .api_client
@@ -44,7 +45,7 @@ async fn handle_service_download(
         Ok(_) => {
             // 魔数检测格式
             let format = archive::detect_format_by_magic(&temp_path)?;
-            info!("   检测到文件格式: {:?}", format);
+            info!("{}", t!("update.detected_format", format = format!("{:?}", format)));
 
             // 获取架构
             let arch = client_core::architecture::Architecture::detect();
@@ -56,23 +57,23 @@ async fn handle_service_download(
 
             // 生成正确文件名
             let filename = archive::generate_docker_filename(arch_str, format);
-            info!("   重命名为: {}", filename);
+            info!("{}", t!("update.rename_to", filename = filename));
 
             let final_path = version_download_dir.join(&filename);
 
             // 重命名
             std::fs::rename(&temp_path, &final_path)?;
 
-            info!("✅ 服务包已准备就绪!");
-            info!("   文件位置: {}", final_path.display());
-            info!("   下载版本: {}", target_version.to_string());
-            info!("   当前部署版本: {}", app.config.get_docker_versions());
-            info!("📝 下一步: 运行 'nuwax-cli docker-service deploy' 来部署服务");
+            info!("{}", t!("update.service_package_ready"));
+            info!("{}", t!("update.file_location", path = final_path.display()));
+            info!("{}", t!("update.download_version", version = target_version.to_string()));
+            info!("{}", t!("update.current_deployed_version", version = app.config.get_docker_versions()));
+            info!("{}", t!("update.next_step_hint"));
             Ok(())
         }
         Err(e) => {
-            error!("❌ 操作失败: {}", e);
-            info!("💡 请检查网络连接或稍后重试");
+            error!("{}", t!("update.operation_failed", error = e.to_string()));
+            info!("{}", t!("update.check_network_hint"));
             Err(e)
         }
     }
@@ -81,10 +82,10 @@ async fn handle_service_download(
 /// 下载Docker服务升级文件
 pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeStrategy> {
     if args.check {
-        info!("🔍 检查Docker服务升级版本");
+        info!("{}", t!("update.check_docker_upgrade"));
         info!("========================");
     } else {
-        info!("📦 下载Docker服务文件");
+        info!("{}", t!("update.download_docker_service"));
         info!("=====================");
     }
 
@@ -93,10 +94,10 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
     let is_first_time = !docker_compose_path.exists();
 
     if is_first_time {
-        info!("🆕 检测到这是您的首次部署");
-        info!("   将下载完整的Docker服务包");
+        info!("{}", t!("update.first_deployment_detected"));
+        info!("{}", t!("update.will_download_full"));
     } else if args.force {
-        info!("🔧 强制重新下载模式");
+        info!("{}", t!("update.force_redownload"));
     }
 
     // 2. 获取当前版本信息
@@ -114,15 +115,15 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
             target_version,
             download_type,
         } => {
-            info!("🔄 全量升级");
-            info!("   目标版本: {}", target_version);
-            info!("   下载路径: {}", url);
-            info!("   当前版本: {}", current_version_str);
-            info!("   最新版本: {}", target_version);
+            info!("{}", t!("update.full_upgrade"));
+            info!("{}", t!("update.target_version", version = target_version));
+            info!("{}", t!("update.download_path", path = url));
+            info!("{}", t!("update.current_version_label", version = current_version_str));
+            info!("{}", t!("update.latest_version_label", version = target_version));
 
             if args.check {
                 //检测升级版本是否存在
-                info!("🔍 检查升级版本执行完毕");
+                info!("{}", t!("update.check_upgrade_done"));
                 return Ok(upgrade_strategy);
             }
 
@@ -145,12 +146,12 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
             target_version,
             download_type: _,
         } => {
-            info!("🔄 增量升级");
-            info!("   当前版本: {}", current_version_str);
-            info!("   最新版本: {}", target_version);
+            info!("{}", t!("update.incremental_upgrade"));
+            info!("{}", t!("update.current_version_label", version = current_version_str));
+            info!("{}", t!("update.latest_version_label", version = target_version));
 
             if args.check {
-                info!("🔍 检查升级版本执行完毕");
+                info!("{}", t!("update.check_upgrade_done"));
                 return Ok(upgrade_strategy);
             }
 
@@ -169,9 +170,9 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
             .await?;
         }
         UpgradeStrategy::NoUpgrade { target_version } => {
-            info!("   当前版本: {}", current_version_str);
-            info!("   最新版本: {}", target_version);
-            info!("✅ 当前已是最新版本");
+            info!("{}", t!("update.current_version_label", version = current_version_str));
+            info!("{}", t!("update.latest_version_label", version = target_version));
+            info!("{}", t!("update.already_latest"));
         }
     }
 

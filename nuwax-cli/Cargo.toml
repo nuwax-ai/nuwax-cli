@@ -98,6 +98,9 @@ regex = "1.10"
 dotenvy =  {workspace = true}
 log = { workspace = true }
 
+# 国际化支持
+rust-i18n = { workspace = true }
+
 # Unix用户权限检测
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["user"] }

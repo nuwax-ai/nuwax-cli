@@ -1,6 +1,7 @@
 use crate::app::CliApp;
 use crate::cli::CacheCommand;
 use anyhow::Result;
+use rust_i18n::t;
 use std::fs;
 use std::path::Path;
 use tracing::{info, warn};
@@ -17,12 +18,12 @@ pub async fn handle_cache_command(app: &CliApp, cache_cmd: CacheCommand) -> Resu
 
 /// 清理所有缓存文件
 async fn clear_cache(app: &CliApp) -> Result<()> {
-    info!("🧹 开始清理缓存文件...");
+    info!("{}", t!("cache.clear_start"));
 
     let cache_dir = Path::new(&app.config.cache.cache_dir);
 
     if !cache_dir.exists() {
-        info!("缓存目录不存在: {}", cache_dir.display());
+        info!("{}", t!("cache.cache_dir_not_exists", path = cache_dir.display()));
         return Ok(());
     }
 
@@ -39,14 +40,14 @@ async fn clear_cache(app: &CliApp) -> Result<()> {
                 Ok(size) => {
                     total_size_freed += size;
                     if let Err(e) = fs::remove_dir_all(&path) {
-                        warn!("删除目录失败 {}: {}", path.display(), e);
+                        warn!("{}", t!("cache.delete_dir_failed", path = path.display(), error = e.to_string()));
                     } else {
                         total_deleted += 1;
-                        info!("已删除: {}", path.display());
+                        info!("{}", t!("cache.deleted", path = path.display()));
                     }
                 }
                 Err(e) => {
-                    warn!("计算目录大小失败 {}: {}", path.display(), e);
+                    warn!("{}", t!("cache.calc_dir_size_failed", path = path.display(), error = e.to_string()));
                 }
             }
         } else if path.is_file() {
@@ -54,24 +55,24 @@ async fn clear_cache(app: &CliApp) -> Result<()> {
                 Ok(metadata) => {
                     total_size_freed += metadata.len();
                     if let Err(e) = fs::remove_file(&path) {
-                        warn!("删除文件失败 {}: {}", path.display(), e);
+                        warn!("{}", t!("cache.delete_file_failed", path = path.display(), error = e.to_string()));
                     } else {
                         total_deleted += 1;
-                        info!("已删除: {}", path.display());
+                        info!("{}", t!("cache.deleted", path = path.display()));
                     }
                 }
                 Err(e) => {
-                    warn!("获取文件元数据失败 {}: {}", path.display(), e);
+                    warn!("{}", t!("cache.get_metadata_failed", path = path.display(), error = e.to_string()));
                 }
             }
         }
     }
 
-    info!("🎉 缓存清理完成!");
-    info!("   删除项目: {} 个", total_deleted);
+    info!("{}", t!("cache.clear_complete"));
+    info!("{}", t!("cache.deleted_items", count = total_deleted));
     info!(
-        "   释放空间: {:.2} MB",
-        total_size_freed as f64 / 1024.0 / 1024.0
+        "{}",
+        t!("cache.freed_space", size = format!("{:.2}", total_size_freed as f64 / 1024.0 / 1024.0))
     );
 
     Ok(())
@@ -79,32 +80,32 @@ async fn clear_cache(app: &CliApp) -> Result<()> {
 
 /// 显示缓存使用情况
 async fn show_cache_status(app: &CliApp) -> Result<()> {
-    info!("📊 缓存使用情况");
-    info!("================");
+    info!("{}", t!("cache.status_title"));
+    info!("{}", t!("cache.status_separator"));
 
     let cache_dir = Path::new(&app.config.cache.cache_dir);
     let download_dir = Path::new(&app.config.cache.download_dir);
 
     if !cache_dir.exists() {
-        info!("缓存目录不存在: {}", cache_dir.display());
+        info!("{}", t!("cache.cache_dir_not_exists", path = cache_dir.display()));
         return Ok(());
     }
 
-    info!("缓存根目录: {}", cache_dir.display());
+    info!("{}", t!("cache.cache_root", path = cache_dir.display()));
 
     // 计算总大小
     match calculate_directory_size(cache_dir) {
         Ok(total_size) => {
-            info!("总大小: {:.2} MB", total_size as f64 / 1024.0 / 1024.0);
+            info!("{}", t!("cache.total_size", size = format!("{:.2}", total_size as f64 / 1024.0 / 1024.0)));
         }
         Err(e) => {
-            warn!("计算缓存总大小失败: {}", e);
+            warn!("{}", t!("cache.calc_total_size_failed", error = e.to_string()));
         }
     }
 
     // 显示下载目录详情
     if download_dir.exists() {
-        info!("\n📥 下载缓存详情:");
+        info!("{}", t!("cache.download_cache_title"));
 
         if let Ok(entries) = fs::read_dir(download_dir) {
             let mut version_count = 0;
@@ -118,13 +119,14 @@ async fn show_cache_status(app: &CliApp) -> Result<()> {
                         match calculate_directory_size(&path) {
                             Ok(size) => {
                                 info!(
-                                    "   版本 {}: {:.2} MB",
-                                    version_name,
-                                    size as f64 / 1024.0 / 1024.0
+                                    "{}",
+                                    t!("cache.version_size",
+                                        version = version_name,
+                                        size = format!("{:.2}", size as f64 / 1024.0 / 1024.0))
                                 );
                             }
                             Err(_) => {
-                                info!("   版本 {}: (计算大小失败)", version_name);
+                                info!("{}", t!("cache.version_size_failed", version = version_name));
                             }
                         }
                     }
@@ -132,11 +134,11 @@ async fn show_cache_status(app: &CliApp) -> Result<()> {
             }
 
             if version_count == 0 {
-                info!("   (无版本缓存)");
+                info!("{}", t!("cache.no_version_cache"));
             }
         }
     } else {
-        info!("\n📥 下载缓存: 不存在");
+        info!("{}", t!("cache.download_cache_not_exists"));
     }
 
     Ok(())
@@ -144,12 +146,12 @@ async fn show_cache_status(app: &CliApp) -> Result<()> {
 
 /// 清理下载缓存（保留最新的指定数量版本）
 async fn clean_downloads(app: &CliApp, keep: u32) -> Result<()> {
-    info!("🧹 清理下载缓存 (保留最新 {} 个版本)...", keep);
+    info!("{}", t!("cache.clean_start", keep = keep));
 
     let download_dir = Path::new(&app.config.cache.download_dir);
 
     if !download_dir.exists() {
-        info!("下载缓存目录不存在: {}", download_dir.display());
+        info!("{}", t!("cache.download_dir_not_exists", path = download_dir.display()));
         return Ok(());
     }
 
@@ -177,7 +179,7 @@ async fn clean_downloads(app: &CliApp, keep: u32) -> Result<()> {
     // 按修改时间降序排序（最新的在前）
     versions.sort_by(|a, b| b.2.cmp(&a.2));
 
-    info!("发现 {} 个版本缓存", versions.len());
+    info!("{}", t!("cache.found_versions", count = versions.len()));
 
     let mut deleted_count = 0;
     let mut freed_space = 0u64;
@@ -189,26 +191,26 @@ async fn clean_downloads(app: &CliApp, keep: u32) -> Result<()> {
                 Ok(size) => {
                     freed_space += size;
                     if let Err(e) = fs::remove_dir_all(path) {
-                        warn!("删除版本缓存失败 {}: {}", version_name, e);
+                        warn!("{}", t!("cache.delete_version_failed", version = version_name, error = e.to_string()));
                     } else {
-                        info!("已删除版本缓存: {}", version_name);
+                        info!("{}", t!("cache.deleted_version", version = version_name));
                         deleted_count += 1;
                     }
                 }
                 Err(e) => {
-                    warn!("计算版本缓存大小失败 {}: {}", version_name, e);
+                    warn!("{}", t!("cache.calc_version_size_failed", version = version_name, error = e.to_string()));
                 }
             }
         } else {
-            info!("保留版本缓存: {}", version_name);
+            info!("{}", t!("cache.keep_version", version = version_name));
         }
     }
 
-    info!("🎉 下载缓存清理完成!");
-    info!("   删除版本: {} 个", deleted_count);
+    info!("{}", t!("cache.clean_complete"));
+    info!("{}", t!("cache.deleted_versions", count = deleted_count));
     info!(
-        "   释放空间: {:.2} MB",
-        freed_space as f64 / 1024.0 / 1024.0
+        "{}",
+        t!("cache.freed_space", size = format!("{:.2}", freed_space as f64 / 1024.0 / 1024.0))
     );
 
     Ok(())
@@ -228,7 +230,7 @@ fn calculate_directory_size(dir: &Path) -> Result<u64> {
                 }
             }
             Err(e) => {
-                warn!("遍历目录时出错: {}", e);
+                warn!("{}", t!("cache.walk_dir_error", error = e.to_string()));
             }
         }
     }

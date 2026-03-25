@@ -1,3 +1,8 @@
+// 国际化支持
+#[macro_use]
+extern crate rust_i18n;
+i18n!("../locales", fallback = "en");
+
 // 私有模块声明
 mod app;
 mod cli;
@@ -28,3 +33,6 @@ pub use client_core::{config_manager::ConfigManager, database_manager::DatabaseM
 
 // 导出UI支持函数和类型
 pub use ui_support::*;
+
+// 导出国际化宏和函数
+pub use rust_i18n::{set_locale, t};

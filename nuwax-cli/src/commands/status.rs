@@ -3,14 +3,15 @@ use std::sync::Arc;
 use crate::{app::CliApp, docker_service::health_check::HealthChecker};
 use anyhow::Result;
 use client_core::container::{DockerManager, ServiceStatus};
+use rust_i18n::t;
 use tracing::{error, info, warn};
 
 /// 显示客户端版本信息（标题和基本信息）
 pub fn show_client_version() {
-    info!("🦆 Nuwax Cli ent 状态");
-    info!("==================");
-    info!("📋 基本信息:");
-    info!("   客户端版本: v{}", env!("CARGO_PKG_VERSION"));
+    info!("{}", t!("status.title"));
+    info!("{}", t!("status.separator"));
+    info!("{}", t!("status.basic_info"));
+    info!("{}", t!("status.client_version", version = env!("CARGO_PKG_VERSION")));
 }
 
 /// 显示服务状态（完整版本，包含基本信息）
@@ -22,15 +23,15 @@ pub async fn run_status(app: &CliApp) -> Result<()> {
 /// 显示详细状态信息（不包含基本信息标题）
 pub async fn run_status_details(app: &CliApp) -> Result<()> {
     // 继续显示其他基本信息
-    info!("   Docker服务版本: {}", app.config.get_docker_versions());
-    info!("   配置文件: {}", "config.toml");
+    info!("{}", t!("status.docker_service_version", version = app.config.get_docker_versions()));
+    info!("{}", t!("status.config_file", file = "config.toml"));
 
     // 显示客户端UUID
     let client_uuid = app.database.get_or_create_client_uuid().await?;
-    info!("   客户端UUID: {}", client_uuid);
+    info!("{}", t!("status_cmd.client_uuid", uuid = client_uuid));
 
     // 检查文件状态
-    info!("📁 文件状态:");
+    info!("{}", t!("status.file_status"));
     let docker_compose_path = std::path::Path::new(&app.config.docker.compose_file);
     let env_file_path = std::path::Path::new(&app.config.docker.env_file);
 
@@ -43,30 +44,24 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
     );
 
     if docker_compose_path.exists() {
-        info!(
-            "   ✅ Docker Compose文件: {}",
-            app.config.docker.compose_file
-        );
+        info!("{}", t!("status.docker_compose_exists", file = app.config.docker.compose_file));
     } else {
-        info!(
-            "   ❌ Docker Compose文件: {} (不存在)",
-            app.config.docker.compose_file
-        );
+        info!("{}", t!("status.docker_compose_not_exists", file = app.config.docker.compose_file));
     }
 
     match &download_path {
         Ok(path) => {
-            info!("   ✅ 服务包文件: {}", path.display());
+            info!("{}", t!("status_cmd.service_package_exists", path = path.display()));
         }
         Err(e) => {
-            info!("   ❌ 服务包文件: (错误: {})", e);
+            info!("{}", t!("status_cmd.service_package_error", error = e.to_string()));
         }
     }
 
     // Docker服务状态
-    info!("🐳 Docker服务状态:");
+    info!("{}", t!("status.docker_status"));
     if docker_compose_path.exists() {
-        info!("   📋 Docker Compose文件已就绪");
+        info!("{}", t!("status.docker_ready"));
 
         // 检查具体的服务状态
         match check_docker_services_status(docker_compose_path, env_file_path).await {
@@ -74,19 +69,19 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
                 // 状态检查成功，详细信息已在函数内部显示
             }
             Err(e) => {
-                warn!("   ⚠️  服务状态检查失败: {}", e);
-                info!("   💡 建议检查:");
-                info!("      - Docker是否已安装并运行");
-                info!("      - docker-compose是否可用");
-                info!("      - 使用 'docker-compose ps' 手动查看状态");
+                warn!("{}", t!("status_cmd.status_check_failed", error = e.to_string()));
+                info!("{}", t!("status_cmd.suggest_check_docker"));
+                info!("{}", t!("status_cmd.suggest_docker_installed"));
+                info!("{}", t!("status_cmd.suggest_docker_compose"));
+                info!("{}", t!("status_cmd.suggest_manual_check"));
             }
         }
     } else {
-        warn!("   ❌ Docker Compose文件不存在，服务未初始化");
+        warn!("{}", t!("status_cmd.compose_not_exists"));
     }
 
     // 根据状态提供建议
-    info!("💡 状态分析和建议:");
+    info!("{}", t!("status.suggestions"));
 
     let has_compose = docker_compose_path.exists();
     let has_package = download_path
@@ -96,22 +91,22 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
         .unwrap_or(false);
 
     if !has_compose && !has_package {
-        info!("   🆕 您似乎是首次使用");
-        info!("   📝 建议执行以下步骤:");
-        info!("      1. nuwax-cli upgrade                  (下载Docker服务包)");
-        info!("      2. nuwax-cli docker-service deploy    (部署并启动服务)");
+        info!("{}", t!("status_cmd.first_time_user"));
+        info!("{}", t!("status_cmd.suggested_steps"));
+        info!("{}", t!("status_cmd.step_upgrade"));
+        info!("{}", t!("status_cmd.step_deploy"));
     } else if !has_compose && has_package {
-        info!("   📦 发现服务包文件，但尚未解压");
-        info!("   📝 建议执行:");
-        info!("      - nuwax-cli docker-service deploy  (完整部署流程)");
-        info!("      - nuwax-cli docker-service start   (仅启动服务)");
+        info!("{}", t!("status_cmd.package_found_not_extracted"));
+        info!("{}", t!("status_cmd.suggested_steps"));
+        info!("{}", t!("status_cmd.suggest_deploy"));
+        info!("{}", t!("status_cmd.suggest_start"));
     } else {
-        info!("   ✅ 系统文件完整，可以正常使用所有功能");
-        info!("   📝 可用命令:");
-        info!("      - nuwax-cli docker-service start/stop/restart  (控制服务)");
-        info!("      - nuwax-cli upgrade                            (升级服务)");
-        info!("      - nuwax-cli backup                             (创建备份)");
-        info!("      - nuwax-cli check-update                       (检查客户端更新)");
+        info!("{}", t!("status_cmd.system_complete"));
+        info!("{}", t!("status_cmd.available_commands"));
+        info!("{}", t!("status_cmd.cmd_service_control"));
+        info!("{}", t!("status_cmd.cmd_upgrade"));
+        info!("{}", t!("status_cmd.cmd_backup"));
+        info!("{}", t!("status_cmd.cmd_check_update"));
     }
 
     Ok(())
@@ -138,9 +133,9 @@ async fn check_docker_services_status(
     let health_checker = HealthChecker::new(Arc::new(docker_manager));
     let report = health_checker.health_check().await?;
     if report.is_all_healthy() {
-        info!("   ✅ 服务正在运行");
+        info!("{}", t!("status_cmd.service_running"));
     } else {
-        warn!("   ❌ 存在服务未运行");
+        warn!("{}", t!("status_cmd.service_not_running"));
         for container in report.failed_containers().iter() {
             error!("   ❌ {}: {:?}", container.name, container.status);
         }

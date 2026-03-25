@@ -2,73 +2,73 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DuckError {
-    #[error("配置错误: {0}")]
+    #[error("{}", t!("error.config"))]
     Config(#[from] toml::de::Error),
 
-    #[error("DuckDB数据库错误: {0}")]
+    #[error("{}", t!("error.duckdb", details = 0))]
     DuckDb(String),
 
-    #[error("HTTP 请求错误: {0}")]
+    #[error("{}", t!("error.http"))]
     Http(#[from] reqwest::Error),
 
-    #[error("IO 错误: {0}")]
+    #[error("{}", t!("error.io"))]
     Io(#[from] std::io::Error),
 
-    #[error("UUID 错误: {0}")]
+    #[error("{}", t!("error.uuid"))]
     Uuid(#[from] uuid::Error),
 
-    #[error("序列化错误: {0}")]
+    #[error("{}", t!("error.serde"))]
     Serde(#[from] serde_json::Error),
 
-    #[error("任务执行错误: {0}")]
+    #[error("{}", t!("error.join"))]
     Join(#[from] tokio::task::JoinError),
 
-    #[error("ZIP 文件错误: {0}")]
+    #[error("{}", t!("error.zip"))]
     Zip(#[from] zip::result::ZipError),
 
-    #[error("目录遍历错误: {0}")]
+    #[error("{}", t!("error.walkdir"))]
     WalkDir(#[from] walkdir::Error),
 
-    #[error("路径错误: {0}")]
+    #[error("{}", t!("error.strip_prefix"))]
     StripPrefix(#[from] std::path::StripPrefixError),
 
-    #[error("进度条模板错误: {0}")]
+    #[error("{}", t!("error.template", details = 0))]
     Template(String),
 
-    #[error("Docker 命令执行失败: {0}")]
+    #[error("{}", t!("error.docker", details = 0))]
     Docker(String),
 
-    #[error("备份操作失败: {0}")]
+    #[error("{}", t!("error.backup", details = 0))]
     Backup(String),
 
-    #[error("升级操作失败: {0}")]
+    #[error("{}", t!("error.upgrade", details = 0))]
     Upgrade(String),
 
-    #[error("客户端未注册")]
+    #[error("{}", t!("error.client_not_registered"))]
     ClientNotRegistered,
 
-    #[error("服务端响应无效: {0}")]
+    #[error("{}", t!("error.invalid_response", details = 0))]
     InvalidResponse(String),
 
-    #[error("自定义错误: {0}")]
+    #[error("{}", t!("error.custom", details = 0))]
     Custom(String),
 
-    #[error("配置文件未找到")]
+    #[error("{}", t!("error.config_not_found"))]
     ConfigNotFound,
 
-    #[error("API请求失败: {0}")]
+    #[error("{}", t!("error.api", details = 0))]
     Api(String),
 
-    #[error("Docker服务错误: {0}")]
+    #[error("{}", t!("error.docker_service", details = 0))]
     DockerService(String),
 
-    #[error("Bad Request: {0}")]
+    #[error("{}", t!("error.bad_request", details = 0))]
     BadRequest(String),
 
-    #[error("版本号解析错误: {0}")]
+    #[error("{}", t!("error.version_parse", details = 0))]
     VersionParse(String),
 
-    #[error("应用服务升级解析失败: {0}")]
+    #[error("{}", t!("error.service_upgrade_parse", details = 0))]
     ServiceUpgradeParse(String),
 }
 

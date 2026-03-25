@@ -138,3 +138,6 @@ docker-compose-types = "0.22"
 
 # 解析.env 环境变量文件
 dotenvy = "0.15"
+
+# 国际化支持
+rust-i18n = "3"

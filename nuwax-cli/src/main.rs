@@ -1,3 +1,7 @@
+#[macro_use]
+extern crate rust_i18n;
+i18n!("../locales", fallback = "en");
+
 use clap::Parser;
 use client_core::container::{detect_compose_command_type, set_compose_command_type};
 use client_core::{DuckError, environment::Environment};
@@ -5,30 +9,79 @@ use nuwax_cli::{
     Cli, CliApp, Commands, check_and_install_nuwax_cli_update_early, run_diff_sql, run_init,
     setup_logging,
 };
+use rust_i18n::set_locale;
 use tracing::{error, info, warn};
+
+/// 检测并设置语言
+fn detect_and_set_language(cli: &Cli) {
+    // 优先级: CLI 参数 > DEFAULT_LOCALE 环境变量 > NUWAX_LANG > LANG > 系统语言 > 默认英文
+    let lang = if let Some(ref lang) = cli.lang {
+        lang.clone()
+    } else if let Ok(lang) = std::env::var("DEFAULT_LOCALE") {
+        lang
+    } else if let Ok(lang) = std::env::var("NUWAX_LANG") {
+        lang
+    } else if let Ok(lang) = std::env::var("LANG") {
+        // 解析 LANG 环境变量 (如 zh_CN.UTF-8 -> zh-CN)
+        let lang = lang.split('.').next().unwrap_or(&lang);
+        let lang = lang.replace('_', "-");
+        // 标准化语言代码
+        match lang.as_str() {
+            "zh-CN" | "zh_CN" => "zh-CN".to_string(),
+            "zh-TW" | "zh_TW" => "zh-TW".to_string(),
+            "zh-HK" | "zh_HK" => "zh-TW".to_string(), // 香港繁体映射到台湾繁体
+            "zh" => "zh-CN".to_string(),
+            "en" | "en-US" | "en_US" => "en".to_string(),
+            other => other.to_string(),
+        }
+    } else {
+        // 尝试检测系统语言
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(output) = std::process::Command::new("defaults")
+                .args(["read", "-g", "AppleLocale"])
+                .output()
+            {
+                if let Ok(locale) = String::from_utf8(output.stdout) {
+                    let locale = locale.trim();
+                    // macOS locale 格式: zh_CN, en_US 等
+                    let lang = locale.replace('_', "-");
+                    match lang.as_str() {
+                        "zh-CN" | "zh_CN" => return set_locale("zh-CN"),
+                        "zh-TW" | "zh_TW" | "zh-HK" | "zh_HK" => return set_locale("zh-TW"),
+                        _ => return set_locale("en"),
+                    }
+                }
+            }
+        }
+        "en".to_string()
+    };
+
+    set_locale(&lang);
+}
 
 #[tokio::main]
 async fn main() {
     // 解析命令行参数
     let cli = Cli::parse();
 
+    // 设置语言
+    detect_and_set_language(&cli);
+
     // 检测环境并显示提示
     let environment = Environment::from_env();
     if environment.is_testing() {
-        warn!("⚠️  RUNNING IN TESTING MODE");
-        warn!("   Environment: {}", environment.display_name());
-        warn!(
-            "   API Endpoint: {}",
-            client_core::constants::api::get_base_url()
-        );
-        warn!("   Configuration: config-test.toml (if exists)");
-        warn!("   Use Ctrl+C to cancel if this is not intended");
-        warn!("   Waiting 2 seconds...");
+        warn!("{}", t!("main.testing_mode"));
+        warn!("{}", t!("main.testing_env", env = environment.display_name()));
+        warn!("{}", t!("main.testing_api", url = client_core::constants::api::get_base_url()));
+        warn!("{}", t!("main.testing_config"));
+        warn!("{}", t!("main.testing_cancel"));
+        warn!("{}", t!("main.testing_wait"));
 
         // 给用户时间看到警告
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        warn!("🚀 Starting in Testing Environment...");
+        warn!("{}", t!("main.testing_start"));
     }
 
     // 设置日志记录
@@ -37,7 +90,7 @@ async fn main() {
     // `init` 命令是特例，它不需要预先加载配置
     if let Commands::Init { force } = cli.command {
         if let Err(e) = run_init(force).await {
-            error!("❌ 初始化失败: {}", e);
+            error!("{}", t!("main.init_failed", error = e.to_string()));
             std::process::exit(1);
         }
         return;
@@ -53,22 +106,22 @@ async fn main() {
             Ok(app) => {
                 // 应用初始化成功，显示完整状态信息
                 if let Err(e) = nuwax_cli::run_status_details(&app).await {
-                    error!("❌ 获取详细状态失败: {}", e);
+                    error!("{}", t!("main.detail_status_failed", error = e.to_string()));
                 }
             }
             Err(e) => {
                 // 应用初始化失败，显示友好提示
-                error!("⚠️  无法获取完整状态信息: {}", e);
+                error!("{}", t!("status.error_status", error = e.to_string()));
                 info!("");
-                info!("💡 可能的原因:");
-                info!("   - 当前目录不是 Nuwax Cli ent 工作目录");
-                info!("   - 配置文件或数据库文件不在当前目录");
-                info!("   - 数据库文件被其他进程占用");
+                info!("{}", t!("status.possible_reasons"));
+                info!("{}", t!("status.reason_not_work_dir"));
+                info!("{}", t!("status.reason_config_not_found"));
+                info!("{}", t!("status.reason_db_locked"));
                 info!("");
-                info!("🔧 解决方案:");
-                info!("   1. 切换到 Nuwax Cli ent 初始化的目录（包含 config.toml 的目录）");
-                info!("   2. 或者在新目录运行 'nuwax-cli init' 重新初始化");
-                info!("   3. 确保没有其他 nuwax-cli 进程在运行");
+                info!("{}", t!("status.solutions"));
+                info!("{}", t!("status.solution_switch_dir"));
+                info!("{}", t!("status.solution_reinit"));
+                info!("{}", t!("status.solution_check_process"));
             }
         }
         return;
@@ -84,7 +137,7 @@ async fn main() {
     } = cli.command
     {
         if let Err(e) = run_diff_sql(old_sql, new_sql, old_version, new_version, output).await {
-            error!("❌ SQL差异对比失败: {}", e);
+            error!("{}", t!("status_cmd.sql_diff_failed", error = e.to_string()));
             std::process::exit(1);
         }
         return;
@@ -92,13 +145,13 @@ async fn main() {
 
     // 🚀 特殊处理：AutoUpgradeDeploy 命令需要优先检查CLI版本更新（在任何数据库初始化之前）
     if let Commands::AutoUpgradeDeploy(_) = cli.command {
-        info!("🔍 AutoUpgradeDeploy 命令检测到，优先进行 CLI 版本检查...");
+        info!("{}", t!("main.auto_upgrade_cli_check"));
         if let Err(e) = check_and_install_nuwax_cli_update_early().await {
-            error!("❌ CLI 版本检查失败: {}", e);
+            error!("{}", t!("main.cli_check_failed", error = e.to_string()));
             std::process::exit(1);
         }
         // 如果有更新，上面的函数会直接退出进程，不会继续执行到这里
-        info!("✅ CLI 版本检查完成，继续执行 AutoUpgradeDeploy 命令");
+        info!("{}", t!("main.cli_check_done"));
 
         // 🔍 检测 Docker Compose 命令类型（仅在此处检测一次，后续直接使用）
         let compose_type = detect_compose_command_type().await;
@@ -123,10 +176,10 @@ async fn main() {
             }
 
             if is_config_not_found {
-                error!("❌ 配置文件 '{}' 未找到。", cli.config.display());
-                error!("👉 请先运行 'nuwax-cli init' 命令来创建配置文件。");
+                error!("{}", t!("main.config_not_found", file = cli.config.display()));
+                error!("{}", t!("main.config_not_found_hint"));
             } else {
-                error!("❌ 应用初始化失败: {}", e);
+                error!("{}", t!("main.app_init_failed", error = e.to_string()));
             }
             std::process::exit(1);
         }
@@ -134,7 +187,7 @@ async fn main() {
 
     // 运行命令
     if let Err(e) = app.run_command(cli.command).await {
-        error!("❌ 操作失败: {}", e);
+        error!("{}", t!("main.operation_failed", error = e.to_string()));
         std::process::exit(1);
     }
 }

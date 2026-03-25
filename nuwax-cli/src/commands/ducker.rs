@@ -1,5 +1,6 @@
 use anyhow::Result;
 use color_eyre::eyre::Context;
+use rust_i18n::t;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
@@ -14,15 +15,15 @@ pub struct DuckerArgs {
 
 /// 集成ducker命令 - 提供Docker TUI界面（直接集成,不需要外部安装）
 pub async fn run_ducker(args: Vec<String>) -> Result<()> {
-    info!("启动ducker Docker TUI工具...");
+    info!("{}", t!("ducker.starting"));
 
     // 解析ducker参数
     let ducker_args = parse_ducker_args(args)?;
 
     // 运行ducker的核心逻辑
     run_ducker_tui(ducker_args).await.map_err(|e| {
-        error!("ducker执行失败: {}", e);
-        anyhow::anyhow!(format!("ducker执行失败: {e}"))
+        error!("{}", t!("ducker.execution_failed", error = e.to_string()));
+        anyhow::anyhow!(t!("ducker.execution_failed", error = e.to_string()).to_string())
     })
 }
 
@@ -58,11 +59,11 @@ fn parse_ducker_args(args: Vec<String>) -> Result<DuckerArgs> {
             "-h" | "--help" => {
                 // 显示帮助信息
                 show_ducker_help();
-                return Err(anyhow::anyhow!("显示帮助信息"));
+                return Err(anyhow::anyhow!(t!("ducker.help_displayed").to_string()));
             }
             _ => {
                 // 忽略未知参数
-                warn!("未知的ducker参数: {}", args[i]);
+                warn!("{}", t!("ducker.unknown_arg", arg = args[i]));
             }
         }
         i += 1;
@@ -82,11 +83,11 @@ async fn run_ducker_tui(args: DuckerArgs) -> color_eyre::Result<()> {
     };
 
     // 跳过ducker的日志初始化，因为我们已经在nuwax-cli中初始化了
-    info!("使用nuwax-cli的日志系统，跳过ducker的日志初始化");
+    info!("{}", t!("ducker.using_nuwax_log"));
 
     // 安装color_eyre (跳过如果已经安装)
     if color_eyre::install().is_err() {
-        warn!("color_eyre已经安装，跳过");
+        warn!("{}", t!("ducker.color_eyre_installed"));
     }
 
     // 创建ducker配置
@@ -164,35 +165,60 @@ async fn run_ducker_tui(args: DuckerArgs) -> color_eyre::Result<()> {
 fn show_ducker_help() {
     println!(
         r#"
-🦆 Ducker 集成版本 - Docker TUI 工具
+🦆 {} - Docker TUI {}
 
-用法: nuwax-cli ducker [选项]
+{}: nuwax-cli ducker [options]
 
-选项:
-  -e, --export-default-config  导出默认配置到配置目录
-  -d, --docker-path <PATH>     Docker socket路径
-      --docker-host <URL>      Docker主机URL (例: tcp://1.2.3.4:2375)
-  -l, --log-path <PATH>        日志文件路径
-  -h, --help                   显示此帮助信息
+{}:
+  -e, --export-default-config  {}
+  -d, --docker-path <PATH>     {}
+      --docker-host <URL>      {}
+  -l, --log-path <PATH>        {}
+  -h, --help                   {}
 
-ducker 主要功能:
-  • 容器管理 (启动/停止/删除/进入容器)
-  • 镜像管理和清理
-  • 卷和网络管理
-  • 实时日志查看
-  • 类似k9s的优秀TUI体验
+{}:
+  • {}
+  • {}
+  • {}
+  • {}
+  • {}
 
-键盘快捷键:
-  j/↓        向下导航
-  k/↑        向上导航
-  Enter      选择/查看详情
-  d          删除选中项
-  l          查看日志
-  q/Esc     退出
-  :          命令模式
+{}:
+  j/↓        {}
+  k/↑        {}
+  Enter      {}
+  d          {}
+  l          {}
+  q/Esc     {}
+  :          {}
 
-注意: 此版本已集成到nuwax-cli中，无需单独安装ducker。
-"#
+{}: {}
+"#,
+        t!("ducker.help.title"),
+        t!("ducker.help.tool"),
+        t!("ducker.help.usage"),
+        t!("ducker.help.options"),
+        t!("ducker.help.export_config"),
+        t!("ducker.help.docker_path"),
+        t!("ducker.help.docker_host"),
+        t!("ducker.help.log_path"),
+        t!("ducker.help.help_flag"),
+        t!("ducker.help.main_features"),
+        t!("ducker.help.feature_containers"),
+        t!("ducker.help.feature_images"),
+        t!("ducker.help.feature_volumes"),
+        t!("ducker.help.feature_logs"),
+        t!("ducker.help.feature_tui"),
+        t!("ducker.help.shortcuts"),
+        t!("ducker.help.key_down"),
+        t!("ducker.help.key_up"),
+        t!("ducker.help.key_enter"),
+        t!("ducker.help.key_delete"),
+        t!("ducker.help.key_logs"),
+        t!("ducker.help.key_quit"),
+        t!("ducker.help.key_command"),
+        t!("ducker.help.note_title"),
+        t!("ducker.help.note_content")
     );
 }
 

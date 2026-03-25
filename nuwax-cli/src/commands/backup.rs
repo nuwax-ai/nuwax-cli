@@ -1,9 +1,10 @@
 use crate::app::CliApp;
-use crate::docker_service::{DockerService, HealthReport};
+use crate::docker_service::DockerService;
 use anyhow::Result;
 use client_core::backup::{BackupManager, BackupOptions};
 use client_core::constants::docker;
 use client_core::database::BackupType;
+use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,18 +36,18 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
     let compose_path = Path::new(&app.config.docker.compose_file);
 
     if !compose_path.exists() {
-        error!("❌ Docker Compose文件不存在: {}", compose_path.display());
-        info!("💡 请先确保Docker服务已正确部署");
+        error!("{}", t!("backup_cmd.compose_not_exists", path = compose_path.display()));
+        info!("{}", t!("backup_cmd.ensure_docker_deployed"));
         return Ok(());
     }
 
     // 2. 使用 DockerService 的 health_check 进行智能状态检查
-    info!("🔍 检查Docker服务状态...");
+    info!("{}", t!("backup_cmd.checking_docker_status"));
 
     let docker_service = DockerService::new(app.config.clone(), app.docker_manager.clone())?;
     match docker_service.health_check().await {
         Ok(report) => {
-            info!("📊 服务状态: {}", report.get_status_summary());
+            info!("{}", t!("backup_cmd.service_status", status = report.get_status_summary()));
 
             // 智能分析服务状态
             let running_containers = report.get_running_containers();
@@ -60,19 +61,20 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
                 .collect();
 
             if !persistent_running_services.is_empty() {
-                warn!("⚠️  持续服务仍在运行中！");
-                error!("❌ 冷备份要求持续运行的服务必须处于停止状态");
+                warn!("{}", t!("backup_cmd.persistent_services_running"));
+                error!("{}", t!("backup_cmd.cold_backup_requires_stop"));
 
                 info!(
-                    "📝 发现 {} 个持续运行的服务:",
-                    persistent_running_services.len()
+                    "{}",
+                    t!("backup_cmd.found_running_services", count = persistent_running_services.len())
                 );
                 for container in &persistent_running_services {
                     info!(
-                        "   - {} (状态: {}, restart: {})",
-                        container.name,
-                        container.status.display_name(),
-                        container.get_restart_display()
+                        "{}",
+                        t!("backup_cmd.container_info_with_restart",
+                            name = container.name,
+                            status = container.status.display_name(),
+                            restart = container.get_restart_display())
                     );
                 }
 
@@ -84,24 +86,25 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
 
                 if !oneshot_running_services.is_empty() {
                     info!(
-                        "📝 发现 {} 个运行中的一次性任务（已忽略）:",
-                        oneshot_running_services.len()
+                        "{}",
+                        t!("backup_cmd.found_oneshot_running", count = oneshot_running_services.len())
                     );
                     for container in oneshot_running_services {
                         info!(
-                            "   - {} (一次性任务，restart: {}, 不影响备份)",
-                            container.name,
-                            container.get_restart_display()
+                            "{}",
+                            t!("backup_cmd.oneshot_container_info",
+                                name = container.name,
+                                restart = container.get_restart_display())
                         );
                     }
                 }
 
-                info!("💡 请先停止持续运行的服务后再进行备份");
+                info!("{}", t!("backup_cmd.stop_services_first"));
                 return Ok(());
             }
 
             // 成功：所有持续服务已停止
-            info!("✅ 所有持续服务已停止，可以进行备份");
+            info!("{}", t!("backup_cmd.all_services_stopped"));
 
             // 显示已完成和被忽略的容器信息
             if !completed_containers.is_empty() {
@@ -116,25 +119,27 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
                     .collect();
 
                 if !oneshot_completed.is_empty() {
-                    info!("🔄 忽略 {} 个一次性任务容器:", oneshot_completed.len());
+                    info!("{}", t!("backup_cmd.ignoring_oneshot", count = oneshot_completed.len()));
                     for container in oneshot_completed {
                         info!(
-                            "   - {} (状态: {}, restart: {})",
-                            container.name,
-                            container.status.display_name(),
-                            container.get_restart_display()
+                            "{}",
+                            t!("backup_cmd.container_info_with_restart",
+                                name = container.name,
+                                status = container.status.display_name(),
+                                restart = container.get_restart_display())
                         );
                     }
                 }
 
                 if !other_completed.is_empty() {
-                    info!("📝 发现 {} 个其他已完成容器:", other_completed.len());
+                    info!("{}", t!("backup_cmd.found_other_completed", count = other_completed.len()));
                     for container in other_completed {
                         info!(
-                            "   - {} (状态: {}, restart: {})",
-                            container.name,
-                            container.status.display_name(),
-                            container.get_restart_display()
+                            "{}",
+                            t!("backup_cmd.container_info_with_restart",
+                                name = container.name,
+                                status = container.status.display_name(),
+                                restart = container.get_restart_display())
                         );
                     }
                 }
@@ -142,28 +147,29 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
 
             if !failed_containers.is_empty() {
                 warn!(
-                    "⚠️  发现 {} 个失败的容器（不影响备份）:",
-                    failed_containers.len()
+                    "{}",
+                    t!("backup_cmd.found_failed_containers", count = failed_containers.len())
                 );
                 for container in failed_containers {
                     warn!(
-                        "   - {} (状态: {}, restart: {})",
-                        container.name,
-                        container.status.display_name(),
-                        container.get_restart_display()
+                        "{}",
+                        t!("backup_cmd.container_info_with_restart",
+                            name = container.name,
+                            status = container.status.display_name(),
+                            restart = container.get_restart_display())
                     );
                 }
             }
         }
         Err(e) => {
-            error!("❌ 检查Docker服务状态失败: {}", e);
-            info!("💡 无法确认服务状态，建议手动检查后再进行备份");
+            error!("{}", t!("backup_cmd.check_status_failed", error = e.to_string()));
+            info!("{}", t!("backup_cmd.suggest_manual_check"));
             return Ok(());
         }
     }
 
     // 3. 执行备份
-    info!("🔄 开始创建备份...");
+    info!("{}", t!("backup_cmd.starting_backup"));
 
     // 执行需要备份的目录: app, data 目录
     let source_paths = vec![docker::get_data_dir_path(), docker::get_app_dir_path()];
@@ -185,12 +191,12 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
 
     match backup_manager.create_backup(backup_options).await {
         Ok(backup_record) => {
-            info!("✅ 备份创建成功: {}", backup_record.file_path);
-            info!("📝 备份ID: {}", backup_record.id);
-            info!("📏 备份服务版本: {}", backup_record.service_version);
+            info!("{}", t!("backup_cmd.backup_created", path = backup_record.file_path));
+            info!("{}", t!("backup_cmd.backup_id", id = backup_record.id));
+            info!("{}", t!("backup_cmd.service_version", version = backup_record.service_version));
         }
         Err(e) => {
-            error!("❌ 备份创建失败: {}", e);
+            error!("{}", t!("backup_cmd.backup_failed", error = e.to_string()));
             return Err(e);
         }
     }
@@ -203,14 +209,14 @@ pub async fn run_list_backups(app: &CliApp) -> Result<()> {
     let backups = app.backup_manager.list_backups().await?;
 
     if backups.is_empty() {
-        info!("📦 暂无备份记录");
-        info!("💡 使用以下命令创建备份:");
-        info!("   nuwax-cli backup");
+        info!("{}", t!("backup_cmd.no_backups"));
+        info!("{}", t!("backup_cmd.hint_create_backup"));
+        info!("{}", t!("backup_cmd.hint_backup_command"));
         return Ok(());
     }
 
-    info!("📦 备份列表");
-    info!("============");
+    info!("{}", t!("backup_cmd.backup_list_title"));
+    info!("{}", t!("backup_cmd.separator"));
 
     // 统计信息
     let total_backups = backups.len();
@@ -221,9 +227,15 @@ pub async fn run_list_backups(app: &CliApp) -> Result<()> {
     // 详细信息表头
     info!(
         "{:<4} {:<12} {:<20} {:<10} {:<8} {:<12} {}",
-        "ID", "类型", "创建时间", "版本", "状态", "大小", "文件路径"
+        t!("backup_cmd.header_id"),
+        t!("backup_cmd.header_type"),
+        t!("backup_cmd.header_created_at"),
+        t!("backup_cmd.header_version"),
+        t!("backup_cmd.header_status"),
+        t!("backup_cmd.header_size"),
+        t!("backup_cmd.header_file_path")
     );
-    info!("{}", "-".repeat(100));
+    info!("{}", t!("backup_cmd.list_separator"));
 
     for backup in &backups {
         let backup_path = std::path::Path::new(&backup.file_path);
@@ -247,19 +259,19 @@ pub async fn run_list_backups(app: &CliApp) -> Result<()> {
                     format!("{file_size}B")
                 }
             } else {
-                "未知".to_string()
+                t!("backup_cmd.size_unknown").to_string()
             };
 
-            ("✅ 可用", size)
+            (t!("backup_cmd.status_available").to_string(), size)
         } else {
             invalid_backups += 1;
-            ("❌ 文件缺失", "---".to_string())
+            (t!("backup_cmd.status_file_missing").to_string(), "---".to_string())
         };
 
         // 备份类型显示
         let backup_type_display = match backup.backup_type {
-            client_core::database::BackupType::Manual => "手动",
-            client_core::database::BackupType::PreUpgrade => "升级前",
+            client_core::database::BackupType::Manual => t!("backup_cmd.type_manual"),
+            client_core::database::BackupType::PreUpgrade => t!("backup_cmd.type_pre_upgrade"),
         };
 
         // 获取文件名而不是完整路径用于显示
@@ -281,19 +293,19 @@ pub async fn run_list_backups(app: &CliApp) -> Result<()> {
 
         // 如果文件不存在，显示警告信息
         if !file_exists {
-            warn!("     ⚠️  警告: 备份文件不存在，无法用于回滚！");
-            warn!("         预期路径: {}", backup.file_path);
+            warn!("{}", t!("backup_cmd.warning_file_missing"));
+            warn!("{}", t!("backup_cmd.expected_path", path = backup.file_path));
         }
     }
 
-    info!("{}", "-".repeat(100));
+    info!("{}", t!("backup_cmd.list_separator"));
 
     // 统计摘要
-    info!("📊 备份统计:");
-    info!("   总备份数: {}", total_backups);
-    info!("   可用备份: {} ✅", valid_backups);
+    info!("{}", t!("backup_cmd.backup_statistics"));
+    info!("{}", t!("backup_cmd.total_backups", count = total_backups));
+    info!("{}", t!("backup_cmd.valid_backups", count = valid_backups));
     if invalid_backups > 0 {
-        warn!("   无效备份: {} ❌", invalid_backups);
+        warn!("{}", t!("backup_cmd.invalid_backups", count = invalid_backups));
     }
 
     if total_size > 0 {
@@ -304,26 +316,26 @@ pub async fn run_list_backups(app: &CliApp) -> Result<()> {
         } else {
             format!("{:.2} KB", total_size as f64 / 1024.0)
         };
-        info!("   总大小: {}", total_size_display);
+        info!("{}", t!("backup_cmd.total_size", size = total_size_display));
     }
 
     // 操作提示
     if valid_backups > 0 {
-        info!("💡 可用操作:");
-        info!("   - 交互式回滚: nuwax-cli rollback");
-        info!("   - 指定ID回滚: nuwax-cli rollback <备份ID>");
-        info!("   - 创建新备份: nuwax-cli backup");
+        info!("{}", t!("backup_cmd.available_operations"));
+        info!("{}", t!("backup_cmd.operation_interactive_rollback"));
+        info!("{}", t!("backup_cmd.operation_rollback_by_id"));
+        info!("{}", t!("backup_cmd.operation_create_backup"));
     }
 
     if invalid_backups > 0 {
-        warn!("⚠️  发现 {} 个无效备份（文件缺失）", invalid_backups);
-        info!("💡 建议:");
+        warn!("{}", t!("backup_cmd.found_invalid_backups", count = invalid_backups));
+        info!("{}", t!("backup_cmd.suggestions"));
         info!(
-            "   - 检查备份目录设置: {}",
-            app.config.get_backup_dir().display()
+            "{}",
+            t!("backup_cmd.check_backup_dir", dir = app.config.get_backup_dir().display())
         );
-        info!("   - 如果备份文件被误删，这些记录将无法用于恢复");
-        info!("   - 可考虑手动清理这些无效记录");
+        info!("{}", t!("backup_cmd.file_deleted_hint"));
+        info!("{}", t!("backup_cmd.cleanup_hint"));
     }
 
     Ok(())
@@ -358,7 +370,7 @@ pub async fn run_rollback(
         match interactive_backup_selection(app).await? {
             Some(id) => id,
             None => {
-                info!("操作已取消");
+                info!("{}", t!("backup_cmd.operation_cancelled"));
                 return Ok(());
             }
         }
@@ -366,37 +378,37 @@ pub async fn run_rollback(
 
     if !force {
         if rollback_data {
-            warn!("⚠️  警告: 此操作将覆盖当前数据目录,Mysql,Redis等数据也会一起回滚!");
+            warn!("{}", t!("backup_cmd.warn_rollback_data_overwrite"));
         } else {
-            warn!("⚠️  警告: 此操作会回滚后端和前端应用版本,但不回滚Mysql,Redis等数据!");
+            warn!("{}", t!("backup_cmd.warn_rollback_app_only"));
         }
 
         use std::io::{self, Write};
-        print!("请确认您要从备份 {selected_backup_id} 恢复数据 (y/N): ");
+        print!("{}", t!("backup_cmd.confirm_restore", id = selected_backup_id));
         io::stdout().flush()?;
 
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
 
         if input.trim().to_lowercase() != "y" {
-            warn!("操作已取消");
+            warn!("{}", t!("backup_cmd.operation_cancelled"));
             return Ok(());
         }
     }
 
-    info!("开始数据回滚操作...");
+    info!("{}", t!("backup_cmd.starting_rollback"));
 
     // 🔧 智能回滚
     if rollback_data {
         //data,app 等目录,全部恢复
         run_rollback_with_exculde(app, selected_backup_id, auto_start_service, &[]).await?;
     } else {
-        info!("rollback_data 为 false, 不回滚 data 目录(mysql,redis等数据,不会回滚)");
+        info!("{}", t!("backup_cmd.rollback_data_false_hint"));
         //data 数据目录不用恢复,回滚应用业务逻辑, 考虑改写: perform_selective_restore ,增加参数,用于排除 data 目录
         run_rollback_with_exculde(app, selected_backup_id, auto_start_service, &["data"]).await?;
     }
 
-    info!("✅ 数据回滚完成");
+    info!("{}", t!("backup_cmd.rollback_complete"));
     Ok(())
 }
 
@@ -415,50 +427,50 @@ pub async fn run_rollback_data_only(
         match interactive_backup_selection(app).await? {
             Some(id) => id,
             None => {
-                info!("操作已取消");
+                info!("{}", t!("backup_cmd.operation_cancelled"));
                 return Ok(());
             }
         }
     };
 
     if !force {
-        warn!("⚠️  警告: 此操作将覆盖当前 data 目录!");
-        warn!("⚠️  注意: 此操作只恢复 data 目录，app 目录和配置文件将保持不变");
+        warn!("{}", t!("backup_cmd.warn_overwrite_data"));
+        warn!("{}", t!("backup_cmd.warn_only_data_restore"));
 
         use std::io::{self, Write};
-        print!("请确认您要从备份 {selected_backup_id} 恢复 data 目录 (y/N): ");
+        print!("{}", t!("backup_cmd.confirm_restore_data", id = selected_backup_id));
         io::stdout().flush()?;
 
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
 
         if input.trim().to_lowercase() != "y" {
-            warn!("操作已取消");
+            warn!("{}", t!("backup_cmd.operation_cancelled"));
             return Ok(());
         }
     }
 
-    info!("开始 data 目录回滚操作...");
+    info!("{}", t!("backup_cmd.starting_data_rollback"));
 
     // 🔧 只回滚 data 目录：只恢复 data 目录，保留 app 目录和配置文件
     run_data_directory_only_rollback(app, selected_backup_id, auto_start_service, config_file)
         .await?;
 
-    info!("✅ data 目录回滚完成");
+    info!("{}", t!("backup_cmd.data_rollback_complete"));
     Ok(())
 }
 
 /// 交互式备份选择
 async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
-    info!("🗂️  备份选择");
-    info!("============");
+    info!("{}", t!("backup_cmd.backup_selection"));
+    info!("{}", t!("backup_cmd.selection_separator"));
 
     let backups = app.backup_manager.list_backups().await?;
 
     if backups.is_empty() {
-        warn!("❌ 没有可用的备份");
-        info!("💡 请先创建备份:");
-        info!("   nuwax-cli backup");
+        warn!("{}", t!("backup_cmd.no_available_backups"));
+        info!("{}", t!("backup_cmd.hint_create_backup"));
+        info!("{}", t!("backup_cmd.hint_backup_command"));
         return Ok(None);
     }
 
@@ -472,18 +484,23 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
     }
 
     if valid_backups.is_empty() {
-        warn!("❌ 没有可用的备份文件");
-        info!("💡 所有备份文件都已丢失或损坏");
+        warn!("{}", t!("backup_cmd.no_available_backup_files"));
+        info!("{}", t!("backup_cmd.all_backups_lost"));
         return Ok(None);
     }
 
     // 显示备份选择列表
-    info!("📋 可用备份列表:");
+    info!("{}", t!("backup_cmd.available_backup_list"));
     info!(
         "{:<4} {:<12} {:<20} {:<10} {:<12} {}",
-        "序号", "类型", "创建时间", "版本", "大小", "文件名"
+        t!("backup_cmd.header_index"),
+        t!("backup_cmd.header_type"),
+        t!("backup_cmd.header_created_at"),
+        t!("backup_cmd.header_version"),
+        t!("backup_cmd.header_size"),
+        t!("backup_cmd.header_filename")
     );
-    info!("{}", "-".repeat(80));
+    info!("{}", t!("backup_cmd.selection_list_separator"));
 
     for (index, backup) in valid_backups.iter().enumerate() {
         let backup_path = std::path::Path::new(&backup.file_path);
@@ -501,13 +518,13 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
                 format!("{file_size}B")
             }
         } else {
-            "未知".to_string()
+            t!("backup_cmd.size_unknown").to_string()
         };
 
         // 备份类型显示
         let backup_type_display = match backup.backup_type {
-            client_core::database::BackupType::Manual => "手动",
-            client_core::database::BackupType::PreUpgrade => "升级前",
+            client_core::database::BackupType::Manual => t!("backup_cmd.type_manual"),
+            client_core::database::BackupType::PreUpgrade => t!("backup_cmd.type_pre_upgrade"),
         };
 
         // 获取文件名
@@ -527,16 +544,16 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
         );
     }
 
-    info!("{}", "-".repeat(80));
-    info!("💡 输入说明:");
-    info!("   - 输入序号 (1-{}) 选择要恢复的备份", valid_backups.len());
-    info!("   - 输入 'q' 或 'quit' 退出");
-    info!("   - 输入 'l' 或 'list' 重新显示列表");
+    info!("{}", t!("backup_cmd.selection_list_separator"));
+    info!("{}", t!("backup_cmd.input_instructions"));
+    info!("{}", t!("backup_cmd.input_select_hint", count = valid_backups.len()));
+    info!("{}", t!("backup_cmd.input_quit_hint"));
+    info!("{}", t!("backup_cmd.input_list_hint"));
 
     // 交互式选择循环
     use std::io::{self, Write};
     loop {
-        print!("\n请选择要恢复的备份 (1-{}/q/l): ", valid_backups.len());
+        print!("\n{}", t!("backup_cmd.select_prompt", count = valid_backups.len()));
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -546,18 +563,23 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
         // 处理退出命令
         if input.is_empty() || input.eq_ignore_ascii_case("q") || input.eq_ignore_ascii_case("quit")
         {
-            info!("👋 操作已取消");
+            info!("{}", t!("backup_cmd.operation_cancelled_bye"));
             return Ok(None);
         }
 
         // 处理重新显示列表
         if input.eq_ignore_ascii_case("l") || input.eq_ignore_ascii_case("list") {
-            info!("\n📋 重新显示备份列表:");
+            info!("\n{}", t!("backup_cmd.redisplay_list"));
             info!(
                 "{:<4} {:<12} {:<20} {:<10} {:<12} {}",
-                "序号", "类型", "创建时间", "版本", "大小", "文件名"
+                t!("backup_cmd.header_index"),
+                t!("backup_cmd.header_type"),
+                t!("backup_cmd.header_created_at"),
+                t!("backup_cmd.header_version"),
+                t!("backup_cmd.header_size"),
+                t!("backup_cmd.header_filename")
             );
-            info!("{}", "-".repeat(80));
+            info!("{}", t!("backup_cmd.selection_list_separator"));
 
             for (index, backup) in valid_backups.iter().enumerate() {
                 let backup_path = std::path::Path::new(&backup.file_path);
@@ -574,12 +596,12 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
                         format!("{file_size}B")
                     }
                 } else {
-                    "未知".to_string()
+                    t!("backup_cmd.size_unknown").to_string()
                 };
 
                 let backup_type_display = match backup.backup_type {
-                    client_core::database::BackupType::Manual => "手动",
-                    client_core::database::BackupType::PreUpgrade => "升级前",
+                    client_core::database::BackupType::Manual => t!("backup_cmd.type_manual"),
+                    client_core::database::BackupType::PreUpgrade => t!("backup_cmd.type_pre_upgrade"),
                 };
 
                 let filename = backup_path
@@ -597,7 +619,7 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
                     filename
                 );
             }
-            info!("{}", "-".repeat(80));
+            info!("{}", t!("backup_cmd.selection_list_separator"));
             continue;
         }
 
@@ -608,29 +630,31 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
                     let selected_backup = valid_backups[selection - 1];
 
                     // 显示选择确认
-                    info!("✅ 您选择了备份:");
-                    info!("   备份ID: {}", selected_backup.id);
+                    info!("{}", t!("backup_cmd.selected_backup"));
+                    info!("{}", t!("backup_cmd.selected_backup_id", id = selected_backup.id));
                     info!(
-                        "   类型: {}",
-                        match selected_backup.backup_type {
-                            client_core::database::BackupType::Manual => "手动",
-                            client_core::database::BackupType::PreUpgrade => "升级前",
-                        }
+                        "{}",
+                        t!("backup_cmd.selected_backup_type",
+                            backup_type = match selected_backup.backup_type {
+                                client_core::database::BackupType::Manual => t!("backup_cmd.type_manual"),
+                                client_core::database::BackupType::PreUpgrade => t!("backup_cmd.type_pre_upgrade"),
+                            })
                     );
                     info!(
-                        "   创建时间: {}",
-                        selected_backup.created_at.format("%Y-%m-%d %H:%M:%S")
+                        "{}",
+                        t!("backup_cmd.selected_created_at",
+                            time = selected_backup.created_at.format("%Y-%m-%d %H:%M:%S"))
                     );
-                    info!("   服务版本: {}", selected_backup.service_version);
-                    info!("   文件路径: {}", selected_backup.file_path);
+                    info!("{}", t!("backup_cmd.selected_service_version", version = selected_backup.service_version));
+                    info!("{}", t!("backup_cmd.selected_file_path", path = selected_backup.file_path));
 
                     return Ok(Some(selected_backup.id));
                 } else {
-                    warn!("❌ 无效的选择，请输入 1-{} 之间的数字", valid_backups.len());
+                    warn!("{}", t!("backup_cmd.invalid_selection", count = valid_backups.len()));
                 }
             }
             Err(_) => {
-                warn!("❌ 无效的输入，请输入数字、'q'(退出) 或 'l'(重新显示列表)");
+                warn!("{}", t!("backup_cmd.invalid_input"));
             }
         }
     }
@@ -643,10 +667,10 @@ async fn run_rollback_with_exculde(
     auto_start_service: bool,
     dirs_to_exculde: &[&str],
 ) -> Result<()> {
-    info!("🛡️ 使用智能数据回滚模式");
-    info!("   📁 将恢复: data/, app/ 目录");
-    info!("   🔧 将保留: docker-compose.yml, .env 等配置文件");
-    info!("   不恢复的目录:{:?}", dirs_to_exculde);
+    info!("{}", t!("backup_cmd.smart_rollback_mode"));
+    info!("{}", t!("backup_cmd.will_restore_data_app"));
+    info!("{}", t!("backup_cmd.will_keep_config"));
+    info!("{}", t!("backup_cmd.excluded_dirs", dirs = format!("{:?}", dirs_to_exculde)));
 
     // 使用 BackupManager 的智能数据恢复功能
     let docker_dir = std::path::Path::new("./docker");
@@ -661,7 +685,7 @@ async fn run_rollback_with_exculde(
         .await
     {
         Ok(_) => {
-            info!("✅ 智能数据恢复完成");
+            info!("{}", t!("backup_cmd.smart_restore_complete"));
 
             // 设置正确的权限
             let mysql_data_dir = docker_dir.join("data/mysql");
@@ -671,30 +695,30 @@ async fn run_rollback_with_exculde(
                     use std::os::unix::fs::PermissionsExt;
                     let permissions = std::fs::Permissions::from_mode(0o775);
                     if let Err(e) = std::fs::set_permissions(&mysql_data_dir, permissions) {
-                        warn!("⚠️ 设置MySQL权限失败: {}", e);
+                        warn!("{}", t!("backup_cmd.set_mysql_permission_failed", error = e.to_string()));
                     } else {
-                        info!("🔒 已设置MySQL数据目录权限为775");
+                        info!("{}", t!("backup_cmd.mysql_permission_set"));
                     }
                 }
             }
 
-            info!("💡 数据恢复说明:");
-            info!("   ✅ 所有数据库数据已恢复");
-            info!("   ✅ 所有应用程序文件已恢复");
-            info!("   ✅ 配置文件保持最新版本");
+            info!("{}", t!("backup_cmd.restore_info_title"));
+            info!("{}", t!("backup_cmd.restore_db_complete"));
+            info!("{}", t!("backup_cmd.restore_app_complete"));
+            info!("{}", t!("backup_cmd.restore_config_kept"));
 
             if auto_start_service {
-                info!("   ✅ Docker服务已自动启动");
+                info!("{}", t!("backup_cmd.docker_service_started"));
             } else {
-                info!("   📝 Docker服务启动已跳过（由上级流程控制）");
+                info!("{}", t!("backup_cmd.docker_service_start_skipped"));
             }
         }
         Err(e) => {
-            error!("❌ 数据恢复失败: {}", e);
-            warn!("💡 建议操作:");
-            warn!("   1. 检查备份文件是否存在且完整");
-            warn!("   2. 确保有足够的磁盘空间");
-            warn!("   3. 手动启动服务: nuwax-cli docker-service start");
+            error!("{}", t!("backup_cmd.data_restore_failed", error = e.to_string()));
+            warn!("{}", t!("backup_cmd.suggestions"));
+            warn!("{}", t!("backup_cmd.check_backup_file"));
+            warn!("{}", t!("backup_cmd.check_disk_space"));
+            warn!("{}", t!("backup_cmd.manual_start_hint"));
             return Err(e);
         }
     }
@@ -709,16 +733,16 @@ async fn run_data_directory_only_rollback(
     auto_start_service: bool,
     config_file: Option<&std::path::PathBuf>,
 ) -> Result<()> {
-    info!("🛡️ 使用智能 data 目录回滚模式");
-    info!("   📁 将恢复: data/ 目录");
-    info!("   🔧 将保留: app/ 目录, docker-compose.yml, .env 等配置文件");
+    info!("{}", t!("backup_cmd.smart_data_rollback_mode"));
+    info!("{}", t!("backup_cmd.will_restore_data_only"));
+    info!("{}", t!("backup_cmd.will_keep_app_config"));
 
     // 使用 BackupManager 的智能数据恢复功能
     let docker_dir = std::path::Path::new("./docker");
 
     // 如果有自定义配置文件，创建新的 DockerManager
     let backup_manager = if let Some(config_path) = config_file {
-        info!("📄 使用自定义配置文件进行恢复: {}", config_path.display());
+        info!("{}", t!("backup_cmd.using_custom_config", path = config_path.display()));
 
         // 获取对应的 .env 文件路径
         let env_file = config_path.with_file_name(".env");
@@ -728,7 +752,7 @@ async fn run_data_directory_only_rollback(
                 env_file.clone(),
                 None,
             )
-            .map_err(|e| anyhow::anyhow!("创建自定义DockerManager失败: {}", e))?,
+            .map_err(|e| anyhow::anyhow!("{}", t!("backup_cmd.create_docker_manager_failed", error = e.to_string())))?,
         );
         Arc::new(client_core::backup::BackupManager::new(
             app.config.get_backup_dir(),
@@ -746,7 +770,7 @@ async fn run_data_directory_only_rollback(
         .await
     {
         Ok(_) => {
-            info!("✅ 智能 data 目录恢复完成");
+            info!("{}", t!("backup_cmd.smart_data_restore_complete"));
 
             // 设置正确的权限
             let mysql_data_dir = docker_dir.join("data/mysql");
@@ -756,30 +780,30 @@ async fn run_data_directory_only_rollback(
                     use std::os::unix::fs::PermissionsExt;
                     let permissions = std::fs::Permissions::from_mode(0o775);
                     if let Err(e) = std::fs::set_permissions(&mysql_data_dir, permissions) {
-                        warn!("⚠️ 设置MySQL权限失败: {}", e);
+                        warn!("{}", t!("backup_cmd.set_mysql_permission_failed", error = e.to_string()));
                     } else {
-                        info!("🔒 已设置MySQL数据目录权限为775");
+                        info!("{}", t!("backup_cmd.mysql_permission_set"));
                     }
                 }
             }
 
-            info!("💡 数据恢复说明:");
-            info!("   ✅ 所有数据库数据已恢复");
-            info!("   ✅ app 目录保持原状");
-            info!("   ✅ 配置文件保持最新版本");
+            info!("{}", t!("backup_cmd.restore_info_title"));
+            info!("{}", t!("backup_cmd.restore_db_complete"));
+            info!("{}", t!("backup_cmd.app_dir_kept"));
+            info!("{}", t!("backup_cmd.restore_config_kept"));
 
             if auto_start_service {
-                info!("   ✅ Docker服务已自动启动");
+                info!("{}", t!("backup_cmd.docker_service_started"));
             } else {
-                info!("   📝 Docker服务启动已跳过（由上级流程控制）");
+                info!("{}", t!("backup_cmd.docker_service_start_skipped"));
             }
         }
         Err(e) => {
-            error!("❌ data 目录恢复失败: {}", e);
-            warn!("💡 建议操作:");
-            warn!("   1. 检查备份文件是否存在且完整");
-            warn!("   2. 确保有足够的磁盘空间");
-            warn!("   3. 手动启动服务: nuwax-cli docker-service start");
+            error!("{}", t!("backup_cmd.data_dir_restore_failed", error = e.to_string()));
+            warn!("{}", t!("backup_cmd.suggestions"));
+            warn!("{}", t!("backup_cmd.check_backup_file"));
+            warn!("{}", t!("backup_cmd.check_disk_space"));
+            warn!("{}", t!("backup_cmd.manual_start_hint"));
             return Err(e);
         }
     }
@@ -802,7 +826,7 @@ async fn output_backups_as_json(app: &CliApp) -> Result<()> {
                     let error_response = JsonBackupListResponse {
                         success: false,
                         backups: vec![],
-                        error: Some(format!("JSON 序列化失败: {e}")),
+                        error: Some(t!("backup_cmd.json_serialize_failed", error = e.to_string()).to_string()),
                     };
                     if let Ok(error_json) = serde_json::to_string(&error_response) {
                         print!("{error_json}");
