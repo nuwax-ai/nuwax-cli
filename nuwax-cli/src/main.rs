@@ -14,15 +14,31 @@ use tracing::{error, info, warn};
 
 /// 规范化语言代码，兼容 zh_CN / en_US / zh-HK 等写法
 fn normalize_locale(raw: &str) -> String {
-    let normalized = raw.split('.').next().unwrap_or(raw).replace('_', "-");
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "en".to_string();
+    }
+
+    let normalized = trimmed.split('.').next().unwrap_or(trimmed).replace('_', "-");
     let lower = normalized.to_ascii_lowercase();
 
-    match lower.as_str() {
-        "zh" | "zh-cn" | "zh-hans" => "zh-CN".to_string(),
-        "zh-tw" | "zh-hk" | "zh-hant" => "zh-TW".to_string(),
-        "en" | "en-us" | "en-gb" => "en".to_string(),
-        _ => normalized,
+    if lower == "zh" {
+        return "zh-CN".to_string();
     }
+    if lower == "en" || lower.starts_with("en-") {
+        return "en".to_string();
+    }
+    if lower.starts_with("zh-") {
+        if lower.contains("hant") || lower.contains("hk") || lower.contains("tw") {
+            return "zh-TW".to_string();
+        }
+        if lower.contains("hans") || lower.contains("cn") || lower.contains("sg") {
+            return "zh-CN".to_string();
+        }
+        return "zh-CN".to_string();
+    }
+
+    normalized
 }
 
 /// 确保 locale 在已加载的语言列表中，否则回退到 en
@@ -46,10 +62,75 @@ fn sanitize_supported_locale(locale: String) -> String {
     }
 }
 
+fn detect_locale_from_env() -> Option<String> {
+    for key in ["LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(normalize_locale(trimmed));
+            }
+        }
+    }
+    None
+}
+
+/// 尝试检测系统语言（支持 macOS / Linux / Windows）
+#[cfg(target_os = "macos")]
+fn detect_system_locale() -> Option<String> {
+    if let Ok(output) = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleLocale"])
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(locale) = String::from_utf8(output.stdout) {
+                let trimmed = locale.trim();
+                if !trimmed.is_empty() {
+                    return Some(normalize_locale(trimmed));
+                }
+            }
+        }
+    }
+
+    detect_locale_from_env()
+}
+
+#[cfg(target_os = "windows")]
+fn detect_system_locale() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.creation_flags(CREATE_NO_WINDOW).args([
+        "-NoProfile",
+        "-Command",
+        "[System.Globalization.CultureInfo]::InstalledUICulture.Name",
+    ]);
+
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            if let Ok(locale) = String::from_utf8(output.stdout) {
+                let trimmed = locale.trim();
+                if !trimmed.is_empty() {
+                    return Some(normalize_locale(trimmed));
+                }
+            }
+        }
+    }
+
+    detect_locale_from_env()
+}
+
+#[cfg(any(target_os = "linux", not(any(target_os = "macos", target_os = "windows"))))]
+fn detect_system_locale() -> Option<String> {
+    detect_locale_from_env()
+}
+
 /// 检测并设置语言
 fn detect_and_set_language(cli: &Cli) {
-    // 优先级: CLI 参数 > DEFAULT_LOCALE 环境变量 > NUWAX_LANG > LANG > 系统语言 > 默认英文
-    let lang = if let Some(ref lang) = cli.lang {
+    // 优先级: 系统语言 > CLI 参数 > DEFAULT_LOCALE > NUWAX_LANG > LANG > 默认英文
+    let lang = if let Some(lang) = detect_system_locale() {
+        lang
+    } else if let Some(ref lang) = cli.lang {
         normalize_locale(lang)
     } else if let Ok(lang) = std::env::var("DEFAULT_LOCALE") {
         normalize_locale(&lang)
@@ -58,19 +139,6 @@ fn detect_and_set_language(cli: &Cli) {
     } else if let Ok(lang) = std::env::var("LANG") {
         normalize_locale(&lang)
     } else {
-        // 尝试检测系统语言
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(output) = std::process::Command::new("defaults")
-                .args(["read", "-g", "AppleLocale"])
-                .output()
-            {
-                if let Ok(locale) = String::from_utf8(output.stdout) {
-                    let lang = normalize_locale(locale.trim());
-                    return set_locale(&sanitize_supported_locale(lang));
-                }
-            }
-        }
         "en".to_string()
     };
 
