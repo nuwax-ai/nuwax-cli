@@ -1,7 +1,7 @@
 // 国际化支持
 #[macro_use]
 extern crate rust_i18n;
-i18n!("../locales", fallback = "en");
+i18n!("../locales", fallback = ["en", "zh-CN"]);
 
 // 私有模块声明
 mod app;

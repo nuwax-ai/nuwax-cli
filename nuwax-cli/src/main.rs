@@ -1,6 +1,6 @@
 #[macro_use]
 extern crate rust_i18n;
-i18n!("../locales", fallback = "en");
+i18n!("../locales", fallback = ["en", "zh-CN"]);
 
 use clap::Parser;
 use client_core::container::{detect_compose_command_type, set_compose_command_type};
@@ -12,28 +12,51 @@ use nuwax_cli::{
 use rust_i18n::set_locale;
 use tracing::{error, info, warn};
 
+/// 规范化语言代码，兼容 zh_CN / en_US / zh-HK 等写法
+fn normalize_locale(raw: &str) -> String {
+    let normalized = raw.split('.').next().unwrap_or(raw).replace('_', "-");
+    let lower = normalized.to_ascii_lowercase();
+
+    match lower.as_str() {
+        "zh" | "zh-cn" | "zh-hans" => "zh-CN".to_string(),
+        "zh-tw" | "zh-hk" | "zh-hant" => "zh-TW".to_string(),
+        "en" | "en-us" | "en-gb" => "en".to_string(),
+        _ => normalized,
+    }
+}
+
+/// 确保 locale 在已加载的语言列表中，否则回退到 en
+fn sanitize_supported_locale(locale: String) -> String {
+    let available = rust_i18n::available_locales!();
+    if available.iter().any(|&l| l == locale) {
+        return locale;
+    }
+
+    let primary = locale.split('-').next().unwrap_or("en");
+    match primary {
+        "zh" => {
+            if available.iter().any(|&l| l == "zh-CN") {
+                "zh-CN".to_string()
+            } else {
+                "en".to_string()
+            }
+        }
+        "en" => "en".to_string(),
+        _ => "en".to_string(),
+    }
+}
+
 /// 检测并设置语言
 fn detect_and_set_language(cli: &Cli) {
     // 优先级: CLI 参数 > DEFAULT_LOCALE 环境变量 > NUWAX_LANG > LANG > 系统语言 > 默认英文
     let lang = if let Some(ref lang) = cli.lang {
-        lang.clone()
+        normalize_locale(lang)
     } else if let Ok(lang) = std::env::var("DEFAULT_LOCALE") {
-        lang
+        normalize_locale(&lang)
     } else if let Ok(lang) = std::env::var("NUWAX_LANG") {
-        lang
+        normalize_locale(&lang)
     } else if let Ok(lang) = std::env::var("LANG") {
-        // 解析 LANG 环境变量 (如 zh_CN.UTF-8 -> zh-CN)
-        let lang = lang.split('.').next().unwrap_or(&lang);
-        let lang = lang.replace('_', "-");
-        // 标准化语言代码
-        match lang.as_str() {
-            "zh-CN" | "zh_CN" => "zh-CN".to_string(),
-            "zh-TW" | "zh_TW" => "zh-TW".to_string(),
-            "zh-HK" | "zh_HK" => "zh-TW".to_string(), // 香港繁体映射到台湾繁体
-            "zh" => "zh-CN".to_string(),
-            "en" | "en-US" | "en_US" => "en".to_string(),
-            other => other.to_string(),
-        }
+        normalize_locale(&lang)
     } else {
         // 尝试检测系统语言
         #[cfg(target_os = "macos")]
@@ -43,21 +66,15 @@ fn detect_and_set_language(cli: &Cli) {
                 .output()
             {
                 if let Ok(locale) = String::from_utf8(output.stdout) {
-                    let locale = locale.trim();
-                    // macOS locale 格式: zh_CN, en_US 等
-                    let lang = locale.replace('_', "-");
-                    match lang.as_str() {
-                        "zh-CN" | "zh_CN" => return set_locale("zh-CN"),
-                        "zh-TW" | "zh_TW" | "zh-HK" | "zh_HK" => return set_locale("zh-TW"),
-                        _ => return set_locale("en"),
-                    }
+                    let lang = normalize_locale(locale.trim());
+                    return set_locale(&sanitize_supported_locale(lang));
                 }
             }
         }
         "en".to_string()
     };
 
-    set_locale(&lang);
+    set_locale(&sanitize_supported_locale(lang));
 }
 
 #[tokio::main]

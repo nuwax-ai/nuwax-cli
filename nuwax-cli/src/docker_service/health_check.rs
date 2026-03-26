@@ -632,7 +632,7 @@ impl HealthChecker {
                 let container = ContainerInfo {
                     name: service_name.clone(),
                     status,
-                    image: t!("health_check.not_started").to_string(),
+                    image: t!("health_check.not_started_label").to_string(),
                     ports: Vec::new(),
                     uptime: None,
                     health: None,
@@ -940,7 +940,7 @@ impl HealthChecker {
                 if !failed_containers.is_empty() {
                     let failed_names: Vec<&str> =
                         failed_containers.iter().map(|c| c.name.as_str()).collect();
-                    info!("{}", t!("health_check.not_started", names = format!("{:?}", failed_names)));
+                    info!("{}", t!("health_check.not_started_list", names = format!("{:?}", failed_names)));
                 }
             }
 

@@ -1010,7 +1010,7 @@ health_check:
   skip_non_compose: "⏭️  跳过非compose容器: %{container} (无标签信息)"
   round1_done: "📊 第一轮处理完成: 已添加 %{count} 个容器"
   skip_duplicate_stopped: "⚠️  跳过重复的未运行服务: %{service}"
-  not_started: "未启动"
+  not_started_label: "未启动"
   add_stopped: "📦 添加未运行服务: %{name} (状态: %{status}, 一次性: %{oneshot})"
   final_stats: "📊 最终统计: compose服务=%{compose}, 已添加容器=%{containers}"
   complete: "健康检查完成"
@@ -1032,7 +1032,7 @@ health_check:
   wait_operation: "等待服务启动"
   all_started: "🎉 所有服务已成功启动! 用时: %{elapsed}秒"
   starting: "⏳ 服务启动中... 已等待: %{elapsed}秒"
-  not_started: "❌ 尚未启动成功容器: %{names}"
+  not_started_list: "❌ 尚未启动成功容器: %{names}"
   service_status: "服务状态"
   healthy: "健康"
   errors: "错误"
@@ -1040,7 +1040,7 @@ health_check:
 
 # restart_policy 消息
 restart_policy:
-  no: "no (一次性任务)"
+  'no': "no (一次性任务)"
   always: "always (持续服务)"
   unless_stopped: "unless-stopped (持续服务)"
   on_failure: "on-failure (持续服务)"

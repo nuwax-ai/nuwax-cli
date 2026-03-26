@@ -3,7 +3,7 @@
 extern crate rust_i18n;
 
 // 初始化 i18n，fallback 到英文
-i18n!("../locales", fallback = "en");
+i18n!("../locales", fallback = ["en", "zh-CN"]);
 
 pub mod api;
 pub mod api_config;
