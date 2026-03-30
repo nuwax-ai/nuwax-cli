@@ -286,10 +286,10 @@ pub async fn extract_docker_service(
 
     // 检查文件是否存在
     if !archive_path.exists() {
-        return Err(anyhow::anyhow!(format!(
-            "文件不存在: {}",
-            archive_path.display()
-        )));
+        return Err(anyhow::anyhow!(
+            "{}",
+            t!("utils.file_not_exists", path = archive_path.display())
+        ));
     }
 
     // 检测文件格式
@@ -455,7 +455,16 @@ async fn extract_zip_archive(
 
                     let mut entry = archive
                         .by_name(&zip_path)
-                        .map_err(|e| anyhow::anyhow!("在压缩包中找不到文件 {}: {}", zip_path, e))?;
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "{}",
+                                t!(
+                                    "utils.file_not_found_in_archive",
+                                    path = zip_path,
+                                    error = e.to_string()
+                                )
+                            )
+                        })?;
 
                     let dst = work_dir.join(&file);
 
@@ -579,7 +588,7 @@ async fn extract_zip_archive(
         }
         UpgradeStrategy::NoUpgrade { .. } => {
             // 无需升级,不应该走到这里的解压逻辑
-            return Err(anyhow::anyhow!("无需升级,不支持的解压操作"));
+            return Err(anyhow::anyhow!("{}", t!("utils.no_upgrade_extract_unsupported")));
         }
     }
 
@@ -599,7 +608,7 @@ async fn extract_tar_gz_archive(
         extract_tar_gz_blocking(&tar_gz_path, &strategy, extract_start)
     })
     .await
-    .map_err(|e| anyhow::anyhow!("解压任务失败: {}", e))?
+    .map_err(|e| anyhow::anyhow!("{}", t!("utils.extract_task_failed", error = e.to_string())))?
 }
 
 /// TAR.GZ 解压实现（阻塞）
@@ -682,10 +691,10 @@ fn extract_tar_gz_blocking(
         }
         UpgradeStrategy::PatchUpgrade { .. } => {
             // 增量升级目前不支持 TAR.GZ
-            return Err(anyhow::anyhow!("TAR.GZ 格式暂不支持增量升级"));
+            return Err(anyhow::anyhow!("{}", t!("utils.tar_gz_patch_unsupported")));
         }
         UpgradeStrategy::NoUpgrade { .. } => {
-            return Err(anyhow::anyhow!("无需升级,不支持的解压操作"));
+            return Err(anyhow::anyhow!("{}", t!("utils.no_upgrade_extract_unsupported")));
         }
     }
 

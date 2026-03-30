@@ -137,7 +137,14 @@ async fn check_docker_services_status(
     } else {
         warn!("{}", t!("status_cmd.service_not_running"));
         for container in report.failed_containers().iter() {
-            error!("   ❌ {}: {:?}", container.name, container.status);
+            error!(
+                "{}",
+                t!(
+                    "status_cmd.failed_container_item",
+                    name = container.name,
+                    status = format!("{:?}", container.status)
+                )
+            );
         }
     }
 
