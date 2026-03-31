@@ -47,7 +47,7 @@ impl DockerService {
     ) -> Result<DockerServiceManager> {
         let work_dir = docker_manager
             .get_working_directory()
-            .ok_or_else(|| anyhow::anyhow!("无法确定 Docker 工作目录"))?
+            .ok_or_else(|| anyhow::anyhow!("Unable to determine Docker working directory"))?
             .to_path_buf();
 
         Ok(DockerServiceManager::new(

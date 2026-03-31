@@ -391,7 +391,7 @@ impl HealthReport {
             .collect();
 
         let mut summary = format!(
-            "📊 [健康: {}/{}] ✅ 运行: {} | ✔️ 一次性(初始化用): {} | ❌ 失败: {} | ⏳ 启动中: {}",
+            "📊 [Healthy: {}/{}] ✅ Running: {} | ✔️ One-shot (init): {} | ❌ Failed: {} | ⏳ Starting: {}",
             self.get_healthy_count(),
             self.get_total_count(),
             self.get_running_count(),
@@ -401,11 +401,11 @@ impl HealthReport {
         );
 
         if !failed_containers.is_empty() {
-            summary.push_str(&format!(" | 失败容器: {}", failed_containers.join(", ")));
+            summary.push_str(&format!(" | Failed containers: {}", failed_containers.join(", ")));
         }
 
         if !starting_containers.is_empty() {
-            summary.push_str(&format!(" | 启动中: {}", starting_containers.join(", ")));
+            summary.push_str(&format!(" | Starting: {}", starting_containers.join(", ")));
         }
 
         summary
@@ -475,7 +475,7 @@ impl HealthChecker {
     /// 执行健康检查
     /// 使用基于Docker Compose标签的精确匹配
     pub async fn health_check(&self) -> DockerServiceResult<HealthReport> {
-        info!("{}", t!("health_check.start"));
+        info!("🏥 Starting health check...");
 
         // 获取 docker-compose 项目信息
         let compose_project_name = self.docker_manager.get_compose_project_name();
@@ -485,9 +485,9 @@ impl HealthChecker {
             .to_string_lossy()
             .to_string();
 
-        info!("{}", t!("health_check.project_info"));
-        info!("   - {}: {}", t!("health_check.project_name"), compose_project_name);
-        info!("   - {}: {}", t!("health_check.config_file"), compose_file_path);
+        info!("📋 Docker Compose Project Info:");
+        info!("   - Project name: {name}", name = compose_project_name);
+        info!("   - Config file: {path}", path = compose_file_path);
 
         // 创建健康检查报告
         let mut report = HealthReport::default();
@@ -498,16 +498,19 @@ impl HealthChecker {
             .get_compose_service_names()
             .await
             .unwrap_or_else(|e| {
-                error!("{}", t!("health_check.get_services_failed", error = e.to_string()));
+                error!("Failed to get compose services: {error}", error = e.to_string());
                 HashSet::new()
             });
 
         if compose_services.is_empty() {
-            warn!("{}", t!("health_check.no_services_defined"));
+            warn!("⚠️ No services defined in compose file");
             return Ok(report);
         }
 
-        info!("{}", t!("health_check.services_defined", services = format!("{:?}", compose_services)));
+        info!(
+            "🔍 Services defined in compose file: {services}",
+            services = format!("{:?}", compose_services)
+        );
 
         // 获取系统中所有容器
         let all_containers = self
@@ -515,11 +518,11 @@ impl HealthChecker {
             .get_all_containers_status()
             .await
             .unwrap_or_else(|e| {
-                error!("{}", t!("health_check.get_containers_failed", error = e.to_string()));
+                error!("Failed to get container status: {error}", error = e.to_string());
                 Vec::new()
             });
 
-        info!("{}", t!("health_check.containers_found", count = all_containers.len()));
+        info!("📊 Found {count} containers in system", count = all_containers.len());
 
         // 🔧 使用标签精确匹配容器
         let mut found_services = HashSet::new();
@@ -540,17 +543,11 @@ impl HealthChecker {
                 {
                     // 检查是否在compose文件中定义
                     if compose_services.contains(&service_name) {
-                        info!(
-                            "{}",
-                            t!("health_check.match_service", container = service.name, service = service_name)
-                        );
+                        info!("✅ Matched compose service: {container} -> {service}", container = service.name, service = service_name);
 
                         // 🔧 防重复：检查是否已经添加过这个compose服务
                         if added_containers.contains(&service_name) {
-                            warn!(
-                                "{}",
-                                t!("health_check.skip_duplicate", service = service_name, container = service.name)
-                            );
+                            warn!("⚠️ Skipping duplicate compose service: {service} (container: {container})", service = service_name, container = service.name);
                             continue;
                         }
 
@@ -587,32 +584,26 @@ impl HealthChecker {
                         report.add_container(container);
                     } else {
                         // 不在compose文件中定义的容器（可能是历史遗留）
-                        warn!(
-                            "{}",
-                            t!("health_check.skip_non_project", container = service.name, service = service_name)
-                        );
+                        warn!("⏭️ Skipping non-project container: {container} (service: {service})", container = service.name, service = service_name);
                     }
                 } else {
                     // 不属于当前项目的容器
-                    debug!("{}", t!("health_check.skip_other_project", container = service.name));
+                    debug!("⏭️ Skipping other project container: {container} (project: other)", container = service.name);
                 }
             } else {
                 // 无法获取服务名称，可能不是compose容器
-                debug!("{}", t!("health_check.skip_non_compose", container = service.name));
+                debug!("⏭️ Skipping non-compose container: {container} (no label info)", container = service.name);
             }
         }
 
-        info!(
-            "{}",
-            t!("health_check.round1_done", count = added_containers.len())
-        );
+        info!("📊 Round 1 complete: added {count} containers", count = added_containers.len());
 
         // 为未找到的compose服务创建"已停止"状态的条目
         for service_name in &compose_services {
             if !found_services.contains(service_name) {
                 // 🔧 防重复：再次检查是否已经添加过
                 if added_containers.contains(service_name) {
-                    warn!("{}", t!("health_check.skip_duplicate_stopped", service = service_name));
+                    warn!("⚠️ Skipping duplicate stopped service: {service}", service = service_name);
                     continue;
                 }
 
@@ -640,19 +631,13 @@ impl HealthChecker {
                     restart: restart_policy,
                 };
 
-                info!(
-                    "{}",
-                    t!("health_check.add_stopped", name = container.name, status = format!("{:?}", container.status), oneshot = is_oneshot)
-                );
+                info!("📦 Adding stopped service: {name} (status: {status}, oneshot: {oneshot})", name = container.name, status = format!("{:?}", container.status), oneshot = is_oneshot);
                 report.add_container(container);
                 added_containers.insert(service_name.clone());
             }
         }
 
-        info!(
-            "{}",
-            t!("health_check.final_stats", compose = compose_services.len(), containers = added_containers.len())
-        );
+        info!("📊 Final stats: compose services={compose}, added containers={containers}", compose = compose_services.len(), containers = added_containers.len());
 
         // 生成健康检查摘要
         let summary = format!(
@@ -662,7 +647,7 @@ impl HealthChecker {
             report.get_total_count()
         );
 
-        info!("{}", t!("health_check.result", summary = summary));
+        info!("🎯 {summary}", summary = summary);
 
         Ok(report)
     }
@@ -696,10 +681,7 @@ impl HealthChecker {
             if let Some(restart_policy) = service_config.restart {
                 // restart: "no" 表示不自动重启，通常是一次性任务
                 if restart_policy == "no" || restart_policy == "false" {
-                    info!(
-                        "{}",
-                        t!("health_check.oneshot_service", service = service_name, policy = restart_policy)
-                    );
+                    info!("Service {service} restart policy: {policy} (oneshot)", service = service_name, policy = restart_policy);
                     return true;
                 }
                 // restart: "always" 或 "unless-stopped" 表示应该一直运行
@@ -707,10 +689,7 @@ impl HealthChecker {
                     || restart_policy == "unless-stopped"
                     || restart_policy == "on-failure"
                 {
-                    info!(
-                        "{}",
-                        t!("health_check.persistent_service", service = service_name, policy = restart_policy)
-                    );
+                    info!("Service {service} restart policy: {policy} (persistent)", service = service_name, policy = restart_policy);
                     return false;
                 }
             }
@@ -777,13 +756,13 @@ impl HealthChecker {
                         None // 没有找到匹配的容器
                     }
                     Err(e) => {
-                        warn!("{}", t!("health_check.bollard_list_failed", error = e.to_string()));
+warn!("Bollard failed to get container list: {error}", error = e.to_string());
                         None
                     }
                 }
             }
             Err(e) => {
-                warn!("{}", t!("health_check.bollard_connect_failed", error = e.to_string()));
+warn!("Bollard failed to connect to Docker: {error}", error = e.to_string());
                 None
             }
         }
@@ -801,14 +780,11 @@ impl HealthChecker {
             // 1. 检查项目名称是否匹配
             if let Some(label_project) = &labels.project {
                 if label_project != project_name {
-                    info!(
-                        "{}",
-                        t!("health_check.project_mismatch", container = container_name, label = label_project, expected = project_name)
-                    );
+                    info!("❌ Container {container} project mismatch: {label} vs {expected}", container = container_name, label = label_project, expected = project_name);
                     return false;
                 }
             } else {
-                info!("{}", t!("health_check.no_project_label", container = container_name));
+                info!("❌ Container {container} missing project label", container = container_name);
                 return false;
             }
 
@@ -847,26 +823,20 @@ impl HealthChecker {
                 let matched = label_config_files == &compose_file_absolute;
 
                 if matched {
-                    debug!("{}", t!("health_check.config_match", container = container_name));
+                    debug!("✅ Container {container} config path matched", container = container_name);
                     return true;
                 } else {
-                    debug!(
-                        "{}",
-                        t!("health_check.config_mismatch", container = container_name, label = label_config_files, expected = compose_file_absolute)
-                    );
+                    debug!("❌ Container {container} config path mismatch: {label} vs {expected}", container = container_name, label = label_config_files, expected = compose_file_absolute);
                     return false;
                 }
             }
 
             // 3. 如果没有配置文件路径信息，但项目名称匹配，则认为匹配
-            info!(
-                "{}",
-                t!("health_check.no_config_path", container = container_name)
-            );
+            info!("⚠️ Container {container} missing config path, but project name matched", container = container_name);
             true
         } else {
             // 如果无法获取标签，说明不是compose容器
-            info!("{}", t!("health_check.no_labels", container = container_name));
+            info!("❌ Container {container} cannot get compose labels", container = container_name);
             false
         }
     }
@@ -890,13 +860,13 @@ impl HealthChecker {
                         .state
                         .and_then(|state| state.health.map(|health| health.status).flatten()),
                     Err(e) => {
-                        warn!("{}", t!("health_check.get_health_failed", container = container_name, error = e.to_string()));
+warn!("Cannot get health status for container {container}: {error}", container = container_name, error = e.to_string());
                         None
                     }
                 }
             }
             Err(e) => {
-                warn!("{}", t!("health_check.docker_connect_health_failed", error = e.to_string()));
+warn!("Cannot connect to Docker for health check: {error}", error = e.to_string());
                 None
             }
         }
@@ -914,12 +884,12 @@ impl HealthChecker {
 
         let start_time = Instant::now();
 
-        info!("{}", t!("health_check.wait_start", timeout = timeout.as_secs()));
+info!("⏳ Starting service startup check, timeout: {timeout}s", timeout = timeout.as_secs());
 
         loop {
             let elapsed = start_time.elapsed();
             if elapsed >= timeout {
-                error!("{}", t!("health_check.wait_timeout", elapsed = elapsed.as_secs()));
+error!("⏰ Health check timeout! elapsed: {elapsed}s", elapsed = elapsed.as_secs());
                 return Err(DockerServiceError::Timeout {
                     operation: t!("health_check.wait_operation").to_string(),
                     timeout_seconds: timeout.as_secs(),
@@ -931,16 +901,16 @@ impl HealthChecker {
 
             // 检查是否所有服务都已就绪
             if report.is_all_healthy() {
-                info!("{}", t!("health_check.all_started", elapsed = elapsed.as_secs()));
+                info!("🎉 All services started! elapsed: {elapsed}s", elapsed = elapsed.as_secs());
                 return Ok(report);
             } else {
-                info!("{}", t!("health_check.starting", elapsed = elapsed.as_secs()));
+                info!("⏳ Services starting... elapsed: {elapsed}s", elapsed = elapsed.as_secs());
                 //打印尚未启动成功容器
                 let failed_containers = report.failed_containers();
                 if !failed_containers.is_empty() {
                     let failed_names: Vec<&str> =
                         failed_containers.iter().map(|c| c.name.as_str()).collect();
-                    info!("{}", t!("health_check.not_started_list", names = format!("{:?}", failed_names)));
+                    info!("❌ Not started containers: {names}", names = format!("{:?}", failed_names));
                 }
             }
 

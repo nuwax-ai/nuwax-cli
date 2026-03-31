@@ -149,7 +149,7 @@ pub fn copy_with_progress<R: Read, W: Write>(
                 || (copied % (100 * 1024 * 1024) == 0 && copied > 0)
             {
                 info!(
-                    "     ⏳ {} 复制进度: {:.1}% ({:.1}/{:.1} MB)",
+                    "     ⏳ {} copy progress: {:.1}% ({:.1}/{:.1} MB)",
                     file_name, percent as f64, mb_copied, mb_total
                 );
                 last_percent = percent;
@@ -168,10 +168,10 @@ fn force_extract_file(
     // 如果目标存在，先彻底删除
     if target_path.exists() {
         if target_path.is_dir() {
-            info!("🗑️  强制删除目录: {}", target_path.display());
+            info!("🗑️  Force removing directory: {}", target_path.display());
             std::fs::remove_dir_all(target_path)?;
         } else {
-            info!("🗑️  强制删除文件: {}", target_path.display());
+            info!("🗑️  Force removing file: {}", target_path.display());
             std::fs::remove_file(target_path)?;
         }
     }
@@ -186,16 +186,16 @@ fn force_extract_file(
     // 创建新文件/目录
     if entry.is_dir() {
         std::fs::create_dir_all(target_path).map_err(|e| {
-            error!("❌ 目录创建失败: {} - 错误: {}", target_path.display(), e);
+            error!("❌ Failed to create directory: {} - error: {}", target_path.display(), e);
             e
         })?;
     } else {
         let mut outfile = std::fs::File::create(target_path).map_err(|e| {
-            error!("❌ 文件创建失败: {} - 错误: {}", target_path.display(), e);
+            error!("❌ Failed to create file: {} - error: {}", target_path.display(), e);
             e
         })?;
         std::io::copy(entry, &mut outfile).map_err(|e| {
-            error!("❌ 文件写入失败: {} - 错误: {}", target_path.display(), e);
+            error!("❌ Failed to write file: {} - error: {}", target_path.display(), e);
             e
         })?;
     }
@@ -242,7 +242,7 @@ fn safe_remove_docker_directory(output_dir: &std::path::Path) -> Result<()> {
     }
 
     info!(
-        "🧹 安全清理 docker 目录（保留 upload 目录）: {}",
+        "🧹 Safely cleaning docker directory (keeping upload): {}",
         output_dir.display()
     );
 
@@ -257,21 +257,21 @@ fn safe_remove_docker_directory(output_dir: &std::path::Path) -> Result<()> {
             .iter()
             .any(|d| file_name.as_os_str() == *d)
         {
-            info!("🛡️ 保留目录: {}", path.display());
+            info!("🛡️ Keeping directory: {}", path.display());
             continue;
         }
 
         // 删除其他文件或目录
         if path.is_dir() {
-            info!("🗑️ 删除目录: {}", path.display());
+            info!("🗑️ Removing directory: {}", path.display());
             std::fs::remove_dir_all(&path)?;
         } else {
-            info!("🗑️ 删除文件: {}", path.display());
+            info!("🗑️ Removing file: {}", path.display());
             std::fs::remove_file(&path)?;
         }
     }
 
-    info!("✅ docker 目录清理完成，upload 目录已保留");
+    info!("✅ Docker directory cleanup completed, upload directory preserved");
     Ok(())
 }
 
@@ -282,7 +282,7 @@ pub async fn extract_docker_service(
 ) -> Result<()> {
     let extract_start = Instant::now();
 
-    info!("📦 开始解压Docker服务包: {}", archive_path.display());
+    info!("📦 Starting Docker service package extraction: {}", archive_path.display());
 
     // 检查文件是否存在
     if !archive_path.exists() {
@@ -294,7 +294,7 @@ pub async fn extract_docker_service(
 
     // 检测文件格式
     let format = archive::detect_format_by_magic(archive_path)?;
-    info!("✅ 检测到文件格式: {:?}", format);
+    info!("✅ Detected archive format: {:?}", format);
 
     // 根据格式选择解压方法
     match format {
@@ -317,7 +317,7 @@ async fn extract_zip_archive(
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
-    info!("✅ ZIP文件打开成功，包含 {} 个文件", archive.len());
+    info!("✅ ZIP opened successfully, contains {} files", archive.len());
 
     match upgrade_strategy {
         UpgradeStrategy::FullUpgrade { .. } => {
@@ -336,7 +336,7 @@ async fn extract_zip_archive(
             let mut extracted_size = 0u64;
             let total_files = archive.len();
 
-            info!("🚀 开始解压 {} 个文件...", total_files);
+            info!("🚀 Starting extraction of {} files...", total_files);
 
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
@@ -344,7 +344,7 @@ async fn extract_zip_archive(
 
                 // 跳过系统文件和临时文件
                 if should_skip_file(&file_name) {
-                    info!("⏩ 跳过文件: {}", file_name);
+                    info!("⏩ Skipping file: {}", file_name);
                     continue;
                 }
 
@@ -364,12 +364,12 @@ async fn extract_zip_archive(
                     // 如果 upload 目录不存在，正常解压以创建目录结构
                     if target_path.exists() {
                         info!(
-                            "🛡️ 保护现有 upload 目录，跳过解压: {}",
+                            "🛡️ Keeping existing upload directory, skipping extraction: {}",
                             target_path.display()
                         );
                         continue;
                     } else {
-                        info!("📁 创建新的 upload 目录结构: {}", target_path.display());
+                        info!("📁 Creating new upload directory structure: {}", target_path.display());
                     }
                 }
 
@@ -387,7 +387,7 @@ async fn extract_zip_archive(
                     if extracted_files % (total_files / 10).max(1) == 0 {
                         let percentage = (extracted_files * 100) / total_files;
                         info!(
-                            "📁 解压进度: {}% ({}/{} 文件, {:.1} MB)",
+                            "📁 Extraction progress: {}% ({}/{} files, {:.1} MB)",
                             percentage,
                             extracted_files,
                             total_files,
@@ -398,13 +398,13 @@ async fn extract_zip_archive(
             }
 
             let elapsed = extract_start.elapsed();
-            info!("🎉 Docker服务包解压完成!");
-            info!("   📁 解压文件: {} 个", extracted_files);
+            info!("🎉 Docker service package extraction completed!");
+            info!("   📁 Extracted files: {}", extracted_files);
             info!(
-                "   📏 总数据量: {:.1} MB",
+                "   📏 Total data size: {:.1} MB",
                 extracted_size as f64 / 1024.0 / 1024.0
             );
-            info!("   ⏱️  耗时: {:.2} 秒", elapsed.as_secs_f64());
+            info!("   ⏱️  Elapsed: {:.2} seconds", elapsed.as_secs_f64());
         }
         UpgradeStrategy::PatchUpgrade {
             patch_info,
@@ -422,7 +422,7 @@ async fn extract_zip_archive(
             // 清理即将被替换或删除的文件/目录（跳过upload目录）
             for file_or_dir in upgrade_change_file_or_dir {
                 if is_upload_directory_path(&file_or_dir) {
-                    info!("🛡️ 保护 upload 目录，跳过删除: {}", file_or_dir.display());
+                    info!("🛡️ Keeping upload directory, skipping deletion: {}", file_or_dir.display());
                     continue;
                 }
 
@@ -431,7 +431,7 @@ async fn extract_zip_archive(
                 } else if file_or_dir.is_dir() {
                     std::fs::remove_dir_all(file_or_dir)?;
                 } else {
-                    info!("文件/目录不存在，跳过: {}", file_or_dir.display());
+                    info!("File or directory does not exist, skipping: {}", file_or_dir.display());
                 }
             }
 
@@ -441,7 +441,7 @@ async fn extract_zip_archive(
             let mut extracted_size = 0u64;
             let total_files = archive.len();
 
-            info!("🚀 开始解压 {} 个文件...", total_files);
+            info!("🚀 Starting extraction of {} files...", total_files);
 
             //根据 operations 的 replace, delete 进行操作
             if let Some(replace) = operations.replace {
@@ -451,7 +451,7 @@ async fn extract_zip_archive(
                 // 处理替换文件
                 for file in replace_files {
                     let zip_path = format!("docker/{}", file.trim_start_matches('/'));
-                    info!("🔍 查找文件: {} -> {}", file, zip_path);
+                    info!("🔍 Locating file: {} -> {}", file, zip_path);
 
                     let mut entry = archive
                         .by_name(&zip_path)
@@ -472,10 +472,10 @@ async fn extract_zip_archive(
                     if is_upload_directory_path(&dst) {
                         // 如果保护目录已存在，跳过解压以保护用户数据
                         if dst.exists() {
-                            info!("🛡️ 保护现有目录，跳过替换: {}", dst.display());
+                            info!("🛡️ Keeping existing directory, skipping replacement: {}", dst.display());
                             continue;
                         } else {
-                            info!("📁 创建新的保护目录结构: {}", dst.display());
+                            info!("📁 Creating new protected directory structure: {}", dst.display());
                         }
                     }
 
@@ -489,17 +489,17 @@ async fn extract_zip_archive(
                 // 处理替换目录
                 for dir in replace_dirs {
                     let zip_dir_path = format!("docker/{}", dir.trim_start_matches('/'));
-                    info!("📁 处理目录: {} -> {}", dir, zip_dir_path);
+                    info!("📁 Processing directory: {} -> {}", dir, zip_dir_path);
 
                     // 清理现有目录（跳过保护目录）
                     let target_dir = work_dir.join(&dir);
                     if is_upload_directory_path(&target_dir) && target_dir.exists() {
-                        info!("🛡️ 保护现有目录，跳过目录替换: {}", target_dir.display());
+                        info!("🛡️ Keeping existing directory, skipping directory replacement: {}", target_dir.display());
                         continue;
                     }
 
                     if target_dir.exists() {
-                        info!("🗑️  强制删除目录: {}", target_dir.display());
+                        info!("🗑️  Force removing directory: {}", target_dir.display());
                         std::fs::remove_dir_all(&target_dir)?;
                     }
 
@@ -536,32 +536,32 @@ async fn extract_zip_archive(
                 for file in delete.files {
                     let path = work_dir.join(file);
                     if is_upload_directory_path(&path) {
-                        info!("🛡️ 保护 upload 目录，跳过删除文件: {}", path.display());
+                        info!("🛡️ Keeping upload directory, skipping file deletion: {}", path.display());
                         continue;
                     }
-                    info!("🗑️ 删除文件: {}", path.display());
+                    info!("🗑️ Removing file: {}", path.display());
                     if path.is_file() {
                         std::fs::remove_file(&path)?;
                     } else if path.exists() {
                         std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir_all(&path))?;
                     } else {
-                        info!("文件不存在，跳过: {}", path.display());
+                        info!("File does not exist, skipping: {}", path.display());
                     }
                 }
                 // 删除目录（跳过upload目录）
                 for dir in delete.directories {
                     let path = work_dir.join(dir);
                     if is_upload_directory_path(&path) {
-                        info!("🛡️ 保护 upload 目录，跳过删除目录: {}", path.display());
+                        info!("🛡️ Keeping upload directory, skipping directory deletion: {}", path.display());
                         continue;
                     }
-                    info!("🗑️ 删除目录: {}", path.display());
+                    info!("🗑️ Removing directory: {}", path.display());
                     if path.is_dir() {
                         std::fs::remove_dir_all(&path)?;
                     } else if path.exists() {
                         std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir_all(&path))?;
                     } else {
-                        info!("目录不存在，跳过: {}", path.display());
+                        info!("Directory does not exist, skipping: {}", path.display());
                     }
                 }
             }
@@ -575,13 +575,13 @@ async fn extract_zip_archive(
 
                 match archive.by_name(&zip_path) {
                     Ok(mut entry) => {
-                        info!("🔧 强制更新关键文件: {}", critical_file);
+                        info!("🔧 Force updating critical file: {}", critical_file);
                         force_extract_file(&mut entry, &dst_path)?;
-                        info!("✅ 关键文件已更新: {}", critical_file);
+                        info!("✅ Critical file updated: {}", critical_file);
                     }
                     Err(_) => {
                         // 压缩包中没有这个文件，跳过
-                        info!("⏭️  压缩包中不存在关键文件: {}", zip_path);
+                        info!("⏭️  Critical file not present in archive: {}", zip_path);
                     }
                 }
             }
@@ -637,7 +637,7 @@ fn extract_tar_gz_blocking(
                 std::fs::create_dir_all(output_dir)?;
             }
 
-            info!("🚀 开始解压 TAR.GZ 文件...");
+            info!("🚀 Starting TAR.GZ extraction...");
 
             for entry in archive.entries()? {
                 let mut entry: tar::Entry<flate2::read::GzDecoder<std::fs::File>> = entry?;
@@ -654,7 +654,7 @@ fn extract_tar_gz_blocking(
 
                 // 保护 upload 目录
                 if is_upload_directory_path(&target_path) && target_path.exists() {
-                    info!("🛡️ 保护现有目录，跳过: {}", target_path.display());
+                    info!("🛡️ Keeping existing directory, skipping: {}", target_path.display());
                     continue;
                 }
 
@@ -673,7 +673,7 @@ fn extract_tar_gz_blocking(
                 // 每解压10%的文件显示进度
                 if extracted_files % 10 == 0 {
                     info!(
-                        "📁 解压进度: {} 个文件 ({:.1} MB)",
+                        "📁 Extraction progress: {} files ({:.1} MB)",
                         extracted_files,
                         extracted_size as f64 / 1024.0 / 1024.0
                     );
@@ -681,13 +681,13 @@ fn extract_tar_gz_blocking(
             }
 
             let elapsed = extract_start.elapsed();
-            info!("🎉 Docker服务包解压完成!");
-            info!("   📁 解压文件: {} 个", extracted_files);
+            info!("🎉 Docker service package extraction completed!");
+            info!("   📁 Extracted files: {}", extracted_files);
             info!(
-                "   📏 总数据量: {:.1} MB",
+                "   📏 Total data size: {:.1} MB",
                 extracted_size as f64 / 1024.0 / 1024.0
             );
-            info!("   ⏱️  耗时: {:.2} 秒", elapsed.as_secs_f64());
+            info!("   ⏱️  Elapsed: {:.2} seconds", elapsed.as_secs_f64());
         }
         UpgradeStrategy::PatchUpgrade { .. } => {
             // 增量升级目前不支持 TAR.GZ

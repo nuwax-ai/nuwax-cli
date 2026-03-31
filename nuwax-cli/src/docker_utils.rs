@@ -93,29 +93,23 @@ pub async fn check_services_running(filter: &ServiceFilter) -> Result<bool> {
 
                     match filter {
                         ServiceFilter::All => {
-                            info!(
-                                "{}",
-                                t!("docker_utils.containers_found", running = running_count, total = total_filtered)
-                            );
+                            info!("Found {running} running containers (total {total})", running = running_count, total = total_filtered);
                         }
                         ServiceFilter::NameContains(keywords) => {
-                            info!(
-                                "{}",
-                                t!("docker_utils.containers_matched", keywords = format!("{:?}", keywords), running = running_count, total = total_filtered)
-                            );
+                            info!("Matched {keywords} containers: {running} running (total {total})", keywords = format!("{:?}", keywords), running = running_count, total = total_filtered);
                         }
                     }
 
                     Ok(running_count > 0)
                 }
                 Err(e) => {
-                    error!("{}", t!("docker_utils.get_containers_failed", error = e.to_string()));
+                    error!("Failed to get container list: {error}", error = e.to_string());
                     Err(anyhow::anyhow!(t!("docker_utils.get_containers_failed", error = e.to_string()).to_string()))
                 }
             }
         }
         Err(e) => {
-            error!("{}", t!("docker_utils.docker_connect_failed", error = e.to_string()));
+            error!("Cannot connect to Docker: {error}", error = e.to_string());
             Err(anyhow::anyhow!(t!("docker_utils.docker_connect_failed", error = e.to_string()).to_string()))
         }
     }
@@ -128,29 +122,26 @@ pub async fn wait_for_services_stopped(filter: &ServiceFilter, timeout_secs: u64
     let start_time = tokio::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
 
-    info!(
-        "{}",
-        t!("docker_utils.wait_stop_start", filter = format!("{:?}", filter), timeout = timeout_secs)
-    );
+    info!("Waiting for services to stop, filter: {filter}, timeout: {timeout}s", filter = format!("{:?}", filter), timeout = timeout_secs);
 
     while start_time.elapsed() < timeout {
         match check_services_running(filter).await {
             Ok(false) => {
-                info!("{}", t!("docker_utils.services_stopped"));
+                info!("Specified Docker services stopped");
                 return Ok(true);
             }
             Ok(true) => {
-                info!("{}", t!("docker_utils.waiting_stop"));
+                info!("Waiting for Docker services to stop...");
                 sleep(Duration::from_secs(timeout::SERVICE_CHECK_INTERVAL)).await;
             }
             Err(e) => {
-                warn!("{}", t!("docker_utils.check_status_error", error = e.to_string()));
+                warn!("Error checking service status: {error}", error = e.to_string());
                 sleep(Duration::from_secs(timeout::SERVICE_CHECK_INTERVAL)).await;
             }
         }
     }
 
-    warn!("{}", t!("docker_utils.wait_stop_timeout", timeout = timeout_secs));
+    warn!("Wait for service stop timeout ({timeout}s)", timeout = timeout_secs);
     Ok(false)
 }
 
@@ -161,39 +152,33 @@ pub async fn wait_for_services_started(filter: &ServiceFilter, timeout_secs: u64
     let start_time = tokio::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
 
-    info!(
-        "{}",
-        t!("docker_utils.wait_start_start", filter = format!("{:?}", filter), timeout = timeout_secs)
-    );
+    info!("Waiting for services to start, filter: {filter}, timeout: {timeout}s", filter = format!("{:?}", filter), timeout = timeout_secs);
 
     while start_time.elapsed() < timeout {
         match check_services_running(filter).await {
             Ok(true) => {
-                info!("{}", t!("docker_utils.services_started"));
+                info!("Specified Docker services started");
                 return Ok(true);
             }
             Ok(false) => {
-                info!("{}", t!("docker_utils.waiting_start"));
+                info!("Waiting for Docker services to start...");
                 sleep(Duration::from_secs(timeout::SERVICE_CHECK_INTERVAL)).await;
             }
             Err(e) => {
-                warn!("{}", t!("docker_utils.check_status_error", error = e.to_string()));
+                warn!("Error checking service status: {error}", error = e.to_string());
                 sleep(Duration::from_secs(timeout::SERVICE_CHECK_INTERVAL)).await;
             }
         }
     }
 
-    warn!("{}", t!("docker_utils.wait_start_timeout", timeout = timeout_secs));
+    warn!("Wait for service start timeout ({timeout}s)", timeout = timeout_secs);
     Ok(false)
 }
 
 /// 从docker-compose.yml文件中解析服务名称
 pub async fn parse_service_names_from_compose(compose_file_path: &Path) -> Result<Vec<String>> {
     if !compose_file_path.exists() {
-        warn!(
-            "{}",
-            t!("docker_utils.compose_not_exists", path = compose_file_path.display())
-        );
+        warn!("docker-compose.yml file not found: {path}", path = compose_file_path.display());
         return Ok(vec![]);
     }
 
@@ -212,10 +197,7 @@ pub async fn parse_service_names_from_compose(compose_file_path: &Path) -> Resul
                     }
                 }
 
-                info!(
-                    "{}",
-                    t!("docker_utils.parse_services", path = compose_file_path.display(), count = service_names.len())
-                );
+                info!("Parsed {count} services from {path}:", path = compose_file_path.display(), count = service_names.len());
                 for name in &service_names {
                     info!("  - {}", name);
                 }
@@ -223,12 +205,12 @@ pub async fn parse_service_names_from_compose(compose_file_path: &Path) -> Resul
                 Ok(service_names)
             }
             Err(e) => {
-                error!("{}", t!("docker_utils.parse_compose_failed", error = e.to_string()));
+                error!("Failed to parse docker-compose.yml: {error}", error = e.to_string());
                 Err(anyhow::anyhow!(t!("docker_utils.parse_compose_failed", error = e.to_string()).to_string()))
             }
         },
         Err(e) => {
-            error!("{}", t!("docker_utils.read_compose_failed", error = e.to_string()));
+            error!("Failed to read docker-compose.yml: {error}", error = e.to_string());
             Err(anyhow::anyhow!(t!("docker_utils.read_compose_failed", error = e.to_string()).to_string()))
         }
     }
@@ -239,7 +221,7 @@ pub async fn create_compose_filter(compose_file_path: &Path) -> Result<ServiceFi
     let service_names = parse_service_names_from_compose(compose_file_path).await?;
 
     if service_names.is_empty() {
-        warn!("{}", t!("docker_utils.no_services_found"));
+        warn!("No services found, will check all containers");
         Ok(ServiceFilter::All)
     } else {
         Ok(ServiceFilter::NameContains(service_names))

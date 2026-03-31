@@ -67,7 +67,7 @@ impl DockerServiceManager {
 
     /// 执行完整的服务部署流程
     pub async fn deploy_services(&mut self) -> DockerServiceResult<()> {
-        info!("{}", t!("docker_service_manager.deploy_start"));
+        info!("Starting Docker service deployment...");
 
         // 1. 环境检查
         self.check_environment().await?;
@@ -97,13 +97,13 @@ impl DockerServiceManager {
         // 7. 启动服务
         self.start_services().await?;
 
-        info!("{}", t!("docker_service_manager.deploy_done"));
+        info!("Docker service deployment completed");
         Ok(())
     }
 
     /// 环境检查
     pub async fn check_environment(&self) -> DockerServiceResult<()> {
-        info!("{}", t!("docker_service_manager.check_env_start"));
+        info!("Checking Docker environment...");
 
         // 跳过 Docker 状态检查，避免高磁盘 IO 问题
         // Docker 29+ 版本中，docker info、docker --version 等命令会扫描大量数据
@@ -147,31 +147,25 @@ impl DockerServiceManager {
         // 环境信息提示（新增）
         let runtime_env = self.docker_manager.get_runtime_environment();
         if runtime_env.needs_special_handling() {
-            info!(
-                "{}",
-                t!("docker_service_manager.runtime_env_special", env = runtime_env.summary())
-            );
+            info!("   Environment: {env} - special handling required", env = runtime_env.summary());
         } else {
-            info!(
-                "{}",
-                t!("docker_service_manager.runtime_env_normal", env = runtime_env.summary())
-            );
+            info!("   Environment: {env}", env = runtime_env.summary());
         }
 
-        info!("{}", t!("docker_service_manager.check_env_done"));
+        info!("Environment check passed");
         Ok(())
     }
 
     /// 检查并创建 docker-compose.yml 中所有挂载的目录
     pub async fn ensure_compose_mount_directories(&self) -> DockerServiceResult<()> {
-        info!("{}", t!("docker_service_manager.ensure_mount_dirs_start"));
+        info!("🔍 Checking and creating mount directories from docker-compose.yml...");
 
         // 使用新的环境检测机制
         let runtime_env = self.docker_manager.get_runtime_environment();
 
         if runtime_env.needs_special_handling() {
-            info!("{}", t!("docker_service_manager.windows_podman_detected"));
-            info!("{}", t!("docker_service_manager.windows_podman_hint"));
+            info!("⚠️ Windows Podman Desktop environment detected");
+            info!("   Podman Desktop does not auto-create mount directories, creating proactively");
         }
 
         // 设置必要目录
@@ -180,24 +174,17 @@ impl DockerServiceManager {
             .await
             .map_err(|err| DockerServiceError::DirectorySetup(err.to_string()))?;
 
-        info!("{}", t!("docker_service_manager.ensure_mount_dirs_done"));
+        info!("✅ Mount directory check completed");
         Ok(())
     }
 
     /// 加载 Docker 镜像
     pub async fn load_images(&self) -> DockerServiceResult<LoadResult> {
-        info!("{}", t!("docker_service_manager.load_images_start"));
+        info!("Starting Docker image loading...");
         let result = self.image_loader.load_all_images().await?;
 
         if !result.is_all_successful() {
-            warn!(
-                "{}",
-                t!(
-                    "docker_service_manager.load_images_partial_failed",
-                    success = result.success_count(),
-                    failed = result.failure_count()
-                )
-            );
+            warn!("Some image loading failed: success {success}, failed {failed}", success = result.success_count(), failed = result.failure_count());
         }
 
         Ok(result)
@@ -208,21 +195,14 @@ impl DockerServiceManager {
         &self,
         image_mappings: &[(String, String)],
     ) -> DockerServiceResult<TagResult> {
-        info!("{}", t!("docker_service_manager.setup_tags_start"));
+        info!("Starting image tag setup...");
         let result = self
             .image_loader
             .setup_image_tags_with_mappings(image_mappings)
             .await?;
 
         if !result.is_all_successful() {
-            warn!(
-                "{}",
-                t!(
-                    "docker_service_manager.setup_tags_partial_failed",
-                    success = result.success_count(),
-                    failed = result.failure_count()
-                )
-            );
+            warn!("Some tag setup failed: success {success}, failed {failed}", success = result.success_count(), failed = result.failure_count());
         }
 
         Ok(result)
@@ -233,21 +213,14 @@ impl DockerServiceManager {
         &self,
         image_mappings: &[(String, String)],
     ) -> DockerServiceResult<TagResult> {
-        info!("{}", t!("docker_service_manager.setup_tags_with_validation_start"));
+        info!("Starting validated image tag setup...");
         let result = self
             .image_loader
             .setup_image_tags_with_validation(image_mappings)
             .await?;
 
         if !result.is_all_successful() {
-            warn!(
-                "{}",
-                t!(
-                    "docker_service_manager.setup_tags_partial_failed",
-                    success = result.success_count(),
-                    failed = result.failure_count()
-                )
-            );
+            warn!("Some tag setup failed: success {success}, failed {failed}", success = result.success_count(), failed = result.failure_count());
         }
 
         Ok(result)
@@ -255,13 +228,13 @@ impl DockerServiceManager {
 
     /// 使用 ducker 列出当前系统中的所有镜像
     pub async fn list_docker_images_with_ducker(&self) -> DockerServiceResult<Vec<String>> {
-        info!("{}", t!("docker_service_manager.list_images_start"));
+        info!("Using ducker to list images...");
         self.image_loader.list_images_with_ducker().await
     }
 
     /// 启动所有服务
     pub async fn start_services(&mut self) -> DockerServiceResult<()> {
-        info!("{}", t!("docker_service_manager.start_services"));
+        info!("Starting Docker Compose services...");
 
         // 1. 检查和修复脚本权限
         self.script_permission_manager
@@ -287,7 +260,7 @@ impl DockerServiceManager {
         match result {
             Ok(_) => {
                 // 等待服务就绪
-                info!("{}", t!("docker_service_manager.wait_services_ready"));
+                info!("Waiting for services to become ready...");
                 let check_interval = Duration::from_secs(timeout::HEALTH_CHECK_INTERVAL);
 
                 // 提前检查MySQL状态，如果发现问题立即修复
@@ -302,11 +275,11 @@ impl DockerServiceManager {
                     .await
                 {
                     Ok(report) => {
-                        info!("{}", t!("docker_service_manager.all_services_started"));
+                        info!("All services started successfully!");
                         self.print_service_status(&report).await;
                     }
                     Err(e) => {
-                        warn!("{}", t!("docker_service_manager.wait_services_failed", error = e.to_string()));
+warn!("Wait for services failed or timed out: {error}", error = e.to_string());
 
                         // 即使超时也显示当前状态
                         if let Ok(report) = self.health_checker.health_check().await {
@@ -318,21 +291,14 @@ impl DockerServiceManager {
                 Ok(())
             }
             Err(e) => {
-                error!("{}", t!("docker_service_manager.compose_start_failed_checking_status"));
-                error!("{}", t!("docker_service_manager.error_detail", error = format!("{e:?}")));
+                error!("Docker Compose start command failed, checking container status...");
+error!("Error detail: {error}", error = format!("{e:?}"));
 
                 // 基于 ducker 思路：即使 compose 失败，也要检查是否有部分容器成功启动
                 match self.health_checker.health_check().await {
                     Ok(report) => {
                         if report.get_running_count() > 0 {
-                            info!(
-                                "{}",
-                                t!(
-                                    "docker_service_manager.partial_running_enter_health_check",
-                                    running = report.get_running_count(),
-                                    total = report.get_total_count()
-                                )
-                            );
+                            info!("🔍 {running}/{total} containers are running, entering health-check phase", running = report.get_running_count(), total = report.get_total_count());
 
                             // 有部分容器成功，进入健康检查阶段
                             let check_interval =
@@ -344,7 +310,7 @@ impl DockerServiceManager {
                                 .await
                             {
                                 Ok(final_report) => {
-                                    info!("{}", t!("docker_service_manager.partial_final_success"));
+                                    info!("🎉 Some services eventually started successfully!");
 
                                     // // 执行容器启动后权限维护
                                     // if let Err(e) = self
@@ -359,7 +325,7 @@ impl DockerServiceManager {
                                     return Ok(()); // 部分成功，返回 Ok
                                 }
                                 Err(_health_error) => {
-                                    warn!("{}", t!("docker_service_manager.health_check_timeout_partial_running"));
+                                    warn!("⏰ Health check timed out, but some services are still running");
 
                                     // // 检查MySQL容器状态，如果失败尝试权限修复
                                     // if (self.check_and_fix_mysql_if_failed(&report).await).is_err()
@@ -377,19 +343,19 @@ impl DockerServiceManager {
                                     // }
 
                                     self.print_service_status_with_failures(&report).await;
-                                    info!("{}", t!("docker_service_manager.logs_hint"));
+                                    info!("You can inspect logs: nuwax-cli docker-service logs [service]");
                                     return Ok(()); // 部分成功，返回 Ok
                                 }
                             }
                         } else {
-                            error!("{}", t!("docker_service_manager.no_running_container_found"));
+                            error!("No running containers found");
                             self.print_detailed_error_analysis(&report, &e.to_string())
                                 .await;
                         }
                     }
                     Err(e) => {
-                        error!("{}", t!("docker_service_manager.get_container_status_failed"));
-                        error!("{}", t!("docker_service_manager.error_detail", error = format!("{e:?}")));
+                        error!("❌ Failed to get container status details");
+error!("Error detail: {error}", error = format!("{e:?}"));
                     }
                 }
 
@@ -400,18 +366,18 @@ impl DockerServiceManager {
 
     /// 停止所有服务
     pub async fn stop_services(&self) -> DockerServiceResult<()> {
-        info!("{}", t!("docker_service_manager.stop_services"));
+        info!("Stopping Docker Compose services...");
 
         // 直接使用已配置的 DockerManager，无需切换目录
         let result = self.docker_manager.stop_services().await;
 
         match result {
             Ok(_) => {
-                info!("{}", t!("docker_service_manager.stop_services_success"));
+                info!("Services stopped successfully");
                 Ok(())
             }
             Err(e) => {
-                error!("{}", t!("docker_service_manager.stop_services_failed", error = e.to_string()));
+error!("Failed to stop services: {error}", error = e.to_string());
                 Err(DockerServiceError::ServiceManagement(e.to_string()))
             }
         }
@@ -419,7 +385,7 @@ impl DockerServiceManager {
 
     /// 重启所有服务
     pub async fn restart_services(&mut self) -> DockerServiceResult<()> {
-        info!("{}", t!("docker_service_manager.restart_services"));
+        info!("Restarting Docker Compose services...");
 
         // 先停止服务
         self.stop_services().await?;
@@ -433,25 +399,18 @@ impl DockerServiceManager {
 
     /// 重启单个容器
     pub async fn restart_container(&self, container_name: &str) -> DockerServiceResult<()> {
-        info!("{}", t!("docker_service_manager.restart_container", name = container_name));
+        info!("Restarting container: {name}", name = container_name);
 
         // 直接使用已配置的 DockerManager，无需切换目录
         let result = self.docker_manager.restart_service(container_name).await;
 
         match result {
             Ok(_) => {
-                info!("{}", t!("docker_service_manager.restart_container_success", name = container_name));
+                info!("Container {name} restarted successfully", name = container_name);
                 Ok(())
             }
             Err(e) => {
-                error!(
-                    "{}",
-                    t!(
-                        "docker_service_manager.restart_container_failed",
-                        name = container_name,
-                        error = e.to_string()
-                    )
-                );
+                error!("Container {name} restart failed: {error}", name = container_name, error = e.to_string());
                 Err(DockerServiceError::ServiceManagement(e.to_string()))
             }
         }
@@ -469,75 +428,44 @@ impl DockerServiceManager {
 
     /// 打印服务状态信息
     async fn print_service_status(&self, report: &HealthReport) {
-        info!("{}", t!("docker_service_manager.status_overview_title"));
-        info!(
-            "{}",
-            t!(
-                "docker_service_manager.status_overall",
-                status = report.finalize().display_name()
-            )
-        );
-        info!(
-            "{}",
-            t!(
-                "docker_service_manager.status_running_containers",
-                running = report.get_running_count(),
-                total = report.get_total_count()
-            )
-        );
+        info!("=== Service Status Overview ===");
+        info!("Overall status: {status}", status = report.finalize().display_name());
+        info!("Running containers: {running}/{total}", running = report.get_running_count(), total = report.get_total_count());
 
         if !report.containers.is_empty() {
-            info!("{}", t!("docker_service_manager.container_details_title"));
+            info!("Container details:");
             for container in &report.containers {
-                info!("{}", t!("docker_service_manager.container_detail_item",
+                info!(
+                    "  • {name} - {status} ({image})",
                     name = container.name,
                     status = container.status.display_name(),
                     image = container.image
-                ));
+                );
             }
         }
 
         if !report.errors.is_empty() {
-            warn!("{}", t!("docker_service_manager.error_list_title"));
+            warn!("Errors:");
             for error in &report.errors {
-                warn!("{}", t!("docker_service_manager.error_list_item", error = error));
+                warn!("  • {error}", error = error);
             }
         }
 
         // 显示访问信息
         if report.finalize().is_healthy() {
-            info!("{}", t!("docker_service_manager.access_info_title"));
+            info!("=== Service Access Info ===");
             use client_core::constants::docker::ports;
-            info!(
-                "{}",
-                t!("docker_service_manager.access_frontend", port = ports::DEFAULT_FRONTEND_PORT)
-            );
-            info!(
-                "{}",
-                t!("docker_service_manager.access_backend", port = ports::DEFAULT_BACKEND_PORT)
-            );
-            info!("{}", t!("docker_service_manager.access_done"));
+            info!("• Frontend: http://localhost:{port}", port = ports::DEFAULT_FRONTEND_PORT);
+            info!("• Backend API: http://localhost:{port}", port = ports::DEFAULT_BACKEND_PORT);
+            info!("• Service management complete. Ready to use.");
         }
     }
 
     /// 打印包含失败信息的服务状态
     async fn print_service_status_with_failures(&self, report: &HealthReport) {
-        info!("{}", t!("docker_service_manager.status_detail_title"));
-        info!(
-            "{}",
-            t!(
-                "docker_service_manager.status_overall",
-                status = report.finalize().display_name()
-            )
-        );
-        info!(
-            "{}",
-            t!(
-                "docker_service_manager.status_health_summary",
-                running = report.get_running_count(),
-                total = report.get_total_count()
-            )
-        );
+        info!("=== Service Status Details ===");
+        info!("Overall status: {status}", status = report.finalize().display_name());
+        info!("Health summary: {running}/{total} containers healthy", running = report.get_running_count(), total = report.get_total_count());
 
         // 分类显示容器状态
         let running_containers: Vec<_> = report
@@ -557,37 +485,35 @@ impl DockerServiceManager {
             .collect();
 
         if !running_containers.is_empty() {
-            info!("{}", t!("docker_service_manager.running_containers_title"));
+            info!("✅ Running containers:");
             for container in running_containers {
-                info!(
-                    "{}",
-                    t!(
-                        "docker_service_manager.running_container_item",
+                info!("  • {name} ({image})",
                         name = container.name,
                         image = container.image
-                    )
-                );
+                    );
             }
         }
 
         if !starting_containers.is_empty() {
-            warn!("{}", t!("docker_service_manager.starting_containers_title"));
+            warn!("🔄 Starting containers:");
             for container in starting_containers {
-                warn!("{}", t!("docker_service_manager.starting_container_item",
+                warn!(
+                    "  • {name} - {status}",
                     name = container.name,
                     status = container.status.display_name()
-                ));
+                );
             }
         }
 
         if !failed_containers.is_empty() {
-            error!("{}", t!("docker_service_manager.failed_containers_title"));
+            error!("❌ Failed containers:");
             for container in failed_containers {
-                error!("{}", t!("docker_service_manager.failed_container_item",
+                error!(
+                    "  • {name} - {status} ({image})",
                     name = container.name,
                     status = container.status.display_name(),
                     image = container.image
-                ));
+                );
 
                 // 提供针对性的建议
                 self.print_container_troubleshooting(&container.name, &container.image)
@@ -597,7 +523,7 @@ impl DockerServiceManager {
 
         // 显示部分成功时的访问信息
         if report.get_running_count() > 0 {
-            info!("{}", t!("docker_service_manager.available_access_title"));
+            info!("=== Available Service Access Info ===");
             use client_core::constants::docker::ports;
 
             let has_frontend = report
@@ -610,16 +536,10 @@ impl DockerServiceManager {
                 .any(|c| c.status.is_healthy() && c.name.contains("backend"));
 
             if has_frontend {
-                info!(
-                    "{}",
-                    t!("docker_service_manager.access_frontend", port = ports::DEFAULT_FRONTEND_PORT)
-                );
+                info!("• Frontend: http://localhost:{port}", port = ports::DEFAULT_FRONTEND_PORT);
             }
             if has_backend {
-                info!(
-                    "{}",
-                    t!("docker_service_manager.access_backend", port = ports::DEFAULT_BACKEND_PORT)
-                );
+                info!("• Backend API: http://localhost:{port}", port = ports::DEFAULT_BACKEND_PORT);
             }
             let failed_count = report
                 .containers
@@ -628,16 +548,16 @@ impl DockerServiceManager {
                 .count();
 
             if failed_count == 0 {
-                info!("{}", t!("docker_service_manager.all_services_started_brief"));
+                info!("• All services are running normally!");
             } else {
-                warn!("{}", t!("docker_service_manager.partial_failed_still_available"));
+                warn!("• Some services failed, but available services remain usable");
             }
         }
     }
 
     /// 打印详细的错误分析
     async fn print_detailed_error_analysis(&self, report: &HealthReport, original_error: &str) {
-        error!("{}", t!("docker_service_manager.startup_failure_analysis_title"));
+        error!("=== Startup Failure Analysis ===");
 
         // 检查是否有具体的容器失败
         let failed_containers: Vec<_> = report
@@ -647,31 +567,18 @@ impl DockerServiceManager {
             .collect();
 
         if failed_containers.is_empty() {
-            error!("{}", t!("docker_service_manager.get_container_status_failed"));
-            error!("{}", t!("docker_service_manager.original_error", error = original_error));
+            error!("❌ Failed to get container status details");
+            error!("❌ Original error: {error}", error = original_error);
             return;
         }
 
-        error!(
-            "{}",
-            t!(
-                "docker_service_manager.failed_container_count",
-                failed = failed_containers.len(),
-                total = report.get_total_count()
-            )
-        );
+        error!("❌ Failed containers: {failed}/{total}", failed = failed_containers.len(), total = report.get_total_count());
 
         for container in failed_containers {
-            error!("{}", t!("docker_service_manager.separator_line"));
-            error!("{}", t!("docker_service_manager.container_name", name = container.name));
-            error!("{}", t!("docker_service_manager.container_image", image = container.image));
-            error!(
-                "{}",
-                t!(
-                    "docker_service_manager.container_current_status",
-                    status = container.status.display_name()
-                )
-            );
+            error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            error!("Container: {name}", name = container.name);
+            error!("Image: {image}", image = container.image);
+            error!("Current status: {status}", status = container.status.display_name());
 
             // 提供针对性的故障排除建议
             self.print_container_troubleshooting(&container.name, &container.image)
@@ -685,51 +592,51 @@ impl DockerServiceManager {
     /// 打印容器故障排除建议
     async fn print_container_troubleshooting(&self, container_name: &str, image_name: &str) {
         if container_name.contains("video-analysis-worker") {
-            warn!("{}", t!("docker_service_manager.troubleshoot_analysis_title"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_gpu_issue_1"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_gpu_issue_2"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_solution_title"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_gpu_solution_1"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_gpu_solution_2"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_gpu_solution_3"));
+            warn!("💡 Analysis:");
+            warn!("  - This container requires NVIDIA GPU support, which may be unavailable on this system");
+            warn!("  - Architecture mismatch detected (amd64 vs arm64)");
+            warn!("💡 Suggested fix:");
+            warn!("  - On Mac ARM64, disable this service or use an ARM64 image");
+            warn!("  - Comment out this service in docker-compose.yml");
+            warn!("  - Or update image version in .env to an ARM64 variant");
         } else if image_name.contains("amd64") {
-            warn!("{}", t!("docker_service_manager.troubleshoot_analysis_title"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_arch_issue"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_solution_title"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_arch_solution_1"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_arch_solution_2"));
+            warn!("💡 Analysis:");
+            warn!("  - Architecture mismatch: image is amd64 but system is arm64");
+            warn!("💡 Suggested fix:");
+            warn!("  - Use an arm64 image");
+            warn!("  - Or add --platform linux/amd64 when running container");
         } else if container_name.contains("mysql") || container_name.contains("redis") {
-            warn!("{}", t!("docker_service_manager.troubleshoot_analysis_title"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_db_issue"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_solution_title"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_db_solution_1"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_db_solution_2"));
+            warn!("💡 Analysis:");
+            warn!("  - Database startup failed, likely due to port conflict or data directory permissions");
+            warn!("💡 Suggested fix:");
+            warn!("  - Check whether port 3306(MySQL) or 6379(Redis) is occupied");
+            warn!("  - Check directory permissions: ./data/mysql or ./data/redis");
         } else if container_name.contains("backend") || container_name.contains("entrypoint") {
-            warn!("{}", t!("docker_service_manager.troubleshoot_analysis_title"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_script_issue"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_solution_title"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_script_solution_1"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_script_solution_2"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_view_logs", name = container_name));
+            warn!("💡 Analysis:");
+            warn!("  - Container startup script may be missing execute permission");
+            warn!("💡 Suggested fix:");
+            warn!("  - Check permissions for scripts like docker-entrypoint.sh");
+            warn!("  - Run: chmod +x config/docker-entrypoint.sh");
+            warn!("  - View logs: docker-compose logs {name}", name = container_name);
         } else {
-            warn!("{}", t!("docker_service_manager.troubleshoot_generic_title"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_view_logs", name = container_name));
-            warn!("{}", t!("docker_service_manager.troubleshoot_generic_1"));
-            warn!("{}", t!("docker_service_manager.troubleshoot_generic_2"));
+            warn!("💡 Suggestion:");
+            warn!("  - View logs: docker-compose logs {name}", name = container_name);
+            warn!("  - Verify images were pulled successfully");
+            warn!("  - Verify environment variables");
         }
     }
 
     /// 分析 Docker 错误信息
     async fn analyze_docker_error(&self, error_message: &str) {
-        error!("{}", t!("docker_service_manager.separator_line"));
-        error!("{}", t!("docker_service_manager.error_analysis_title"));
+        error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        error!("🔍 Error analysis:");
 
         let mut has_issues = false;
 
         if error_message.contains("nvidia") {
-            error!("{}", t!("docker_service_manager.error_nvidia_issue"));
-            error!("{}", t!("docker_service_manager.error_nvidia_hint_1"));
-            error!("{}", t!("docker_service_manager.error_nvidia_hint_2"));
+            error!("  ❌ NVIDIA GPU driver issue");
+            error!("  💡 NVIDIA GPU may be unsupported or driver not installed");
+            error!("  💡 Consider disabling services that require GPU");
             has_issues = true;
         }
 
@@ -737,28 +644,28 @@ impl DockerServiceManager {
             && error_message.contains("amd64")
             && error_message.contains("arm64")
         {
-            error!("{}", t!("docker_service_manager.error_arch_issue"));
-            error!("{}", t!("docker_service_manager.error_arch_hint_1"));
-            error!("{}", t!("docker_service_manager.error_arch_hint_2"));
+            error!("  ❌ Container architecture mismatch");
+            error!("  💡 amd64 image cannot run natively on arm64 system");
+            error!("  💡 Use image that matches your architecture");
             has_issues = true;
         }
 
         if error_message.contains("Permission denied") && error_message.contains("entrypoint") {
-            error!("{}", t!("docker_service_manager.error_script_permission_issue"));
-            error!("{}", t!("docker_service_manager.error_script_permission_hint_1"));
-            error!("{}", t!("docker_service_manager.error_script_permission_hint_2"));
+            error!("  ❌ Script permission issue");
+            error!("  💡 Startup script lacks execute permission");
+            error!("  💡 Add execute permission with chmod +x");
             has_issues = true;
         }
 
         if error_message.contains("port") || error_message.contains("bind") {
-            error!("{}", t!("docker_service_manager.error_port_bind_issue"));
-            error!("{}", t!("docker_service_manager.error_port_bind_hint_1"));
-            error!("{}", t!("docker_service_manager.error_port_bind_hint_2"));
+            error!("  ❌ Port bind failed");
+            error!("  💡 There may be a port conflict");
+            error!("  💡 Check current port occupancy");
             has_issues = true;
         }
 
         if !has_issues {
-            error!("{}", t!("docker_service_manager.error_unknown_type"));
+            error!("  ❓ Unrecognized error type, key lines:");
             // 提取关键的错误行
             let key_lines: Vec<&str> = error_message
                 .lines()
@@ -775,19 +682,19 @@ impl DockerServiceManager {
 
             if !key_lines.is_empty() {
                 for line in key_lines {
-                    error!("{}", t!("docker_service_manager.error_line_item", line = line.trim()));
+error!("     {line}", line = line.trim());
                 }
             } else {
                 // 显示前几行作为备选
                 for line in error_message.lines().take(3) {
                     if !line.trim().is_empty() {
-                        error!("{}", t!("docker_service_manager.error_line_item", line = line.trim()));
+error!("     {line}", line = line.trim());
                     }
                 }
             }
         }
 
-        error!("{}", t!("docker_service_manager.separator_line"));
+        error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     }
 
     /// 检查端口冲突
@@ -795,11 +702,11 @@ impl DockerServiceManager {
         let compose_file = self.docker_manager.get_compose_file();
         let env_file = self.docker_manager.get_env_file();
         if !compose_file.exists() {
-            warn!("{}", t!("docker_service_manager.compose_file_missing_skip_port_check"));
+            warn!("docker-compose.yml not found, skipping port conflict check");
             return Ok(());
         }
 
-        info!("{}", t!("docker_service_manager.smart_port_check_start"));
+        info!("🔍 Starting smart port-conflict check...");
 
         match self
             .port_manager
@@ -808,24 +715,24 @@ impl DockerServiceManager {
         {
             Ok(report) => {
                 if report.has_conflicts {
-                    warn!("{}", t!("docker_service_manager.port_conflict_detected"));
+                    warn!("⚠️ Port conflict detected, proceeding with smart handling");
                     self.port_manager.print_smart_conflict_report(&report);
 
                     // 对于Docker容器启动，我们采用更宽松的策略
                     // Docker会在实际绑定时处理端口冲突，这里只是警告
-                    warn!("{}", t!("docker_service_manager.port_conflict_note_title"));
-                    warn!("{}", t!("docker_service_manager.port_conflict_note_1"));
-                    warn!("{}", t!("docker_service_manager.port_conflict_note_2"));
-                    warn!("{}", t!("docker_service_manager.port_conflict_note_3"));
+                    warn!("💡 Note: Docker may handle port binding automatically");
+                    warn!("   - If occupied by related service, container may reuse existing binding");
+                    warn!("   - If occupied by unrelated service, startup may fail");
+                    warn!("   - Check startup result and resolve conflicts manually if needed");
                 } else {
-                    info!("{}", t!("docker_service_manager.port_check_passed"));
+                    info!("✅ Port check passed, no conflict found");
                     if report.total_checked > 0 {
-                        info!("{}", t!("docker_service_manager.port_check_total", total = report.total_checked));
+                        info!("Checked {total} port mappings in total", total = report.total_checked);
                     }
                 }
             }
             Err(e) => {
-                warn!("{}", t!("docker_service_manager.port_check_failed_continue", error = e.to_string()));
+warn!("Port check failed: {error}, continuing startup", error = e.to_string());
                 // 端口检查失败不应该阻止服务启动，只是警告
             }
         }
@@ -855,13 +762,14 @@ impl DockerServiceManager {
             return Ok(()); // 没有MySQL容器，无需处理
         }
 
-        info!("{}", t!("docker_service_manager.mysql_container_found", count = mysql_containers.len()));
+        info!("🔍 Found {count} MySQL-related containers", count = mysql_containers.len());
         for container in &mysql_containers {
-            info!("{}", t!("docker_service_manager.mysql_container_item",
+            info!(
+                "   - {name} (status: {status}, image: {image})",
                 name = container.name,
                 status = container.status.display_name(),
                 image = container.image
-            ));
+            );
         }
 
         // 检查MySQL容器是否有启动失败的或处于重启状态
@@ -874,13 +782,14 @@ impl DockerServiceManager {
             .collect::<Vec<_>>();
 
         if !problematic_mysql.is_empty() {
-            warn!("{}", t!("docker_service_manager.mysql_problem_detected_fixing"));
+            warn!("🔧 MySQL container issue detected, attempting permission fix...");
 
             for container in &problematic_mysql {
-                warn!("{}", t!("docker_service_manager.mysql_problem_container_item",
+                warn!(
+                    "   Problem container: {name} (status: {status})",
                     name = container.name,
                     status = container.status.display_name()
-                ));
+                );
             }
 
             // 调用权限修复
@@ -888,16 +797,16 @@ impl DockerServiceManager {
                 .directory_permission_manager
                 .fix_mysql_permissions_on_failure()
             {
-                error!("{}", t!("docker_service_manager.mysql_fix_failed", error = e.to_string()));
+error!("MySQL permission fix failed: {error}", error = e.to_string());
                 return Err(e);
             }
 
-            info!("{}", t!("docker_service_manager.mysql_fix_done"));
-            info!("{}", t!("docker_service_manager.mysql_fix_detail_title"));
-            info!("{}", t!("docker_service_manager.mysql_fix_detail_1"));
-            info!("{}", t!("docker_service_manager.mysql_fix_detail_2"));
-            info!("{}", t!("docker_service_manager.mysql_fix_detail_3"));
-            info!("{}", t!("docker_service_manager.mysql_fix_restart_hint"));
+            info!("✅ MySQL permission fix completed");
+            info!("💡 Fix actions:");
+            info!("   - Clean potentially corrupted MySQL data files");
+            info!("   - Set MySQL directory permission to 777 (recursive)");
+            info!("   - Recreate required directory structure");
+            info!("🔄 Wait for auto-restart or restart manually: nuwax-cli docker-service restart mysql");
 
             Ok(())
         } else {

@@ -7,38 +7,38 @@ use tracing::{info, warn};
 
 /// 运行独立的初始化流程
 pub async fn run_init(force: bool) -> Result<()> {
-    info!("{}", t!("init_cmd.title"));
-    info!("{}", t!("init_cmd.separator"));
+    info!("🦆 Nuwax Cli ent Initialization");
+    info!("======================");
 
     // 检查是否已经初始化过
     if !force
         && (client_core::constants::config::get_config_file_path().exists()
             || config::get_database_path().exists())
     {
-        warn!("{}", t!("init_cmd.existing_files"));
-        info!("{}", t!("init_cmd.use_force"));
-        info!("{}", t!("init_cmd.force_example"));
+        warn!("⚠️  Detected existing configuration or database files");
+        info!("Use --force flag to reinitialize");
+        info!("Example: nuwax-cli init --force");
         return Ok(());
     }
 
-    info!("{}", t!("init_cmd.step1_title"));
+    info!("📋 Step 1: Create configuration and directory structure");
 
     // 创建默认配置
     let config = AppConfig::default();
     config.save_to_file("config.toml")?;
-    info!("{}", t!("init_cmd.config_created"));
+    info!("   ✅ Created configuration file: config.toml");
 
     // 创建必要的目录结构
     std::fs::create_dir_all("docker")?;
     std::fs::create_dir_all(&config.backup.storage_dir)?;
     config.ensure_cache_dirs()?;
-    info!("{}", t!("init_cmd.dirs_created"));
-    info!("{}", t!("init_cmd.dir_docker"));
-    info!("{}", t!("init_cmd.dir_backup", dir = config.backup.storage_dir));
-    info!("{}", t!("init_cmd.dir_cache", dir = config.cache.cache_dir));
-    info!("{}", t!("init_cmd.dir_download", dir = config.cache.download_dir));
+    info!("   ✅ Created directory structure:");
+    info!("      - docker/                (Docker service files directory)");
+    info!("      - {dir}         (Backup storage directory)", dir = config.backup.storage_dir);
+    info!("      - {dir}    (Cache directory)", dir = config.cache.cache_dir);
+    info!("      - {dir} (Download cache directory)", dir = config.cache.download_dir);
 
-    info!("{}", t!("init_cmd.step2_title"));
+    info!("📋 Step 2: Initialize database");
 
     // 初始化数据库
     let db_path = config::get_database_path();
@@ -47,13 +47,13 @@ pub async fn run_init(force: bool) -> Result<()> {
     // 显式初始化数据库表结构（只在 init 时执行）
     database.init_database().await?;
 
-    info!("{}", t!("init_cmd.db_created", path = db_path.display()));
+    info!("   ✅ Created DuckDB database: {path}", path = db_path.display());
 
     // 生成新的客户端UUID
     let client_uuid = database.get_or_create_client_uuid().await?;
-    info!("{}", t!("init_cmd.uuid_generated", uuid = client_uuid));
+    info!("   ✅ Generated client UUID: {uuid}", uuid = client_uuid);
 
-    info!("{}", t!("init_cmd.step3_title"));
+    info!("📋 Step 3: Register client with server");
 
     // 收集系统信息并注册客户端
     let request = ClientRegisterRequest {
@@ -65,35 +65,35 @@ pub async fn run_init(force: bool) -> Result<()> {
     let api_client = ApiClient::new(None, None);
     match api_client.register_client(request).await {
         Ok(server_client_id) => {
-            info!("{}", t!("init_cmd.register_success", id = server_client_id));
+            info!("   ✅ Client registered successfully, received client ID: {id}", id = server_client_id);
 
             // 保存服务端返回的client_id到数据库，覆盖本地生成的UUID
             database.update_client_id(&server_client_id).await?;
-            info!("{}", t!("init_cmd.id_saved"));
+            info!("   ✅ Client ID saved to database");
         }
         Err(e) => {
-            warn!("{}", t!("init_cmd.register_failed", error = e.to_string()));
-            info!("{}", t!("init_cmd.register_hint"));
+            warn!("   ⚠️  Client registration failed: {error} (can retry later)", error = e.to_string());
+            info!("   💡 This will not affect local functionality");
         }
     }
 
-    info!("{}", t!("init_cmd.complete"));
+    info!("🎉 Initialization complete!");
     info!("");
-    info!("{}", t!("init_cmd.next_steps"));
-    info!("{}", t!("init_cmd.step1_upgrade"));
-    info!("{}", t!("init_cmd.step1_upgrade_force"));
-    info!("{}", t!("init_cmd.step2_deploy"));
-    info!("{}", t!("init_cmd.step3_start"));
+    info!("📝 Next steps:");
+    info!("   1️⃣  Run 'nuwax-cli upgrade' to download Docker service package");
+    info!("       - Or run 'nuwax-cli upgrade --full --force' to force full download");
+    info!("   2️⃣  Run 'nuwax-cli docker-service deploy' to deploy Docker services");
+    info!("   3️⃣  Run 'nuwax-cli docker-service start' to start Docker services");
     info!("");
-    info!("{}", t!("init_cmd.shortcut_title"));
-    info!("{}", t!("init_cmd.shortcut_auto"));
-    info!("{}", t!("init_cmd.shortcut_delay"));
+    info!("🚀 Shortcut - Auto upgrade deploy:");
+    info!("   • Run 'nuwax-cli auto-upgrade-deploy run' for complete upgrade deployment");
+    info!("   • Run 'nuwax-cli auto-upgrade-deploy delay-time-deploy 2 --unit hours' to delay 2 hours");
     info!("");
-    info!("{}", t!("init_cmd.tips_title"));
-    info!("{}", t!("init_cmd.tip_config"));
-    info!("{}", t!("init_cmd.tip_db", path = db_path.display()));
-    info!("{}", t!("init_cmd.tip_help"));
-    info!("{}", t!("init_cmd.tip_status"));
+    info!("💡 Tips:");
+    info!("   - Configuration file: config.toml (can be manually edited)");
+    info!("   - Database file: {path} (stores operation history and backup records)", path = db_path.display());
+    info!("   - Use 'nuwax-cli --help' to see all available commands");
+    info!("   - Use 'nuwax-cli status' to check current system status");
 
     Ok(())
 }

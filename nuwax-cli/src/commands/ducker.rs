@@ -15,14 +15,14 @@ pub struct DuckerArgs {
 
 /// 集成ducker命令 - 提供Docker TUI界面（直接集成,不需要外部安装）
 pub async fn run_ducker(args: Vec<String>) -> Result<()> {
-    info!("{}", t!("ducker.starting"));
+    info!("Starting ducker Docker TUI tool...");
 
     // 解析ducker参数
     let ducker_args = parse_ducker_args(args)?;
 
     // 运行ducker的核心逻辑
     run_ducker_tui(ducker_args).await.map_err(|e| {
-        error!("{}", t!("ducker.execution_failed", error = e.to_string()));
+        error!("Ducker execution failed: {error}", error = e.to_string());
         anyhow::anyhow!(t!("ducker.execution_failed", error = e.to_string()).to_string())
     })
 }
@@ -63,7 +63,7 @@ fn parse_ducker_args(args: Vec<String>) -> Result<DuckerArgs> {
             }
             _ => {
                 // 忽略未知参数
-                warn!("{}", t!("ducker.unknown_arg", arg = args[i]));
+                warn!("Unknown ducker argument: {arg}", arg = args[i]);
             }
         }
         i += 1;
@@ -83,11 +83,11 @@ async fn run_ducker_tui(args: DuckerArgs) -> color_eyre::Result<()> {
     };
 
     // 跳过ducker的日志初始化，因为我们已经在nuwax-cli中初始化了
-    info!("{}", t!("ducker.using_nuwax_log"));
+    info!("Using nuwax-cli log system, skipping ducker log init");
 
     // 安装color_eyre (跳过如果已经安装)
     if color_eyre::install().is_err() {
-        warn!("{}", t!("ducker.color_eyre_installed"));
+        warn!("color_eyre already installed, skipping");
     }
 
     // 创建ducker配置

@@ -12,58 +12,58 @@ use tracing::{error, info, warn};
 pub async fn run_docker_service_command(app: &CliApp, cmd: DockerServiceCommand) -> Result<()> {
     match cmd {
         DockerServiceCommand::Start { project } => {
-            info!("{}", t!("docker_service_cmd.start_service"));
+            info!("▶️  Starting Docker services...");
             start_docker_services(app, None, project).await
         }
         DockerServiceCommand::Stop { project } => {
-            info!("{}", t!("docker_service_cmd.stop_service"));
+            info!("⏹️  Stopping Docker services...");
             stop_docker_services(app, None, project).await
         }
         DockerServiceCommand::Restart { project } => {
-            info!("{}", t!("docker_service_cmd.restart_service"));
+            info!("🔄 Restarting Docker services...");
             restart_docker_services(app, None, project).await
         }
         DockerServiceCommand::Status { project } => {
-            info!("{}", t!("docker_service_cmd.check_status"));
+            info!("📊 Checking Docker service status...");
             check_docker_services_status_with_project(app, project).await
         }
         DockerServiceCommand::RestartContainer { container_name } => {
-            info!("{}", t!("docker_service_cmd.restart_container", name = container_name));
+            info!("🔄 Restarting container: {name}", name = container_name);
             restart_container(app, &container_name).await
         }
         DockerServiceCommand::LoadImages => {
-            info!("{}", t!("docker_service_cmd.load_images"));
+            info!("📦 Loading Docker images...");
             load_docker_images(app).await
         }
         DockerServiceCommand::SetupTags => {
-            info!("{}", t!("docker_service_cmd.setup_tags"));
+            info!("🏷️  Setting image tags...");
             setup_image_tags(app).await
         }
         DockerServiceCommand::ArchInfo => {
-            info!("{}", t!("docker_service_cmd.arch_info"));
+            info!("🏗️  System architecture info:");
             show_architecture_info(app).await
         }
         DockerServiceCommand::ListImages => {
-            info!("{}", t!("docker_service_cmd.list_images"));
+            info!("🔍 Listing Docker images:");
             let docker_service_manager =
                 DockerService::new(app.config.clone(), app.docker_manager.clone())?;
             let images = docker_service_manager
                 .list_docker_images_with_ducker()
                 .await?;
-            info!("{}", t!("docker_service_cmd.image_list"));
+            info!("Docker image list:");
             for image in images {
                 info!("  {}", image);
             }
             Ok(())
         }
         DockerServiceCommand::CheckMountDirs => {
-            info!("{}", t!("docker_service_cmd.check_mount_dirs"));
+            info!("🔍 Checking and creating mount directories in docker-compose.yml...");
             let docker_service_manager =
                 DockerService::new(app.config.clone(), app.docker_manager.clone())?;
             docker_service_manager
                 .ensure_compose_mount_directories()
                 .await?;
-            info!("{}", t!("docker_service_cmd.mount_dirs_check_complete"));
+            info!("✅ Mount directory check complete");
             Ok(())
         }
     }
@@ -76,11 +76,11 @@ pub async fn deploy_docker_services(
     config_file: Option<PathBuf>,
     project_name: Option<String>,
 ) -> Result<()> {
-    info!("{}", t!("docker_service_cmd.deploy_start"));
+    info!("🚀 Starting Docker service deployment...");
 
     // 如果指定了端口，先设置端口配置
     if let Some(port) = frontend_port {
-        info!("{}", t!("docker_service_cmd.config_frontend_port", port = port));
+        info!("🔧 Configuring frontend port: {port}", port = port);
         set_frontend_port(port).await?;
     }
 
@@ -113,44 +113,30 @@ pub async fn deploy_docker_services(
 
     // 显示系统信息
     let arch = docker_service_manager.get_architecture();
-    info!("{}", t!("docker_service_cmd.detected_arch", arch = arch.display_name()));
-    info!(
-        "{}",
-        t!("docker_service_cmd.work_dir", path = docker_service_manager.get_work_dir().display())
-    );
+    info!("Detected system architecture: {arch}", arch = arch.display_name());
+    info!("Working directory: {path}", path = docker_service_manager.get_work_dir().display());
 
     // 执行完整的部署流程
     match docker_service_manager.deploy_services().await {
         Ok(_) => {
-            info!("{}", t!("docker_service_cmd.deploy_success"));
+            info!("✅ Docker services deployed successfully!");
 
             // 显示服务状态
             if let Ok(report) = docker_service_manager.health_check().await {
-                info!("{}", t!("docker_service_cmd.service_status_overview"));
-                info!("{}", t!("docker_service_cmd.overall_status", status = report.finalize().display_name()));
-                info!(
-                    "{}",
-                    t!("docker_service_cmd.running_containers",
-                        running = report.get_running_count(),
-                        total = report.get_total_count())
-                );
+                info!("📊 Service status overview:");
+                info!("  • Overall status: {status}", status = report.finalize().display_name());
+                info!("  • Running containers: {running}/{total}", running = report.get_running_count(), total = report.get_total_count());
 
                 if !report.containers.is_empty() {
-                    info!("{}", t!("docker_service_cmd.container_details"));
+                    info!("  • Container details:");
                     for container in &report.containers {
-                        info!(
-                            "{}",
-                            t!("docker_service_cmd.container_item",
-                                name = container.name,
-                                image = container.image,
-                                status = container.status.display_name())
-                        );
+                        info!("    - {name} ({image}) - {status}", name = container.name, image = container.image, status = container.status.display_name());
                     }
                 }
             }
         }
         Err(e) => {
-            error!("{}", t!("docker_service_cmd.deploy_failed", error = format!("{:?}", e)));
+            error!("❌ Docker service deployment failed: {error}", error = format!("{:?}", e));
             return Err(anyhow::anyhow!(t!("docker_service_cmd.deploy_failed_msg", error = format!("{:?}", e))));
         }
     }
@@ -164,7 +150,7 @@ pub async fn start_docker_services(
     config_file: Option<PathBuf>,
     project_name: Option<String>,
 ) -> Result<()> {
-    info!("{}", t!("docker_service_cmd.start_service_dots"));
+    info!("▶️ Starting Docker services...");
 
     let mut docker_service_manager = if let Some(compose_path) = config_file {
         // 使用自定义的compose文件路径创建DockerManager
@@ -194,10 +180,10 @@ pub async fn start_docker_services(
 
     match docker_service_manager.start_services().await {
         Ok(_) => {
-            info!("{}", t!("docker_service_cmd.start_success"));
+            info!("✅ Docker services started successfully!");
         }
         Err(e) => {
-            error!("{}", t!("docker_service_cmd.start_failed", error = e.to_string()));
+            error!("❌ Docker service start failed: {error}", error = e.to_string());
             return Err(e.into());
         }
     }
@@ -239,10 +225,10 @@ pub async fn stop_docker_services(
 
     match docker_service_manager.stop_services().await {
         Ok(_) => {
-            info!("{}", t!("docker_service_cmd.stop_success"));
+            info!("✅ Docker services stopped");
         }
         Err(e) => {
-            error!("{}", t!("docker_service_cmd.stop_failed", error = e.to_string()));
+            error!("❌ Docker service stop failed: {error}", error = e.to_string());
             return Err(e.into());
         }
     }
@@ -275,7 +261,7 @@ pub async fn stop_docker_services_and_wait(
     use client_core::constants::timeout;
     use tokio::time::{Duration, Instant, sleep};
 
-    info!("{}", t!("docker_service_cmd.check_docker_status"));
+    info!("🔍 Checking Docker service status...");
 
     // 1. 创建 DockerManager（用于 HealthChecker）
     let docker_manager = if let Some(ref compose_path) = config_file {
@@ -301,18 +287,18 @@ pub async fn stop_docker_services_and_wait(
     let running_count = report.get_running_count();
 
     if running_count == 0 {
-        info!("{}", t!("docker_service_cmd.docker_not_running"));
+        info!("ℹ️ Docker services not running, no need to stop");
         return Ok(true);
     }
 
-    info!("{}", t!("docker_service_cmd.found_running_services", count = running_count));
+    info!("🔍 Found {count} running services", count = running_count);
 
     // 3. 执行停止命令
-    info!("{}", t!("docker_service_cmd.stopping_docker_services"));
+    info!("🛑 Stopping Docker services...");
     stop_docker_services(app, config_file.clone(), project_name.clone()).await?;
 
     // 4. 等待服务完全停止（使用 HealthChecker 精确检查）
-    info!("{}", t!("docker_service_cmd.waiting_docker_stop"));
+    info!("⏳ Waiting for Docker services to stop completely...");
 
     let start_time = Instant::now();
     let timeout_duration = Duration::from_secs(timeout::SERVICE_STOP_TIMEOUT);
@@ -324,31 +310,26 @@ pub async fn stop_docker_services_and_wait(
         let running_count = report.get_running_count();
 
         if running_count == 0 {
-            info!("{}", t!("docker_service_cmd.docker_stopped_success"));
+            info!("✅ Docker services stopped successfully");
             return Ok(true);
         }
 
         // 检查是否超时
         if start_time.elapsed() >= timeout_duration {
-            warn!(
-                timeout_seconds = timeout::SERVICE_STOP_TIMEOUT,
-                running_count = running_count,
-                "{}",
-                t!("docker_service_cmd.wait_stop_timeout", count = running_count)
-            );
+            warn!(timeout_seconds = timeout::SERVICE_STOP_TIMEOUT, running_count = running_count, "⚠️ Service stop timeout, {count} services still running, but can continue", count = running_count);
 
             // 显示哪些服务还在运行
-            info!("{}", t!("docker_service_cmd.still_running_services"));
+            info!("📋 Still running services:");
             for container in &report.containers {
                 if container.status.is_healthy() {
-                    info!("{}", t!("docker_service_cmd.running_container_item", name = container.name, image = container.image));
+                    info!("  • {name} ({image})", name = container.name, image = container.image);
                 }
             }
 
             return Ok(false);
         }
 
-        info!("{}", t!("docker_service_cmd.still_waiting_stop", count = running_count));
+        info!("⏳ {count} services still running, waiting...", count = running_count);
         sleep(check_interval).await;
     }
 }
@@ -359,7 +340,7 @@ pub async fn restart_docker_services(
     config_file: Option<PathBuf>,
     project_name: Option<String>,
 ) -> Result<()> {
-    info!("{}", t!("docker_service_cmd.restart_service_dots"));
+    info!("🔄 Restarting Docker services...");
 
     let mut docker_service_manager = if let Some(compose_path) = config_file {
         // 使用自定义的compose文件路径创建DockerManager
@@ -389,10 +370,10 @@ pub async fn restart_docker_services(
 
     match docker_service_manager.restart_services().await {
         Ok(_) => {
-            info!("{}", t!("docker_service_cmd.restart_success"));
+            info!("✅ Docker services restarted successfully!");
         }
         Err(e) => {
-            error!("{}", t!("docker_service_cmd.restart_failed", error = e.to_string()));
+            error!("❌ Docker service restart failed: {error}", error = e.to_string());
             return Err(e.into());
         }
     }
@@ -402,7 +383,7 @@ pub async fn restart_docker_services(
 
 /// 重启单个容器
 pub async fn restart_container(app: &CliApp, container_name: &str) -> Result<()> {
-    info!("{}", t!("docker_service_cmd.restart_single_container", name = container_name));
+    info!("🔄 Restarting container: {name}", name = container_name);
 
     let docker_service_manager =
         DockerService::new(app.config.clone(), app.docker_manager.clone())?;
@@ -412,10 +393,10 @@ pub async fn restart_container(app: &CliApp, container_name: &str) -> Result<()>
         .await
     {
         Ok(_) => {
-            info!("{}", t!("docker_service_cmd.container_restart_success", name = container_name));
+            info!("✅ Container {name} restarted successfully!", name = container_name);
         }
         Err(e) => {
-            error!("{}", t!("docker_service_cmd.container_restart_failed", name = container_name, error = e.to_string()));
+            error!("❌ Container {name} restart failed: {error}", name = container_name, error = e.to_string());
             return Err(e.into());
         }
     }
@@ -433,7 +414,7 @@ pub async fn check_docker_services_status_with_project(
     app: &CliApp,
     project_name: Option<String>,
 ) -> Result<()> {
-    info!("{}", t!("docker_service_cmd.check_status_dots"));
+    info!("📊 Checking Docker service status...");
 
     // 创建支持项目名称的 DockerService
     let docker_service_manager = if let Some(project_name) = project_name {
@@ -450,21 +431,13 @@ pub async fn check_docker_services_status_with_project(
 
     match docker_service_manager.health_check().await {
         Ok(report) => {
-            info!("{}", t!("docker_service_cmd.status_report_title"));
-            info!(
-                "{}",
-                t!("docker_service_cmd.check_time", time = report.check_time.format("%Y-%m-%d %H:%M:%S UTC"))
-            );
-            info!("{}", t!("docker_service_cmd.overall_status_label", status = report.finalize().display_name()));
-            info!(
-                "{}",
-                t!("docker_service_cmd.running_stats",
-                    running = report.get_running_count(),
-                    total = report.get_total_count())
-            );
+            info!("=== Docker Service Status Report ===");
+            info!("Check time: {time}", time = report.check_time.format("%Y-%m-%d %H:%M:%S UTC"));
+            info!("Overall status: {status}", status = report.finalize().display_name());
+            info!("Running stats: {running}/{total} containers running", running = report.get_running_count(), total = report.get_total_count());
 
             if !report.containers.is_empty() {
-                info!("{}", t!("docker_service_cmd.container_details_label"));
+                info!("Container details:");
                 for container in &report.containers {
                     let status_icon = match container.status {
                         ContainerStatus::Running => "🟢",
@@ -474,49 +447,34 @@ pub async fn check_docker_services_status_with_project(
                         ContainerStatus::Unknown => "⚪",
                     };
 
-                    info!(
-                        "{}",
-                        t!("docker_service_cmd.container_status_item",
-                            icon = status_icon,
-                            name = container.name,
-                            status = container.status.display_name())
-                    );
-                    info!("{}", t!("docker_service_cmd.container_image", image = container.image));
+                    info!("  {icon} {name} ({status})", icon = status_icon, name = container.name, status = container.status.display_name());
+                    info!("     Image: {image}", image = container.image);
 
                     if !container.ports.is_empty() {
-                        info!("{}", t!("docker_service_cmd.container_ports", ports = container.ports.join(", ")));
+                        info!("     Ports: {ports}", ports = container.ports.join(", "));
                     }
                 }
             }
 
             if !report.errors.is_empty() {
-                warn!("{}", t!("docker_service_cmd.error_messages"));
+                warn!("⚠️ Error messages:");
                 for error in &report.errors {
-                    warn!("{}", t!("docker_service_cmd.error_item", error = error));
+                    warn!("  • {error}", error = error);
                 }
             }
 
             // 显示访问信息
             if report.finalize().is_healthy() {
                 use client_core::constants::docker::ports;
-                info!("{}", t!("docker_service_cmd.service_access_info"));
-                info!(
-                    "{}",
-                    t!("docker_service_cmd.frontend_url", port = ports::DEFAULT_FRONTEND_PORT)
-                );
-                info!(
-                    "{}",
-                    t!("docker_service_cmd.backend_api_url", port = ports::DEFAULT_BACKEND_PORT)
-                );
-                info!(
-                    "{}",
-                    t!("docker_service_cmd.admin_url", port = ports::DEFAULT_MINIO_API_PORT)
-                );
-                info!("{}", t!("docker_service_cmd.port_custom_hint"));
+                info!("🌐 Service access info:");
+                info!("  • Frontend: http://localhost:{port}", port = ports::DEFAULT_FRONTEND_PORT);
+                info!("  • Backend API: http://localhost:{port}", port = ports::DEFAULT_BACKEND_PORT);
+                info!("  • Admin panel: http://localhost:{port} (if configured)", port = ports::DEFAULT_MINIO_API_PORT);
+                info!("  📝 Note: Use custom port if specified");
             }
         }
         Err(e) => {
-            error!("{}", t!("docker_service_cmd.get_status_failed", error = format!("{:?}", e)));
+            error!("❌ Failed to get service status: {error}", error = format!("{:?}", e));
             return Err(anyhow::anyhow!(t!("docker_service_cmd.get_status_failed_msg", error = format!("{:?}", e))));
         }
     }
@@ -526,37 +484,37 @@ pub async fn check_docker_services_status_with_project(
 
 /// 加载 Docker 镜像
 pub async fn load_docker_images(app: &CliApp) -> Result<()> {
-    info!("{}", t!("docker_service_cmd.load_images"));
+    info!("📦 Loading Docker images...");
 
     let docker_service_manager =
         DockerService::new(app.config.clone(), app.docker_manager.clone())?;
 
     // 显示架构信息
     let arch = docker_service_manager.get_architecture();
-    info!("{}", t!("docker_service_cmd.current_arch", arch = arch.display_name()));
+    info!("Current system architecture: {arch}", arch = arch.display_name());
 
     match docker_service_manager.load_images().await {
         Ok(result) => {
-            info!("{}", t!("docker_service_cmd.image_load_complete"));
-            info!("{}", t!("docker_service_cmd.loaded_count", count = result.success_count()));
-            info!("{}", t!("docker_service_cmd.failed_count", count = result.failure_count()));
+            info!("📦 Image loading complete!");
+            info!("  • Successfully loaded: {count} images", count = result.success_count());
+            info!("  • Failed to load: {count} images", count = result.failure_count());
 
             if !result.loaded_images.is_empty() {
-                info!("{}", t!("docker_service_cmd.successfully_loaded"));
+                info!("✅ Successfully loaded images:");
                 for image in &result.loaded_images {
-                    info!("{}", t!("docker_service_cmd.image_item", image = image));
+                    info!("  • {image}", image = image);
                 }
             }
 
             if !result.failed_images.is_empty() {
-                warn!("{}", t!("docker_service_cmd.failed_to_load"));
+                warn!("❌ Failed to load images:");
                 for (image, error) in &result.failed_images {
-                    warn!("{}", t!("docker_service_cmd.image_error_item", image = image, error = error));
+                    warn!("  • {image}: {error}", image = image, error = error);
                 }
             }
         }
         Err(e) => {
-            error!("{}", t!("docker_service_cmd.image_load_failed", error = e.to_string()));
+            error!("❌ Image loading failed: {error}", error = e.to_string());
             return Err(e.into());
         }
     }
@@ -566,17 +524,17 @@ pub async fn load_docker_images(app: &CliApp) -> Result<()> {
 
 /// 设置镜像标签
 pub async fn setup_image_tags(app: &CliApp) -> Result<()> {
-    info!("{}", t!("docker_service_cmd.setup_tags"));
+    info!("🏷️  Setting image tags...");
 
     let docker_service_manager =
         DockerService::new(app.config.clone(), app.docker_manager.clone())?;
 
     // 先加载镜像以获取实际的镜像映射
-    info!("{}", t!("docker_service_cmd.checking_loaded_images"));
+    info!("📦 Checking loaded images...");
     let load_result = docker_service_manager.load_images().await?;
 
     if load_result.image_mappings.is_empty() {
-        warn!("{}", t!("docker_service_cmd.no_image_mappings"));
+        warn!("⚠️ No loaded image mappings found, please run load-images first");
         return Ok(());
     }
 
@@ -586,26 +544,26 @@ pub async fn setup_image_tags(app: &CliApp) -> Result<()> {
         .await
     {
         Ok(result) => {
-            info!("{}", t!("docker_service_cmd.tag_setup_complete"));
-            info!("{}", t!("docker_service_cmd.tags_success_count", count = result.success_count()));
-            info!("{}", t!("docker_service_cmd.tags_failed_count", count = result.failure_count()));
+            info!("🏷️ Image tag setup complete!");
+            info!("  • Successfully set: {count} tags", count = result.success_count());
+            info!("  • Failed to set: {count} tags", count = result.failure_count());
 
             if !result.tagged_images.is_empty() {
-                info!("{}", t!("docker_service_cmd.successfully_tagged"));
+                info!("✅ Successfully tagged:");
                 for (original, target) in &result.tagged_images {
-                    info!("{}", t!("docker_service_cmd.tag_item", original = original, target = target));
+                    info!("  • {original} → {target}", original = original, target = target);
                 }
             }
 
             if !result.failed_tags.is_empty() {
-                warn!("{}", t!("docker_service_cmd.failed_to_tag"));
+                warn!("❌ Failed to tag:");
                 for (original, target, error) in &result.failed_tags {
-                    warn!("{}", t!("docker_service_cmd.tag_error_item", original = original, target = target, error = error));
+                    warn!("  • {original} → {target}: {error}", original = original, target = target, error = error);
                 }
             }
         }
         Err(e) => {
-            error!("{}", t!("docker_service_cmd.tag_setup_failed", error = e.to_string()));
+            error!("❌ Image tag setup failed: {error}", error = e.to_string());
             return Err(e.into());
         }
     }
@@ -626,7 +584,7 @@ pub async fn extract_docker_service_with_upgrade_strategy(
             ..
         } => {
             // 强制升级策略，直接解压并覆盖现有文件
-            info!("{}", t!("docker_service_cmd.start_extract"));
+            info!("📦 Starting Docker service package extraction...");
 
             let base_version = target_version.base_version_string();
 
@@ -653,12 +611,12 @@ pub async fn extract_docker_service_with_upgrade_strategy(
         }
     };
 
-    info!("{}", t!("docker_service_cmd.found_docker_package", path = file_zip.display()));
+    info!("📦 Found Docker service package: {path}", path = file_zip.display());
 
     // 使用utils中的解压函数
     crate::utils::extract_docker_service(&file_zip, &upgrade_strategy).await?;
 
-    info!("{}", t!("docker_service_cmd.extract_complete"));
+    info!("✅ Docker service package extraction complete");
     Ok(())
 }
 
@@ -666,13 +624,10 @@ pub async fn extract_docker_service_with_upgrade_strategy(
 pub async fn show_architecture_info(_app: &CliApp) -> Result<()> {
     let arch = crate::docker_service::get_system_architecture();
 
-    info!("{}", t!("docker_service_cmd.arch_info_title"));
-    info!("{}", t!("docker_service_cmd.arch_type", arch = arch.display_name()));
-    info!("{}", t!("docker_service_cmd.arch_id", id = arch.as_str()));
-    info!(
-        "{}",
-        t!("docker_service_cmd.image_suffix", suffix = crate::docker_service::get_architecture_suffix(arch))
-    );
+    info!("🔧 System architecture info:");
+    info!("  • Architecture type: {arch}", arch = arch.display_name());
+    info!("  • Architecture ID: {id}", id = arch.as_str());
+    info!("  • Image suffix: {suffix}", suffix = crate::docker_service::get_architecture_suffix(arch));
 
     Ok(())
 }
@@ -684,19 +639,19 @@ async fn set_frontend_port(port: u16) -> Result<()> {
 
     let env_file_path = get_env_file_path();
     if !env_file_path.exists() {
-        info!("{}", t!("docker_service_cmd.env_not_exists"));
+        info!("   .env file not found, no need to update port");
         return Ok(());
     }
 
-    info!("{}", t!("docker_service_cmd.updating_frontend_port", port = port));
-    info!("{}", t!("docker_service_cmd.env_file_path", path = env_file_path.display()));
+    info!("🔧 Updating frontend port in .env: {port}", port = port);
+    info!("   .env file path: {path}", path = env_file_path.display());
 
     // 使用新的环境变量管理器进行智能更新
     if let Err(e) = update_frontend_port(&env_file_path, port) {
-        error!("{}", t!("docker_service_cmd.update_port_failed", error = e.to_string()));
+        error!("❌ Port configuration update failed: {error}", error = e.to_string());
         return Err(anyhow::anyhow!(t!("docker_service_cmd.update_port_failed_msg", error = e.to_string())));
     }
 
-    info!("{}", t!("docker_service_cmd.port_update_success"));
+    info!("✅ Port configuration updated successfully!");
     Ok(())
 }

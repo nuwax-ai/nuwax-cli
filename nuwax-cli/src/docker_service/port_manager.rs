@@ -146,20 +146,11 @@ impl PortManager {
     /// 从.env文件加载环境变量
     pub fn load_env_file(&mut self, env_file_path: &Path) -> DockerServiceResult<()> {
         if !env_file_path.exists() {
-            warn!(
-                "{}",
-                t!(
-                    "port_manager.env_file_not_exists_skip",
-                    path = env_file_path.display()
-                )
-            );
+            warn!(".env file does not exist: {path}, skip loading env vars", path = env_file_path.display());
             return Ok(());
         }
 
-        info!(
-            "{}",
-            t!("port_manager.load_env_start", path = env_file_path.display())
-        );
+        info!("Start loading env file: {path}", path = env_file_path.display());
 
         let content = fs::read_to_string(env_file_path).map_err(|e| {
             DockerServiceError::Configuration(format!(
@@ -172,10 +163,7 @@ impl PortManager {
             ))
         })?;
 
-        info!(
-            "{}",
-            t!("port_manager.load_env_content_read", count = content.len())
-        );
+        info!("Read .env content successfully ({count} chars)", count = content.len());
 
         // 清空现有环境变量缓存
         self.env_vars.clear();
@@ -204,28 +192,18 @@ impl PortManager {
                 };
 
                 self.env_vars.insert(key.clone(), value.to_string());
-                info!(
-                    "{}",
-                    t!(
-                        "port_manager.env_var_loaded",
+                info!("Line {line}: loaded env var: {key} = {value}",
                         line = line_num + 1,
                         key = key,
                         value = value
-                    )
-                );
+                    );
             } else {
-                warn!(
-                    "{}",
-                    t!("port_manager.env_var_invalid_line", line = line_num + 1, value = line)
-                );
+                warn!("Line {line}: invalid env var format: {value}", line = line_num + 1, value = line);
             }
         }
 
-        info!(
-            "{}",
-            t!("port_manager.load_env_done", count = self.env_vars.len())
-        );
-        info!("{}", t!("port_manager.env_var_list", vars = format!("{:?}", self.env_vars)));
+        info!("Env loading completed: {count} variables", count = self.env_vars.len());
+info!("Loaded env var list: {vars}", vars = format!("{:?}", self.env_vars));
         Ok(())
     }
 
@@ -248,10 +226,7 @@ impl PortManager {
                             } else if let Ok(value) = env::var(&var_name) {
                                 result.push_str(&value);
                             } else {
-                                warn!(
-                                    "{}",
-                                    t!("port_manager.env_var_undefined", key = var_name)
-                                );
+                                warn!("Environment variable {key} is undefined", key = var_name);
                                 // 保持原始格式
                                 result.push_str(&format!("${{{var_name}}}"));
                             }
@@ -262,14 +237,10 @@ impl PortManager {
                             } else if let Ok(value) = env::var(&var_name) {
                                 result.push_str(&value);
                             } else {
-                                debug!(
-                                    "{}",
-                                    t!(
-                                        "port_manager.env_var_undefined_use_default",
+                                debug!("Environment variable {key} is undefined, using default: {default}",
                                         key = var_name,
                                         default = default_value
-                                    )
-                                );
+                                    );
                                 result.push_str(&default_value);
                             }
                         }
@@ -285,10 +256,7 @@ impl PortManager {
             }
             Err(_) => {
                 // 如果解析失败，返回原始字符串
-                warn!(
-                    "{}",
-                    t!("port_manager.env_parse_failed_raw", value = input)
-                );
+                warn!("Env parse failed, return raw string: {value}", value = input);
                 input.to_string()
             }
         }
@@ -317,10 +285,7 @@ impl PortManager {
                         drop(listener);
                         // 能绑定本地回环但不能绑定所有接口，可能是权限限制
                         // 这种情况下我们认为端口可用（但可能需要提醒用户）
-                        warn!(
-                            "{}",
-                            t!("port_manager.port_bind_local_only", port = port)
-                        );
+                        warn!("Port {port} can only bind to 127.0.0.1, permission may be restricted", port = port);
                         true
                     }
                     Err(_) => {
@@ -364,51 +329,24 @@ impl PortManager {
         &mut self,
         compose_file_path: &Path,
     ) -> DockerServiceResult<Vec<PortMapping>> {
-        info!(
-            "{}",
-            t!(
-                "port_manager.parse_compose_ports_start",
-                path = compose_file_path.display()
-            )
-        );
+        info!("Start parsing docker-compose ports: {path}", path = compose_file_path.display());
 
         // 只有在环境变量缓存为空时才加载.env文件（避免重复加载）
         if self.env_vars.is_empty() {
             if let Some(parent_dir) = compose_file_path.parent() {
                 let env_file = parent_dir.join(".env");
                 if env_file.exists() {
-                    info!(
-                        "{}",
-                        t!("port_manager.env_cache_empty_loading", path = env_file.display())
-                    );
+                    info!("Env cache is empty, loading .env: {path}", path = env_file.display());
                     if let Err(e) = self.load_env_file(&env_file) {
-                        error!(
-                            "{}",
-                            t!(
-                                "port_manager.load_env_in_parse_failed",
-                                error = e.to_string()
-                            )
-                        );
+                        error!("Failed to load env file in parse_compose_ports: {error}", error = e.to_string());
                         return Err(e);
                     }
                 } else {
-                    warn!(
-                        "{}",
-                        t!(
-                            "port_manager.env_cache_empty_no_file",
-                            path = env_file.display()
-                        )
-                    );
+                    warn!("Env cache is empty, but .env not found: {path}", path = env_file.display());
                 }
             }
         } else {
-            info!(
-                "{}",
-                t!(
-                    "port_manager.env_cache_not_empty_skip",
-                    count = self.env_vars.len()
-                )
-            );
+            info!("Env cache not empty ({count} vars), skip loading .env", count = self.env_vars.len());
         }
 
         let content = std::fs::read_to_string(compose_file_path).map_err(|e| {
@@ -447,10 +385,7 @@ impl PortManager {
             }
         }
 
-        info!(
-            "{}",
-            t!("port_manager.parse_compose_ports_done", count = port_mappings.len())
-        );
+        info!("Parse completed, found {count} port mappings", count = port_mappings.len());
         Ok(port_mappings)
     }
 
@@ -462,25 +397,15 @@ impl PortManager {
     ) -> DockerServiceResult<Option<PortMapping>> {
         match port_def {
             Value::String(port_str) => {
-                info!(
-                    "{}",
-                    t!(
-                        "port_manager.parse_port_def_raw",
+                info!("Parse port definition (raw): {value} (service: {service})",
                         value = port_str,
                         service = service_name
-                    )
-                );
-                debug!(
-                    "{}",
-                    t!(
-                        "port_manager.debug_current_env_vars",
-                        vars = format!("{:?}", self.env_vars)
-                    )
-                );
+                    );
+                debug!("Current env var cache: {vars}", vars = format!("{:?}", self.env_vars));
 
                 // 先展开环境变量
                 let port_str = self.expand_env_vars(port_str.trim());
-                info!("{}", t!("port_manager.parse_port_def_expanded", value = port_str, service = service_name));
+                info!("Parse port definition (expanded): {value} (service: {service})", value = port_str, service = service_name);
 
                 // 格式: "8080:80" 或 "127.0.0.1:8080:80" 或 "8080:80/tcp"
                 let port_str = port_str.trim();
@@ -561,15 +486,11 @@ impl PortManager {
                         }))
                     }
                     _ => {
-                        warn!(
-                            "{}",
-                            t!(
-                                "port_manager.parse_port_def_failed",
+                        warn!("Cannot parse port definition: {value} (raw: {raw}) (service: {service})",
                                 value = port_part,
                                 raw = port_str,
                                 service = service_name
-                            )
-                        );
+                            );
                         Ok(None)
                     }
                 }
@@ -591,10 +512,7 @@ impl PortManager {
                 }
             }
             _ => {
-                warn!(
-                    "{}",
-                    t!("port_manager.unknown_port_def_format", value = format!("{:?}", port_def))
-                );
+                warn!("Unknown port definition format: {value}", value = format!("{:?}", port_def));
                 Ok(None)
             }
         }
@@ -606,49 +524,28 @@ impl PortManager {
         compose_file_path: &Path,
         env_file_path: &Path,
     ) -> DockerServiceResult<PortConflictReport> {
-        info!(
-            "{}",
-            t!(
-                "port_manager.smart_check_start",
-                path = compose_file_path.display()
-            )
-        );
+        info!("Start smart port-conflict check for docker-compose: {path}", path = compose_file_path.display());
 
         // 自动加载.env文件
         if env_file_path.exists() {
-            info!(
-                "{}",
-                t!("port_manager.env_file_found_loading", path = env_file_path.display())
-            );
+            info!(".env found, loading env vars: {path}", path = env_file_path.display());
             match self.load_env_file(&env_file_path) {
-                Ok(_) => info!("{}", t!("port_manager.env_file_load_success")),
+                Ok(_) => info!("✅ .env loaded successfully"),
                 Err(e) => {
-                    error!("{}", t!("port_manager.env_file_load_failed", error = e.to_string()));
+                    error!("❌ Failed to load .env: {error}", error = e.to_string());
                     return Err(e);
                 }
             }
         } else {
-            warn!("{}", t!("port_manager.env_file_not_found", path = env_file_path.display()));
+            warn!("❌ .env not found: {path}", path = env_file_path.display());
         }
 
         // 显示当前环境变量状态
-        info!(
-            "{}",
-            t!(
-                "port_manager.current_env_var_count",
-                count = self.env_vars.len()
-            )
-        );
+        info!("Current loaded env var count: {count}", count = self.env_vars.len());
 
         // 解析docker-compose.yml中定义的服务
         let compose_services = self.parse_compose_services(compose_file_path)?;
-        info!(
-            "{}",
-            t!(
-                "port_manager.compose_services_defined",
-                services = format!("{:?}", compose_services)
-            )
-        );
+        info!("Services defined in docker-compose.yml: {services}", services = format!("{:?}", compose_services));
 
         let port_mappings = self.parse_compose_ports(compose_file_path).await?;
         let mut conflicted_ports = Vec::new();
@@ -672,23 +569,15 @@ impl PortManager {
                 };
 
                 if is_related_service {
-                    info!(
-                        "{}",
-                        t!(
-                            "port_manager.port_used_by_related_service",
+                    info!("Port {port} is used by related compose service (service: {service}) - expected",
                             port = mapping.host_port,
                             service = mapping.service_name
-                        )
-                    );
+                        );
                 } else {
-                    warn!(
-                        "{}",
-                        t!(
-                            "port_manager.port_conflict_found",
+                    warn!("Port conflict found: port {port} is occupied by other process (service: {service})",
                             port = mapping.host_port,
                             service = mapping.service_name
-                        )
-                    );
+                        );
 
                     conflicted_ports.push(PortConflict {
                         port: mapping.host_port,
@@ -700,33 +589,19 @@ impl PortManager {
                     });
                 }
             } else {
-                debug!(
-                    "{}",
-                    t!(
-                        "port_manager.debug_port_available_for_service",
+                debug!("Port {port} is available (service: {service})",
                         port = mapping.host_port,
                         service = mapping.service_name
-                    )
-                );
+                    );
             }
         }
 
         let has_conflicts = !conflicted_ports.is_empty();
 
         if has_conflicts {
-            error!(
-                "{}",
-                t!(
-                    "port_manager.smart_check_conflicts",
-                    count = conflicted_ports.len(),
-                    total = total_checked
-                )
-            );
+            error!("Found {count} real port conflicts, checked {total} ports", count = conflicted_ports.len(), total = total_checked);
         } else {
-            info!(
-                "{}",
-                t!("port_manager.smart_check_no_conflicts", total = total_checked)
-            );
+            info!("Smart port check completed, no conflicts found, checked {total} ports", total = total_checked);
         }
 
         Ok(PortConflictReport {
@@ -786,15 +661,11 @@ impl PortManager {
                 if related_service == service_name {
                     // 检查容器的端口映射
                     if container.ports.contains(&port.to_string()) {
-                        debug!(
-                            "{}",
-                            t!(
-                                "port_manager.debug_port_used_by_compose_container",
+                        debug!("Port {port} is used by compose service {service} container {container}",
                                 port = port,
                                 service = related_service,
                                 container = container.names
-                            )
-                        );
+                            );
                         return true;
                     }
                 }
@@ -838,17 +709,11 @@ impl PortManager {
         match new_local_docker_connection(DOCKER_SOCKET_PATH, None).await {
             Ok(docker) => match DockerContainer::list(&docker).await {
                 Ok(containers) => {
-                    debug!(
-                        "{}",
-                        t!(
-                            "port_manager.debug_containers_obtained",
-                            count = containers.len()
-                        )
-                    );
+                    debug!("Successfully obtained {count} container infos", count = containers.len());
                     Ok(containers)
                 }
                 Err(e) => {
-                    warn!("{}", t!("port_manager.get_containers_failed", error = e.to_string()));
+warn!("Failed to get container list: {error}", error = e.to_string());
                     Err(format!(
                         "{}",
                         t!("port_manager.get_containers_failed_raw", error = e.to_string())
@@ -856,7 +721,7 @@ impl PortManager {
                 }
             },
             Err(e) => {
-                warn!("{}", t!("port_manager.connect_docker_failed", error = e.to_string()));
+warn!("Failed to connect Docker: {error}", error = e.to_string());
                 Err(format!(
                     "{}",
                     t!("port_manager.connect_docker_failed_raw", error = e.to_string())
@@ -868,41 +733,31 @@ impl PortManager {
     /// 显示智能端口冲突报告
     pub fn print_smart_conflict_report(&self, report: &PortConflictReport) {
         if report.has_conflicts {
-            warn!("{}", t!("port_manager.conflict_report_title"));
-            warn!("{}", t!("port_manager.conflict_report_total", total = report.total_checked));
-            warn!(
-                "{}",
-                t!("port_manager.conflict_report_count", count = report.conflicted_ports.len())
-            );
+            warn!("⚠️  Real port conflicts detected!");
+            warn!("Total checked: {total} port mappings", total = report.total_checked);
+            warn!("Conflict count: {count}", count = report.conflicted_ports.len());
 
-            warn!("{}", t!("port_manager.conflict_report_detail_title"));
+            warn!("Conflict details:");
             for conflict in &report.conflicted_ports {
-                warn!("{}", t!("port_manager.conflict_report_item_port", port = conflict.port));
-                warn!(
-                    "{}",
-                    t!(
-                        "port_manager.conflict_report_item_service",
+                warn!("  🔴 Port {port} is occupied by another process", port = conflict.port);
+                warn!("     Service: {service}",
                         service = conflict.service_name
-                    )
-                );
-                warn!(
-                    "{}",
-                    t!("port_manager.conflict_report_item_mapping", mapping = conflict.mapping)
-                );
+                    );
+                warn!("     Mapping: {mapping}", mapping = conflict.mapping);
             }
 
-            info!("{}", t!("port_manager.conflict_suggestion_title"));
-            info!("{}", t!("port_manager.conflict_suggestion_1"));
-            info!("{}", t!("port_manager.conflict_suggestion_2"));
-            info!("{}", t!("port_manager.conflict_suggestion_3"));
+            info!("💡 Suggestions:");
+            info!("  1. Stop other process occupying the port");
+            info!("  2. Modify port mappings in docker-compose.yml");
+            info!("  3. Use command below to check port occupancy:");
 
             for conflict in &report.conflicted_ports {
-                info!("{}", t!("port_manager.conflict_suggestion_cmd", port = conflict.port));
+                info!("     lsof -i :{port}", port = conflict.port);
             }
         } else {
-            info!("{}", t!("port_manager.smart_check_passed"));
-            info!("{}", t!("port_manager.conflict_report_total", total = report.total_checked));
-            info!("{}", t!("port_manager.smart_check_passed_hint"));
+            info!("✅ Smart port check passed, no conflicts found");
+            info!("Total checked: {total} port mappings", total = report.total_checked);
+            info!("💡 Hint: related-service occupied ports are skipped");
         }
     }
 }

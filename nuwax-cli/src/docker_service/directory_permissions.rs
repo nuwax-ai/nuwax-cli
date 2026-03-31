@@ -41,9 +41,9 @@ impl DirectoryPermissionManager {
     /// 注意：目录创建由 DockerManager::ensure_host_volumes_exist() 自动处理
     /// 这里只负责设置 MySQL 配置文件权限为 644
     pub fn ensure_mysql_config_safe(&self) -> DockerServiceResult<()> {
-        info!("🔒 检查 MySQL 配置文件权限...");
+        info!("🔒 Checking MySQL config file permissions...");
         self.ensure_mysql_config_permissions()?;
-        info!("✅ MySQL 配置文件权限检查完成");
+        info!("✅ MySQL config file permission check completed");
         Ok(())
     }
 
@@ -55,7 +55,7 @@ impl DirectoryPermissionManager {
     fn ensure_mysql_config_permissions(&self) -> DockerServiceResult<()> {
         let mysql_cnf = self.work_dir.join("config/mysql.cnf");
         if !mysql_cnf.exists() {
-            debug!("MySQL 配置文件不存在，跳过权限设置");
+            debug!("MySQL config file not found, skipping permission setup");
             return Ok(());
         }
 
@@ -70,7 +70,7 @@ impl DirectoryPermissionManager {
 
                 if is_unsafe {
                     warn!(
-                        "⚠️  MySQL 配置文件权限不安全: {:o} (MySQL 会忽略)",
+                        "⚠️  MySQL config file permissions are unsafe: {:o} (MySQL may ignore it)",
                         current_mode
                     );
                 }
@@ -78,16 +78,16 @@ impl DirectoryPermissionManager {
 
             // 设置为 644
             let metadata = fs::metadata(&mysql_cnf).map_err(|e| {
-                DockerServiceError::FileSystem(format!("读取配置文件元数据失败: {}", e))
+                DockerServiceError::FileSystem(format!("Failed to read config file metadata: {}", e))
             })?;
             let mut permissions = metadata.permissions();
             permissions.set_mode(0o644);
 
             fs::set_permissions(&mysql_cnf, permissions).map_err(|e| {
-                DockerServiceError::FileSystem(format!("设置配置文件权限失败: {}", e))
+                DockerServiceError::FileSystem(format!("Failed to set config file permissions: {}", e))
             })?;
 
-            info!("🔒 MySQL 配置文件权限: 644 (安全)");
+            info!("🔒 MySQL config file permission: 644 (safe)");
         }
 
         #[cfg(windows)]
@@ -98,7 +98,7 @@ impl DirectoryPermissionManager {
                 permissions.set_readonly(false);
                 fs::set_permissions(&mysql_cnf, permissions).ok();
             }
-            info!("🔒 Windows: MySQL 配置文件权限已设置");
+            info!("🔒 Windows: MySQL config file permission has been set");
         }
 
         Ok(())
@@ -109,25 +109,31 @@ impl DirectoryPermissionManager {
     /// 只在 MySQL 启动失败时调用，尝试修复权限问题
     /// 注意：目录应该已经由 ensure_host_volumes_exist() 创建
     pub fn fix_mysql_permissions_on_failure(&self) -> DockerServiceResult<()> {
-        warn!("🔧 MySQL 启动失败，尝试修复权限...");
+        warn!("🔧 MySQL startup failed, attempting permission repair...");
 
         let mysql_data_dir = self.work_dir.join("data/mysql");
         let mysql_logs_dir = self.work_dir.join("logs/mysql");
 
         // 检查目录是否存在
         if !mysql_data_dir.exists() {
-            warn!("⚠️  MySQL 数据目录不存在: {}", mysql_data_dir.display());
-            warn!("   这不应该发生，ensure_host_volumes_exist() 应该已经创建了目录");
+            warn!("⚠️  MySQL data directory does not exist: {}", mysql_data_dir.display());
+            warn!(
+                "   This should not happen; ensure_host_volumes_exist() should have created it"
+            );
             return Err(DockerServiceError::FileSystem(
-                "MySQL 数据目录不存在，请检查 docker-compose.yml 配置".to_string(),
+                "MySQL data directory does not exist, please check docker-compose.yml configuration"
+                    .to_string(),
             ));
         }
 
         if !mysql_logs_dir.exists() {
-            warn!("⚠️  MySQL 日志目录不存在: {}", mysql_logs_dir.display());
-            warn!("   这不应该发生，ensure_host_volumes_exist() 应该已经创建了目录");
+            warn!("⚠️  MySQL log directory does not exist: {}", mysql_logs_dir.display());
+            warn!(
+                "   This should not happen; ensure_host_volumes_exist() should have created it"
+            );
             return Err(DockerServiceError::FileSystem(
-                "MySQL 日志目录不存在，请检查 docker-compose.yml 配置".to_string(),
+                "MySQL log directory does not exist, please check docker-compose.yml configuration"
+                    .to_string(),
             ));
         }
 
@@ -136,17 +142,17 @@ impl DirectoryPermissionManager {
         {
             self.try_set_permissions(&mysql_data_dir, 0o777)?;
             self.try_set_permissions(&mysql_logs_dir, 0o777)?;
-            info!("🔑 已设置 MySQL 目录权限为 777（最宽松）");
+            info!("🔑 MySQL directory permissions set to 777 (most permissive)");
         }
 
         // 确保配置文件权限正确
         self.ensure_mysql_config_permissions()?;
 
-        info!("✅ 权限修复完成");
-        info!("💡 如果仍然失败，请检查：");
-        info!("   1. Docker init 容器是否正常运行");
-        info!("   2. 是否有足够的磁盘空间");
-        info!("   3. SELinux/AppArmor 是否阻止访问");
+        info!("✅ Permission repair completed");
+        info!("💡 If it still fails, please check:");
+        info!("   1. Whether the Docker init container is running correctly");
+        info!("   2. Whether there is enough disk space");
+        info!("   3. Whether SELinux/AppArmor is blocking access");
 
         Ok(())
     }
@@ -161,9 +167,9 @@ impl DirectoryPermissionManager {
             permissions.set_mode(mode);
 
             match fs::set_permissions(path, permissions) {
-                Ok(_) => debug!("设置权限成功: {} → {:o}", path.display(), mode),
+                Ok(_) => debug!("Permission set successfully: {} → {:o}", path.display(), mode),
                 Err(e) => warn!(
-                    "设置权限失败: {} → {:o}, 错误: {} (通常不影响)",
+                    "Failed to set permissions: {} → {:o}, error: {} (usually non-fatal)",
                     path.display(),
                     mode,
                     e

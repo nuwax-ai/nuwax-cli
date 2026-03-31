@@ -53,7 +53,7 @@ impl EnvManager {
         let path = path.as_ref();
         self.file_path = Some(path.to_path_buf());
         let content = fs::read_to_string(path)
-            .with_context(|| format!("无法读取 .env 文件: {}", path.display()))?;
+            .with_context(|| format!("Failed to read .env file: {}", path.display()))?;
         self.parse_content(&content)?;
         Ok(())
     }
@@ -185,7 +185,7 @@ impl EnvManager {
             }
         }
 
-        fs::write(path, output).with_context(|| format!("无法写入 .env 文件: {}", path.display()))
+        fs::write(path, output).with_context(|| format!("Failed to write .env file: {}", path.display()))
     }
 
     fn get_original_line_str(&self, index: usize) -> &str {
@@ -211,12 +211,12 @@ impl EnvManager {
     /// 设置一个变量的值
     pub fn set_variable(&mut self, key: &str, value: &str) -> Result<()> {
         if let Some(var) = self.variables.get_mut(key) {
-            debug!("设置变量: {key} = {value}");
+            debug!("Setting variable: {key} = {value}");
             var.value = value.to_string();
         } else {
             // 如果变量不存在，我们可以在此选择添加它
             // 为了简单起见，我们当前只修改现有变量
-            anyhow::bail!("变量 '{}' 不存在", key);
+            anyhow::bail!("Variable '{}' does not exist", key);
         }
         Ok(())
     }
@@ -242,9 +242,9 @@ pub fn update_frontend_port(env_path: &Path, new_port: u16) -> Result<()> {
         .is_ok()
     {
         env_manager.save()?;
-        info!("成功更新 .env 文件中的 FRONTEND_HOST_PORT 为 {new_port}");
+        info!("Successfully updated FRONTEND_HOST_PORT in .env to {new_port}");
     } else {
-        info!("未在 .env 文件中找到 FRONTEND_HOST_PORT，无需更新。");
+        info!("FRONTEND_HOST_PORT not found in .env, no update needed.");
     }
 
     Ok(())

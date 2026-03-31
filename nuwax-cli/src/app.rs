@@ -52,7 +52,7 @@ impl CliApp {
         // 初始化数据库
         let db_path = config::get_database_path();
         let database = Arc::new(Database::connect(&db_path).await?);
-        debug!("数据库连接成功: {}", db_path.display());
+        debug!("Database connected: {}", db_path.display());
 
         // 检查数据库是否已经初始化
         if !database.is_database_initialized().await? {

@@ -13,9 +13,9 @@ pub async fn run_diff_sql(
     new_version: Option<String>,
     output_file: String,
 ) -> Result<()> {
-    info!("{}", t!("diff_sql.start"));
-    info!("{}", t!("diff_sql.old_sql", path = old_sql_path.display()));
-    info!("{}", t!("diff_sql.new_sql", path = new_sql_path.display()));
+    info!("🔄 Starting SQL file diff comparison...");
+    info!("📄 Old version SQL: {path}", path = old_sql_path.display());
+    info!("📄 New version SQL: {path}", path = new_sql_path.display());
 
     // 检查输入文件是否存在
     if !old_sql_path.exists() {
@@ -31,7 +31,7 @@ pub async fn run_diff_sql(
     }
 
     // 读取文件内容
-    info!("{}", t!("diff_sql.reading"));
+    info!("📖 Reading SQL files...");
     let old_sql_content = fs::read_to_string(&old_sql_path).map_err(|e| {
         client_core::error::DuckError::custom(
             t!("diff_sql.read_old_failed", error = e.to_string()).to_string()
@@ -49,7 +49,7 @@ pub async fn run_diff_sql(
     let to_version = new_version.as_deref().unwrap_or("latest");
 
     // 生成差异SQL
-    info!("{}", t!("diff_sql.analyzing"));
+    info!("🔍 Analyzing SQL differences...");
     let (diff_sql, description) = generate_schema_diff(
         Some(&old_sql_content),
         &new_sql_content,
@@ -60,7 +60,7 @@ pub async fn run_diff_sql(
         t!("diff_sql.generate_failed", error = e.to_string()).to_string()
     ))?;
 
-    info!("{}", t!("diff_sql.result", description = description));
+    info!("📊 SQL diff analysis result: {description}", description = description);
 
     // 检查是否有实际的SQL语句需要执行
     let meaningful_lines: Vec<&str> = diff_sql
@@ -69,8 +69,8 @@ pub async fn run_diff_sql(
         .collect();
 
     if meaningful_lines.is_empty() {
-        info!("{}", t!("diff_sql.no_change"));
-        info!("{}", t!("diff_sql.empty_diff_file", file = output_file));
+        info!("✅ No database schema changes, upgrade not needed");
+        info!("📄 Generated empty diff file: {file}", file = output_file);
 
         // 创建包含说明的空差异文件
         let empty_diff_content = format!(
@@ -87,12 +87,12 @@ pub async fn run_diff_sql(
                 t!("diff_sql.write_failed", error = e.to_string()).to_string()
             ))?;
 
-        info!("{}", t!("diff_sql.saved", file = output_file));
-        info!("{}", t!("diff_sql.executable_lines", count = meaningful_lines.len()));
+        info!("📄 SQL diff file saved: {file}", file = output_file);
+        info!("📋 Found {count} executable SQL statements", count = meaningful_lines.len());
 
         // 显示差异SQL内容（截取前10行）
         let diff_lines: Vec<&str> = diff_sql.lines().take(10).collect();
-        info!("{}", t!("diff_sql.preview_title"));
+        info!("📋 SQL diff preview (first 10 lines):");
         for line in diff_lines {
             if !line.trim().is_empty() {
                 info!("    {}", line);
@@ -100,20 +100,20 @@ pub async fn run_diff_sql(
         }
 
         if diff_sql.lines().count() > 10 {
-            info!("{}", t!("diff_sql.more_in_file", file = output_file));
+            info!("    ... See more in file: {file}", file = output_file);
         }
     }
 
     // 显示执行建议
-    info!("{}", t!("diff_sql.tips_title"));
-    info!("{}", t!("diff_sql.tip_backup"));
-    info!("{}", t!("diff_sql.tip_test"));
-    info!("{}", t!("diff_sql.tip_production"));
+    info!("💡 Usage tips:");
+    info!("   1. Backup your database first");
+    info!("   2. Verify the diff SQL in test environment");
+    info!("   3. Execute in production after confirmation");
 
     if !meaningful_lines.is_empty() {
-        info!("{}", t!("diff_sql.tip_execute", file = output_file));
+        info!("   4. Execute example: mysql -u username -p database_name < {file}", file = output_file);
     }
 
-    info!("{}", t!("diff_sql.complete"));
+    info!("✅ SQL diff comparison completed");
     Ok(())
 }

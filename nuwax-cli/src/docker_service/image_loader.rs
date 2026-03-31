@@ -240,25 +240,11 @@ impl ImageLoader {
                     if file_name.ends_with(&arch_suffix) {
                         match ImageInfo::from_file_path(path.clone(), self.architecture) {
                             Ok(image_info) => {
-                                info!(
-                                    "{}",
-                                    t!(
-                                        "image_loader.image_file_found",
-                                        name = file_name,
-                                        size = format_file_size(image_info.file_size)
-                                    )
-                                );
+                                info!("Image file found: {name} ({size})", name = file_name, size = format_file_size(image_info.file_size));
                                 images.push(image_info);
                             }
                             Err(e) => {
-                                warn!(
-                                    "{}",
-                                    t!(
-                                        "image_loader.parse_image_file_failed",
-                                        name = file_name,
-                                        error = e.to_string()
-                                    )
-                                );
+                                warn!("Failed to parse image file: {name} - {error}", name = file_name, error = e.to_string());
                             }
                         }
                     }
@@ -276,14 +262,7 @@ impl ImageLoader {
             )));
         }
 
-        info!(
-            "{}",
-            t!(
-                "image_loader.total_arch_images_found",
-                count = images.len(),
-                arch = self.architecture.as_str()
-            )
-        );
+        info!("Found {count} image files for architecture {arch}", count = images.len(), arch = self.architecture.as_str());
         Ok(images)
     }
 
@@ -292,7 +271,7 @@ impl ImageLoader {
         let images = self.scan_architecture_images()?;
         let mut result = LoadResult::new();
 
-        info!("{}", t!("image_loader.load_images_start", count = images.len()));
+info!("Starting to load {count} image files...", count = images.len());
 
         for (index, image) in images.iter().enumerate() {
             let progress = format!("[{}/{}]", index + 1, images.len());
@@ -302,39 +281,19 @@ impl ImageLoader {
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown");
 
-            info!(
-                "{}",
-                t!(
-                    "image_loader.loading_image",
-                    progress = progress,
-                    name = file_name,
-                    size = format_file_size(image.file_size)
-                )
-            );
+            info!("{progress} Loading image: {name} ({size})", progress = progress, name = file_name, size = format_file_size(image.file_size));
 
             match self.docker_manager.load_image(&image.file_path).await {
                 Ok(actual_image_name) => {
-                    info!(
-                        "{}",
-                        t!(
-                            "image_loader.load_image_success",
+                    info!("{progress} ✓ Image loaded successfully: {name} -> {actual}",
                             progress = progress,
                             name = file_name,
                             actual = actual_image_name
-                        )
-                    );
+                        );
                     result.add_success_with_mapping(file_name.to_string(), actual_image_name);
                 }
                 Err(e) => {
-                    error!(
-                        "{}",
-                        t!(
-                            "image_loader.load_image_failed",
-                            progress = progress,
-                            name = file_name,
-                            error = e.to_string()
-                        )
-                    );
+                    error!("{progress} ✗ Image load failed: {name} - {error}", progress = progress, name = file_name, error = e.to_string());
 
                     // 立即返回错误，停止后续镜像加载
                     return Err(DockerServiceError::ImageLoading(format!(
@@ -351,14 +310,10 @@ impl ImageLoader {
             }
         }
 
-        info!(
-            "{}",
-            t!(
-                "image_loader.load_images_done",
+        info!("Image loading completed: success {success}, failed {failed}",
                 success = result.success_count,
                 failed = result.failure_count
-            )
-        );
+            );
         Ok(result)
     }
 
@@ -371,58 +326,39 @@ impl ImageLoader {
 
         let mut result = TagResult::new();
 
-        info!("{}", t!("image_loader.setup_tags_start"));
+        info!("Starting image tag setup...");
 
         for (file_name, actual_image_name) in image_mappings {
-            debug!(
-                "{}",
-                t!(
-                    "image_loader.debug_processing_image_mapping",
+            debug!("Processing image mapping: {file} -> {actual}",
                     file = file_name,
                     actual = actual_image_name
-                )
-            );
+                );
 
             // 基于实际镜像名称创建目标标签（去除架构后缀）
             let target_tag = self.remove_architecture_suffix(actual_image_name);
 
-            info!(
-                "{}",
-                t!(
-                    "image_loader.set_tag",
+            info!("Setting tag: {source} -> {target}",
                     source = actual_image_name,
                     target = target_tag
-                )
-            );
+                );
 
             // 使用实际的镜像名称设置标签
             match self.tag_image(actual_image_name, &target_tag).await {
                 Ok(_) => {
-                    info!("{}", t!("image_loader.set_tag_success", target = target_tag));
+                    info!("✓ Tag set successfully: {target}", target = target_tag);
                     result.add_success(actual_image_name.clone(), target_tag);
                 }
                 Err(e) => {
-                    warn!(
-                        "{}",
-                        t!(
-                            "image_loader.set_tag_failed",
-                            target = target_tag,
-                            error = e.to_string()
-                        )
-                    );
+                    warn!("✗ Tag set failed: {target} - {error}", target = target_tag, error = e.to_string());
                     result.add_failure(actual_image_name.clone(), target_tag, e.to_string());
                 }
             }
         }
 
-        info!(
-            "{}",
-            t!(
-                "image_loader.setup_tags_done",
+        info!("Tag setup completed: success {success}, failed {failed}",
                 success = result.success_count,
                 failed = result.failure_count
-            )
-        );
+            );
         Ok(result)
     }
 
@@ -430,18 +366,14 @@ impl ImageLoader {
     fn remove_architecture_suffix(&self, image_name: &str) -> String {
         use tracing::debug;
 
-        debug!("{}", t!("image_loader.debug_processing_image_name", name = image_name));
+        debug!("Processing image name: {name}", name = image_name);
 
         // 检查是否有标签中的架构后缀：:latest-arm64, :latest-amd64 等
         if let Some((name_part, tag_part)) = image_name.rsplit_once(':') {
-            debug!(
-                "{}",
-                t!(
-                    "image_loader.debug_split_image_name_tag",
+            debug!("Split result - name: {name}, tag: {tag}",
                     name = name_part,
                     tag = tag_part
-                )
-            );
+                );
 
             // 检查标签中是否包含架构后缀
             if tag_part.ends_with("-arm64")
@@ -465,23 +397,16 @@ impl ImageLoader {
                         &clean_tag
                     }
                 );
-                debug!(
-                    "{}",
-                    t!(
-                        "image_loader.debug_remove_arch_suffix",
+                debug!("Removed architecture suffix from tag: {source} -> {target}",
                         source = image_name,
                         target = result
-                    )
-                );
+                    );
                 return result;
             }
         }
 
         // 如果没有找到架构后缀，对于基础镜像（如mysql:8.0）直接返回
-        debug!(
-            "{}",
-            t!("image_loader.debug_no_arch_suffix_return_original", name = image_name)
-        );
+        debug!("No architecture suffix found, returning original image name: {name}", name = image_name);
         image_name.to_string()
     }
 
@@ -513,16 +438,13 @@ impl ImageLoader {
     ) -> DockerServiceResult<bool> {
         use tracing::{debug, warn};
 
-        debug!(
-            "{}",
-            t!("image_loader.debug_check_image_exists_via_ducker", name = image_name)
-        );
+        debug!("Checking image existence via ducker: {name}", name = image_name);
 
         // 创建 Docker 连接
         let docker = match new_local_docker_connection(DOCKER_SOCKET_PATH, None).await {
             Ok(d) => d,
             Err(e) => {
-                warn!("{}", t!("image_loader.connect_docker_failed", error = e.to_string()));
+warn!("Failed to connect Docker: {error}", error = e.to_string());
                 return Ok(false);
             }
         };
@@ -531,7 +453,7 @@ impl ImageLoader {
         let images = match DockerImage::list(&docker, false).await {
             Ok(imgs) => imgs,
             Err(e) => {
-                warn!("{}", t!("image_loader.list_images_failed", error = e.to_string()));
+warn!("Failed to list images: {error}", error = e.to_string());
                 return Ok(false);
             }
         };
@@ -539,14 +461,10 @@ impl ImageLoader {
         // 检查目标镜像是否存在
         let exists = images.iter().any(|img| img.get_full_name() == image_name);
 
-        debug!(
-            "{}",
-            t!(
-                "image_loader.debug_image_exists_result",
+        debug!("Image existence check result {name}: {exists}",
                 name = image_name,
                 exists = exists
-            )
-        );
+            );
         Ok(exists)
     }
 
@@ -554,13 +472,13 @@ impl ImageLoader {
     pub async fn list_images_with_ducker(&self) -> DockerServiceResult<Vec<String>> {
         use tracing::{debug, warn};
 
-        debug!("{}", t!("image_loader.debug_list_images_via_ducker"));
+        debug!("Listing images via ducker");
 
         // 创建 Docker 连接
         let docker = match new_local_docker_connection(DOCKER_SOCKET_PATH, None).await {
             Ok(d) => d,
             Err(e) => {
-                warn!("{}", t!("image_loader.connect_docker_failed", error = e.to_string()));
+warn!("Failed to connect Docker: {error}", error = e.to_string());
                 return Ok(vec![]);
             }
         };
@@ -569,17 +487,14 @@ impl ImageLoader {
         let images = match DockerImage::list(&docker, false).await {
             Ok(imgs) => imgs,
             Err(e) => {
-                warn!("{}", t!("image_loader.list_images_failed", error = e.to_string()));
+warn!("Failed to list images: {error}", error = e.to_string());
                 return Ok(vec![]);
             }
         };
 
         let image_names: Vec<String> = images.iter().map(|img| img.get_full_name()).collect();
 
-        debug!(
-            "{}",
-            t!("image_loader.debug_images_found_count", count = image_names.len())
-        );
+        debug!("Found {count} images", count = image_names.len());
         Ok(image_names)
     }
 
@@ -592,31 +507,23 @@ impl ImageLoader {
 
         let mut result = TagResult::new();
 
-        info!("{}", t!("image_loader.setup_tags_with_validation_start"));
+        info!("Starting validated image tag setup...");
 
         for (file_name, actual_image_name) in image_mappings {
-            debug!(
-                "{}",
-                t!(
-                    "image_loader.debug_processing_image_mapping",
+            debug!("Processing image mapping: {file} -> {actual}",
                     file = file_name,
                     actual = actual_image_name
-                )
-            );
+                );
 
             // 使用 ducker 检查源镜像是否存在
             match self.check_image_exists_with_ducker(actual_image_name).await {
                 Ok(true) => {
-                    debug!("{}", t!("image_loader.debug_source_image_exists", name = actual_image_name));
+                    debug!("Source image exists: {name}", name = actual_image_name);
                 }
                 Ok(false) => {
-                    warn!(
-                        "{}",
-                        t!(
-                            "image_loader.source_image_not_found_skip",
+                    warn!("Source image not found, skip tag setup: {source}",
                             source = actual_image_name
-                        )
-                    );
+                        );
                     result.add_failure(
                         actual_image_name.clone(),
                         t!("image_loader.source_image_not_found").to_string(),
@@ -625,14 +532,7 @@ impl ImageLoader {
                     continue;
                 }
                 Err(e) => {
-                    warn!(
-                        "{}",
-                        t!(
-                            "image_loader.check_image_exists_failed",
-                            source = actual_image_name,
-                            error = e.to_string()
-                        )
-                    );
+                    warn!("Failed to check image existence: {source} - {error}", source = actual_image_name, error = e.to_string());
                     // 继续尝试设置标签，因为可能是 ducker 连接问题
                 }
             }
@@ -642,51 +542,33 @@ impl ImageLoader {
 
             // 如果源镜像和目标标签相同，跳过
             if actual_image_name == &target_tag {
-                debug!(
-                    "{}",
-                    t!("image_loader.debug_source_target_same_skip", name = actual_image_name)
-                );
+                debug!("Source image and target tag are the same, skip: {name}", name = actual_image_name);
                 result.add_success(actual_image_name.clone(), target_tag);
                 continue;
             }
 
-            info!(
-                "{}",
-                t!(
-                    "image_loader.set_tag",
+            info!("Setting tag: {source} -> {target}",
                     source = actual_image_name,
                     target = target_tag
-                )
-            );
+                );
 
             // 使用实际的镜像名称设置标签
             match self.tag_image(actual_image_name, &target_tag).await {
                 Ok(_) => {
-                    info!("{}", t!("image_loader.set_tag_success", target = target_tag));
+                    info!("✓ Tag set successfully: {target}", target = target_tag);
                     result.add_success(actual_image_name.clone(), target_tag);
                 }
                 Err(e) => {
-                    warn!(
-                        "{}",
-                        t!(
-                            "image_loader.set_tag_failed",
-                            target = target_tag,
-                            error = e.to_string()
-                        )
-                    );
+                    warn!("✗ Tag set failed: {target} - {error}", target = target_tag, error = e.to_string());
                     result.add_failure(actual_image_name.clone(), target_tag, e.to_string());
                 }
             }
         }
 
-        info!(
-            "{}",
-            t!(
-                "image_loader.setup_tags_done",
+        info!("Tag setup completed: success {success}, failed {failed}",
                 success = result.success_count,
                 failed = result.failure_count
-            )
-        );
+            );
         Ok(result)
     }
 }

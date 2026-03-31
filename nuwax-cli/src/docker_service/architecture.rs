@@ -46,18 +46,18 @@ impl std::fmt::Display for Architecture {
 /// 检测当前系统的架构
 pub fn detect_architecture() -> Architecture {
     let arch = std::env::consts::ARCH;
-    info!("检测到系统架构: {}", arch);
+    info!("Detected system architecture: {}", arch);
 
     let detected = match arch {
         "x86_64" => Architecture::Amd64,
         "aarch64" => Architecture::Arm64,
         _ => {
-            warn!("未知架构 '{}', 默认使用 amd64", arch);
+            warn!("Unknown architecture '{}', defaulting to amd64", arch);
             Architecture::Amd64
         }
     };
 
-    info!("映射到支持的架构: {}", detected.display_name());
+    info!("Mapped to supported architecture: {}", detected.display_name());
     detected
 }
 
@@ -66,7 +66,7 @@ pub fn detect_architecture() -> Architecture {
 pub fn validate_architecture(arch: Architecture) -> DockerServiceResult<()> {
     match arch {
         Architecture::Amd64 | Architecture::Arm64 => {
-            info!("架构 {} 受支持", arch.display_name());
+            info!("Architecture {} is supported", arch.display_name());
             Ok(())
         }
     }
@@ -86,7 +86,7 @@ pub fn check_architecture_images_exist(
 ) -> DockerServiceResult<Vec<std::path::PathBuf>> {
     if !images_dir.exists() {
         return Err(DockerServiceError::FileSystem(format!(
-            "镜像目录不存在: {}",
+            "Image directory does not exist: {}",
             images_dir.display()
         )));
     }
@@ -111,13 +111,13 @@ pub fn check_architecture_images_exist(
 
     if found_images.is_empty() {
         warn!(
-            "未找到架构 {} 的镜像文件 (模式: {})",
+            "No image files found for architecture {} (pattern: {})",
             arch.display_name(),
             pattern
         );
     } else {
         info!(
-            "找到 {} 个架构 {} 的镜像文件",
+            "Found {} image files for architecture {}",
             found_images.len(),
             arch.display_name()
         );
@@ -142,14 +142,14 @@ pub fn get_available_architectures(
 
     if result.is_empty() {
         return Err(DockerServiceError::ArchitectureDetection(format!(
-            "在目录 {} 中未找到任何支持架构的镜像文件",
+            "No image files for supported architectures found in directory {}",
             images_dir.display()
         )));
     }
 
-    info!("可用架构统计:");
+    info!("Available architecture summary:");
     for (arch, images) in &result {
-        info!("  {} -> {} 个镜像文件", arch.display_name(), images.len());
+        info!("  {} -> {} image files", arch.display_name(), images.len());
     }
 
     Ok(result)

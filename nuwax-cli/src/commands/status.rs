@@ -8,10 +8,10 @@ use tracing::{error, info, warn};
 
 /// 显示客户端版本信息（标题和基本信息）
 pub fn show_client_version() {
-    info!("{}", t!("status.title"));
-    info!("{}", t!("status.separator"));
-    info!("{}", t!("status.basic_info"));
-    info!("{}", t!("status.client_version", version = env!("CARGO_PKG_VERSION")));
+    info!("🦆 Nuwax Cli ent Status");
+    info!("==================");
+    info!("📋 Basic Information:");
+    info!("   Client version: v{version}", version = env!("CARGO_PKG_VERSION"));
 }
 
 /// 显示服务状态（完整版本，包含基本信息）
@@ -23,15 +23,15 @@ pub async fn run_status(app: &CliApp) -> Result<()> {
 /// 显示详细状态信息（不包含基本信息标题）
 pub async fn run_status_details(app: &CliApp) -> Result<()> {
     // 继续显示其他基本信息
-    info!("{}", t!("status.docker_service_version", version = app.config.get_docker_versions()));
-    info!("{}", t!("status.config_file", file = "config.toml"));
+    info!("   Docker service version: {version}", version = app.config.get_docker_versions());
+    info!("   Configuration file: {file}", file = "config.toml");
 
     // 显示客户端UUID
     let client_uuid = app.database.get_or_create_client_uuid().await?;
-    info!("{}", t!("status_cmd.client_uuid", uuid = client_uuid));
+    info!("   Client UUID: {uuid}", uuid = client_uuid);
 
     // 检查文件状态
-    info!("{}", t!("status.file_status"));
+    info!("📁 File Status:");
     let docker_compose_path = std::path::Path::new(&app.config.docker.compose_file);
     let env_file_path = std::path::Path::new(&app.config.docker.env_file);
 
@@ -44,24 +44,24 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
     );
 
     if docker_compose_path.exists() {
-        info!("{}", t!("status.docker_compose_exists", file = app.config.docker.compose_file));
+        info!("   ✅ Docker Compose file: {file}", file = app.config.docker.compose_file);
     } else {
-        info!("{}", t!("status.docker_compose_not_exists", file = app.config.docker.compose_file));
+        info!("   ❌ Docker Compose file: {file} (not exists)", file = app.config.docker.compose_file);
     }
 
     match &download_path {
         Ok(path) => {
-            info!("{}", t!("status_cmd.service_package_exists", path = path.display()));
+            info!("   ✅ Service package file: {path}", path = path.display());
         }
         Err(e) => {
-            info!("{}", t!("status_cmd.service_package_error", error = e.to_string()));
+            info!("   ❌ Service package file: (Error: {error})", error = e.to_string());
         }
     }
 
     // Docker服务状态
-    info!("{}", t!("status.docker_status"));
+    info!("🐳 Docker Service Status:");
     if docker_compose_path.exists() {
-        info!("{}", t!("status.docker_ready"));
+        info!("   📋 Docker Compose file ready");
 
         // 检查具体的服务状态
         match check_docker_services_status(docker_compose_path, env_file_path).await {
@@ -69,19 +69,19 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
                 // 状态检查成功，详细信息已在函数内部显示
             }
             Err(e) => {
-                warn!("{}", t!("status_cmd.status_check_failed", error = e.to_string()));
-                info!("{}", t!("status_cmd.suggest_check_docker"));
-                info!("{}", t!("status_cmd.suggest_docker_installed"));
-                info!("{}", t!("status_cmd.suggest_docker_compose"));
-                info!("{}", t!("status_cmd.suggest_manual_check"));
+                warn!("   ⚠️  Service status check failed: {error}", error = e.to_string());
+                info!("   💡 Suggested checks:");
+                info!("      - Docker is installed and running");
+                info!("      - docker-compose is available");
+                info!("      - Use 'docker-compose ps' to check status manually");
             }
         }
     } else {
-        warn!("{}", t!("status_cmd.compose_not_exists"));
+        warn!("   ❌ Docker Compose file does not exist, service not initialized");
     }
 
     // 根据状态提供建议
-    info!("{}", t!("status.suggestions"));
+    info!("💡 Status Analysis and Suggestions:");
 
     let has_compose = docker_compose_path.exists();
     let has_package = download_path
@@ -91,22 +91,22 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
         .unwrap_or(false);
 
     if !has_compose && !has_package {
-        info!("{}", t!("status_cmd.first_time_user"));
-        info!("{}", t!("status_cmd.suggested_steps"));
-        info!("{}", t!("status_cmd.step_upgrade"));
-        info!("{}", t!("status_cmd.step_deploy"));
+        info!("   🆕 You seem to be a first-time user");
+        info!("   📝 Suggested steps:");
+        info!("      1. nuwax-cli upgrade                  (Download Docker service package)");
+        info!("      2. nuwax-cli docker-service deploy    (Deploy and start services)");
     } else if !has_compose && has_package {
-        info!("{}", t!("status_cmd.package_found_not_extracted"));
-        info!("{}", t!("status_cmd.suggested_steps"));
-        info!("{}", t!("status_cmd.suggest_deploy"));
-        info!("{}", t!("status_cmd.suggest_start"));
+        info!("   📦 Service package found, but not extracted yet");
+        info!("   📝 Suggested steps:");
+        info!("      - nuwax-cli docker-service deploy  (Full deployment process)");
+        info!("      - nuwax-cli docker-service start   (Start services only)");
     } else {
-        info!("{}", t!("status_cmd.system_complete"));
-        info!("{}", t!("status_cmd.available_commands"));
-        info!("{}", t!("status_cmd.cmd_service_control"));
-        info!("{}", t!("status_cmd.cmd_upgrade"));
-        info!("{}", t!("status_cmd.cmd_backup"));
-        info!("{}", t!("status_cmd.cmd_check_update"));
+        info!("   ✅ System files complete, all features available");
+        info!("   📝 Available commands:");
+        info!("      - nuwax-cli docker-service start/stop/restart  (Control services)");
+        info!("      - nuwax-cli upgrade                            (Upgrade services)");
+        info!("      - nuwax-cli backup                             (Create backup)");
+        info!("      - nuwax-cli check-update                       (Check client updates)");
     }
 
     Ok(())
@@ -133,18 +133,11 @@ async fn check_docker_services_status(
     let health_checker = HealthChecker::new(Arc::new(docker_manager));
     let report = health_checker.health_check().await?;
     if report.is_all_healthy() {
-        info!("{}", t!("status_cmd.service_running"));
+        info!("   ✅ Services are running");
     } else {
-        warn!("{}", t!("status_cmd.service_not_running"));
+        warn!("   ❌ Some services are not running");
         for container in report.failed_containers().iter() {
-            error!(
-                "{}",
-                t!(
-                    "status_cmd.failed_container_item",
-                    name = container.name,
-                    status = format!("{:?}", container.status)
-                )
-            );
+            error!("   ❌ {name}: {status}", name = container.name, status = format!("{:?}", container.status));
         }
     }
 
