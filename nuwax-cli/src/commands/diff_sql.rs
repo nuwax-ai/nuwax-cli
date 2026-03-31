@@ -74,7 +74,7 @@ pub async fn run_diff_sql(
 
         // 创建包含说明的空差异文件
         let empty_diff_content = format!(
-            "-- SQL差异分析结果\n-- {description}\n-- 无需执行任何SQL语句，数据库架构无变化\n"
+            "-- SQL diff analysis result\n-- {description}\n-- No SQL execution needed; database schema unchanged\n"
         );
         fs::write(&output_file, empty_diff_content)
             .map_err(|e| client_core::error::DuckError::custom(

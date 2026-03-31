@@ -106,11 +106,11 @@ where
 
     // 初始化步骤
     let steps = [
-        ("downloading", "正在准备初始化环境..."),
-        ("extracting", "正在创建配置文件和目录结构..."),
-        ("loading", "正在初始化DuckDB数据库..."),
-        ("starting", "正在注册客户端..."),
-        ("configuring", "正在完成初始化设置..."),
+        ("downloading", "Preparing initialization environment..."),
+        ("extracting", "Creating configuration files and directories..."),
+        ("loading", "Initializing DuckDB database..."),
+        ("starting", "Registering client..."),
+        ("configuring", "Finalizing initialization setup..."),
     ];
 
     let total_steps = steps.len();
@@ -186,7 +186,7 @@ where
     // 完成回调
     let final_progress = InitProgress {
         stage: "configuring".to_string(),
-        message: "初始化完成！".to_string(),
+        message: "Initialization completed!".to_string(),
         percentage: 100.0,
         current_step: total_steps,
         total_steps,
@@ -555,7 +555,7 @@ pub async fn update_ui_config(
     // 这里会使用ConfigManager更新UI配置
     // 暂时只做验证
     if !config.is_object() {
-        return Err("配置必须是对象类型".to_string().into());
+        return Err("Configuration must be a JSON object".to_string().into());
     }
 
     Ok(())

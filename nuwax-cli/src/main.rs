@@ -13,18 +13,18 @@ use rust_i18n::set_locale;
 use tracing::{error, info, warn};
 
 /// 检测并设置语言
-fn detect_and_set_language(_cli: &Cli) {
+fn detect_and_set_language() {
     // CLI logs and messages are intentionally fixed to English.
     set_locale("en");
 }
 
 #[tokio::main]
 async fn main() {
+    // Set locale before parsing CLI args so clap help/metadata is also in English.
+    detect_and_set_language();
+
     // 解析命令行参数
     let cli = Cli::parse();
-
-    // 设置语言
-    detect_and_set_language(&cli);
 
     // 检测环境并显示提示
     let environment = Environment::from_env();

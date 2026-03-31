@@ -825,7 +825,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     // 基于在线架构与模板生成差异SQL
     info!("📊 Generating SQL differences based on online schema...");
-    let diff_result = generate_live_schema_diff(&executor, &new_sql_content, "目标版本")
+    let diff_result = generate_live_schema_diff(&executor, &new_sql_content, "target version")
         .await
         .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?;
 

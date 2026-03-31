@@ -149,7 +149,7 @@ impl EnvManager {
         let path = self
             .file_path
             .as_ref()
-            .context("文件路径未设置，无法保存")?;
+            .context("File path is not set; cannot save .env changes")?;
         let mut output = String::new();
 
         for (i, line_type) in self.lines.iter().enumerate() {

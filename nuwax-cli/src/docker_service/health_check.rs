@@ -578,7 +578,7 @@ impl HealthChecker {
                         };
 
                         debug!(
-                            "📦 添加容器: {} (状态: {:?}, 一次性: {})",
+                            "📦 Added container: {} (status: {:?}, oneshot: {})",
                             container.name, container.status, is_oneshot
                         );
                         report.add_container(container);
@@ -803,7 +803,7 @@ warn!("Bollard failed to connect to Docker: {error}", error = e.to_string());
                     };
 
                 debug!(
-                    "🔍 路径比较: 容器标签路径={}, 我们的绝对路径={}",
+                    "🔍 Path comparison: container label path={}, local absolute path={}",
                     label_config_files, compose_file_absolute
                 );
 

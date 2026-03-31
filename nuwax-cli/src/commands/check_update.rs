@@ -126,7 +126,7 @@ fn convert_tauri_to_github_release(tauri_response: TauriUpdaterResponse) -> GitH
                 .to_string();
 
             debug!(
-                "转换平台资产: platform={}, name={}, url={}",
+                "Converting platform asset: platform={}, name={}, url={}",
                 platform, name, info.url
             );
 

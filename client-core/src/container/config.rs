@@ -40,11 +40,11 @@ impl DockerManager {
         let compose_config = if compose_file.exists() {
             Some(load_compose_config_with_env(&compose_file, &env_file)?)
         } else {
-            error!("compose文件不存在");
+            error!("docker-compose file does not exist");
             None
         };
         if compose_config.is_none() {
-            info!("未加载到compose配置,可能是第一次部署,docker目录不存在");
+            info!("Compose configuration not loaded; this may be the first deployment and docker directory is missing");
         }
 
         Ok(Self {

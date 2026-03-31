@@ -2,7 +2,7 @@
 name = "nuwax-cli"
 version = "1.0.77"
 edition = "2024"
-description = "Docker 服务管理和升级工具"
+description = "Docker service management and upgrade CLI"
 authors = ["soddygo"]
 license = "MIT OR Apache-2.0"
 homepage = "https://nuwax.com/"

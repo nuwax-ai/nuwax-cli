@@ -35,7 +35,7 @@ pub mod metadata {
         pub const CLI_FULL_NAME: &str = "Nuwax Cli ent CLI";
 
         /// 项目详细描述（比 Cargo.toml 中的描述更详细）
-        pub const DESCRIPTION_LONG: &str = "一个自动化的 Docker 服务管理与升级平台客户端，支持 Docker Compose 服务的集中管理、自动备份、智能升级和运维监控";
+        pub const DESCRIPTION_LONG: &str = "An automated Docker service management and upgrade platform client, with centralized Docker Compose management, automatic backups, smart upgrades, and operations monitoring.";
     }
 
     /// 项目关键词
