@@ -18,17 +18,17 @@ pub struct MountInfo {
 impl DockerManager {
     /// 确保所有宿主机挂载目录存在
     pub async fn ensure_host_volumes_exist(&self) -> Result<()> {
-        info!("🔍 检查并创建宿主机挂载目录...");
+        info!("🔍 Checking and creating host mount directories...");
 
         let compose_config = self.load_compose_config()?;
         let mount_directories = self.extract_mount_directories(&compose_config)?;
 
         if mount_directories.is_empty() {
-            info!("✅ 未发现需要创建的宿主机挂载目录");
+            info!("✅ No host mount directories need to be created");
             return Ok(());
         }
 
-        info!("📁 发现 {} 个需要检查的挂载目录", mount_directories.len());
+        info!("📁 Found {} mount directories to verify", mount_directories.len());
 
         for mount_info in mount_directories {
             if let Some(host_path) = &mount_info.host_path {
@@ -38,7 +38,7 @@ impl DockerManager {
             }
         }
 
-        info!("✅ 宿主机挂载目录检查完成");
+        info!("✅ Host mount directory verification completed");
         Ok(())
     }
 
@@ -79,7 +79,7 @@ impl DockerManager {
                             let normalized_host_path = match self.normalize_path(host_path) {
                                 Ok(path) => path,
                                 Err(e) => {
-                                    warn!("路径规范化失败: {}", e);
+                                    warn!("Path normalization failed: {}", e);
                                     return None;
                                 }
                             };
@@ -123,7 +123,7 @@ impl DockerManager {
                         let normalized_source = match self.normalize_path(source) {
                             Ok(path) => path,
                             Err(e) => {
-                                warn!("路径规范化失败: {}", e);
+                                warn!("Path normalization failed: {}", e);
                                 return None;
                             }
                         };
@@ -180,10 +180,10 @@ impl DockerManager {
 
         if path.exists() {
             if path.is_dir() {
-                debug!("✅ 目录已存在: {}", path.display());
+                debug!("✅ Directory already exists: {}", path.display());
                 return Ok(());
             } else {
-                debug!("✅ 文件已存在: {}", path.display());
+                debug!("✅ File already exists: {}", path.display());
                 return Ok(());
             }
         }
@@ -202,11 +202,11 @@ impl DockerManager {
         if let Some(dir_path) = dir_to_create {
             match std::fs::create_dir_all(dir_path) {
                 Ok(_) => {
-                    info!("📂 创建目录: {}", dir_path.display());
+                    info!("📂 Creating directory: {}", dir_path.display());
                     Ok(())
                 }
                 Err(e) => {
-                    let error_msg = format!("创建目录失败 {}: {}", dir_path.display(), e);
+                    let error_msg = format!("Failed to create directory {}: {}", dir_path.display(), e);
                     warn!("❌ {}", error_msg);
                     Err(DuckError::Docker(error_msg).into())
                 }

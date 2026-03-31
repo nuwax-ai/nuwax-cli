@@ -4,12 +4,12 @@
 
 use crate::container::environment::{HostOs, PathFormat};
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// 路径处理错误
 #[derive(Debug, thiserror::Error)]
 pub enum PathUtilsError {
-    #[error("路径处理错误: {0}")]
+    #[error("Path processing error: {0}")]
     InvalidPath(String),
 }
 
@@ -35,11 +35,11 @@ impl PathProcessor {
         let path = input_path.trim();
 
         if path.is_empty() {
-            return Err(PathUtilsError::InvalidPath("路径不能为空".to_string()));
+            return Err(PathUtilsError::InvalidPath("Path cannot be empty".to_string()));
         }
 
         debug!(
-            "🔍 规范化路径: '{}' (当前环境: {:?})",
+            "🔍 Normalizing path: '{}' (current environment: {:?})",
             path, self.path_format
         );
 
@@ -53,7 +53,7 @@ impl PathProcessor {
             PathFormat::Posix => self.to_posix_format(&cleaned_path),
         };
 
-        debug!("✅ 路径规范化完成: '{}'", formatted_path);
+        debug!("✅ Path normalization complete: '{}'", formatted_path);
         Ok(formatted_path)
     }
 

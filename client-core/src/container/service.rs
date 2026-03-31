@@ -10,16 +10,16 @@ use tracing::{debug, error, info, warn};
 impl DockerManager {
     /// 启动所有服务
     pub async fn start_services(&self) -> Result<()> {
-        info!("🚀 开始启动Docker服务...");
+        info!("🚀 Starting Docker services...");
 
         // 跳过环境先决条件检查，避免 Docker 命令导致的高磁盘 IO
         // info!("📋 步骤1: 检查环境先决条件...");
         // self.check_prerequisites().await?;
 
-        info!("📁 步骤1: 检查并创建宿主机挂载目录...");
+        info!("📁 Step 1: Check and create host mount directories...");
         self.ensure_host_volumes_exist().await?;
 
-        info!("🎯 步骤2: 执行docker-compose up命令...");
+        info!("🎯 Step 2: Run docker-compose up...");
         // let output = self.run_compose_command(&["up", "-d", "--pull", "always"]).await?;
         let output = self.run_compose_command(&["up", "-d"]).await?;
 
@@ -29,20 +29,20 @@ impl DockerManager {
             let exit_code = output.status.code().unwrap_or(-1);
 
             let error_msg = format!(
-                "启动服务失败 (退出码: {exit_code}):\n标准错误: {stderr}\n标准输出: {stdout}"
+                "Failed to start services (exit code: {exit_code}):\nstderr: {stderr}\nstdout: {stdout}"
             );
 
-            error!("❌ 启动服务失败详情: {}", error_msg);
+            error!("❌ Service startup failure details: {}", error_msg);
             return Err(anyhow::anyhow!(error_msg));
         }
 
-        info!("✅ docker-compose up命令执行成功");
+        info!("✅ docker-compose up completed successfully");
 
         // 等待服务启动并验证状态
-        info!("⏳ 步骤3: 等待服务启动并验证状态...");
+        info!("⏳ Step 3: Wait for services and verify status...");
         self.verify_services_started(None).await?;
 
-        info!("🎉 所有服务启动完成!");
+        info!("🎉 All services started!");
         Ok(())
     }
 
@@ -59,7 +59,7 @@ impl DockerManager {
             let exit_code = output.status.code().unwrap_or(-1);
 
             let error_msg = format!(
-                "停止服务失败 (退出码: {exit_code}):\n标准错误: {stderr}\n标准输出: {stdout}"
+                "Failed to stop services (exit code: {exit_code}):\nstderr: {stderr}\nstdout: {stdout}"
             );
 
             error!("{}", error_msg);
@@ -89,7 +89,7 @@ impl DockerManager {
             let exit_code = output.status.code().unwrap_or(-1);
 
             let error_msg = format!(
-                "停止服务 {service_name} 失败 (退出码: {exit_code}):\n标准错误: {stderr}\n标准输出: {stdout}"
+                "Failed to stop service {service_name} (exit code: {exit_code}):\nstderr: {stderr}\nstdout: {stdout}"
             );
 
             error!("{}", error_msg);
@@ -104,7 +104,7 @@ impl DockerManager {
             let exit_code = output.status.code().unwrap_or(-1);
 
             let error_msg = format!(
-                "启动服务 {service_name} 失败 (退出码: {exit_code}):\n标准错误: {stderr}\n标准输出: {stdout}"
+                "Failed to start service {service_name} (exit code: {exit_code}):\nstderr: {stderr}\nstdout: {stdout}"
             );
 
             error!("{}", error_msg);
@@ -116,15 +116,15 @@ impl DockerManager {
 
     /// 获取服务状态 - 使用 ducker 库实现，只返回docker-compose中定义的服务
     pub async fn get_services_status(&self) -> Result<Vec<ServiceInfo>> {
-        info!("使用 ducker 库获取容器状态...");
+        info!("Using ducker library to query container status...");
 
         // 1. 获取docker-compose.yml中定义的服务名称
         let compose_services = self.get_compose_service_names().await?;
-        info!("docker-compose.yml 中定义的服务: {:?}", compose_services);
+        info!("Services defined in docker-compose.yml: {:?}", compose_services);
 
         // 2. 获取所有容器信息
         let containers = self.get_all_containers_with_ducker().await?;
-        info!("系统中发现 {} 个容器", containers.len());
+        info!("Discovered {} containers in the system", containers.len());
 
         // 3. 为每个compose服务收集匹配的容器
         let mut service_containers: HashMap<String, Vec<ServiceInfo>> = HashMap::new();
@@ -176,14 +176,14 @@ impl DockerManager {
                 final_services.push(ServiceInfo {
                     name: service_name.clone(),
                     status: ServiceStatus::Stopped,
-                    image: "未启动".to_string(),
+                    image: "Not started".to_string(),
                     ports: Vec::new(),
                 });
             }
         }
 
         info!(
-            "匹配到 {}/{} 个compose服务容器",
+            "Matched {}/{} compose service containers",
             compose_services_found.len(),
             compose_services.len()
         );
@@ -196,7 +196,7 @@ impl DockerManager {
         // 跳过环境先决条件检查，避免 Docker 命令导致的高磁盘 IO
         // self.check_prerequisites().await?;
 
-        info!("使用 ducker 库获取所有容器状态...");
+        info!("Using ducker library to query all container statuses...");
 
         // 获取所有容器信息
         let containers = self.get_all_containers_with_ducker().await?;
@@ -216,17 +216,17 @@ impl DockerManager {
         {
             Ok(docker) => match DockerContainer::list(&docker).await {
                 Ok(containers) => {
-                    info!("ducker 成功获取到 {} 个容器", containers.len());
+                    info!("ducker fetched {} containers successfully", containers.len());
                     Ok(containers)
                 }
                 Err(e) => {
-                    error!("ducker 获取容器列表失败: {}", e);
-                    Err(anyhow::anyhow!("获取容器列表失败: {e}"))
+                    error!("ducker failed to list containers: {}", e);
+                    Err(anyhow::anyhow!("Failed to list containers: {e}"))
                 }
             },
             Err(e) => {
-                error!("ducker 连接 Docker 失败: {}", e);
-                Err(anyhow::anyhow!("连接 Docker 失败: {e}"))
+                error!("ducker failed to connect to Docker: {}", e);
+                Err(anyhow::anyhow!("Failed to connect to Docker: {e}"))
             }
         }
     }
@@ -353,7 +353,7 @@ impl DockerManager {
         let services = self.get_services_status().await?;
 
         if services.is_empty() {
-            return Err(anyhow::anyhow!("没有找到任何服务"));
+            return Err(anyhow::anyhow!("No services found"));
         }
 
         let mut unhealthy_services = Vec::new();
@@ -365,7 +365,7 @@ impl DockerManager {
 
         if !unhealthy_services.is_empty() {
             return Err(anyhow::anyhow!(
-                "部分服务未在运行: {}",
+                "Some services are not running: {}",
                 unhealthy_services.join(", ")
             ));
         }
@@ -385,23 +385,23 @@ impl DockerManager {
         let max_attempts = max_wait_time.as_secs() / check_interval.as_secs();
 
         info!(
-            "🔍 开始验证服务启动状态 (超时: {}秒, 检查间隔: {}秒)",
+            "🔍 Verifying service startup status (timeout: {}s, interval: {}s)",
             max_wait_time.as_secs(),
             check_interval.as_secs()
         );
 
         for attempt in 1..=max_attempts {
-            info!("⏳ 第 {}/{} 次检查服务状态...", attempt, max_attempts);
+            info!("⏳ Service status check {}/{}...", attempt, max_attempts);
 
             // 获取当前服务状态
             match self.get_services_status().await {
                 Ok(services) => {
                     if services.is_empty() {
-                        info!("⚠️ 没有找到任何服务，可能compose文件没有定义服务");
+                        info!("⚠️ No services found; compose file may not define services");
                         return Ok(()); // 允许空服务情况
                     }
 
-                    info!("📊 发现 {} 个服务，正在检查状态...", services.len());
+                    info!("📊 Found {} services; checking states...", services.len());
 
                     // 检查是否有必须运行的服务
                     let mut failed_services = Vec::new();
@@ -413,7 +413,7 @@ impl DockerManager {
                             ServiceStatus::Running => {
                                 // 服务正在运行，很好
                                 running_services.push(service.name.clone());
-                                debug!("服务 {} 运行正常", service.name);
+                                debug!("Service {} is running normally", service.name);
                             }
                             ServiceStatus::Stopped => {
                                 // 检查这是否是一次性任务服务
@@ -422,7 +422,7 @@ impl DockerManager {
                                     .await
                                     .unwrap_or(false)
                                 {
-                                    debug!("服务 {} 是一次性任务，已正常退出", service.name);
+                                    debug!("Service {} is a one-shot task and exited normally", service.name);
                                 } else {
                                     failed_services.push(service.name.clone());
                                 }
@@ -441,31 +441,31 @@ impl DockerManager {
 
                     // 显示当前状态
                     if !running_services.is_empty() {
-                        info!("✅ 运行中的服务: {}", running_services.join(", "));
+                        info!("✅ Running services: {}", running_services.join(", "));
                     }
                     if !pending_services.is_empty() {
-                        info!("⏳ 等待启动的服务: {}", pending_services.join(", "));
+                        info!("⏳ Pending services: {}", pending_services.join(", "));
                     }
                     if !failed_services.is_empty() {
-                        info!("❌ 启动失败的服务: {}", failed_services.join(", "));
+                        info!("❌ Failed services: {}", failed_services.join(", "));
                     }
 
                     // 如果没有失败的服务且没有待定的服务，说明启动成功
                     if failed_services.is_empty() && pending_services.is_empty() {
-                        info!("🎉 所有服务启动验证成功！");
-                        tracing::info!("所有服务启动验证成功");
+                        info!("🎉 Service startup verification passed!");
+                        tracing::info!("Service startup verification passed");
                         return Ok(());
                     }
 
                     // 如果有失败的服务，记录但继续等待（可能需要更多时间）
                     if !failed_services.is_empty() {
-                        warn!("⚠️ 服务启动失败: {}", failed_services.join(", "));
-                        tracing::warn!("服务启动失败: {}", failed_services.join(", "));
+                        warn!("⚠️ Service startup failed: {}", failed_services.join(", "));
+                        tracing::warn!("Service startup failed: {}", failed_services.join(", "));
                     }
 
                     if !pending_services.is_empty() {
-                        info!("⏳ 继续等待服务启动: {}", pending_services.join(", "));
-                        tracing::debug!("等待服务启动: {}", pending_services.join(", "));
+                        info!("⏳ Continuing to wait for services: {}", pending_services.join(", "));
+                        tracing::debug!("Waiting for services to start: {}", pending_services.join(", "));
                     }
 
                     // 如果是最后一次尝试，返回错误
@@ -473,7 +473,7 @@ impl DockerManager {
                         let mut error_msg = String::new();
                         if !failed_services.is_empty() {
                             error_msg.push_str(&format!(
-                                "启动失败的服务: {}",
+                                "Failed services: {}",
                                 failed_services.join(", ")
                             ));
                         }
@@ -482,26 +482,26 @@ impl DockerManager {
                                 error_msg.push_str("; ");
                             }
                             error_msg.push_str(&format!(
-                                "启动超时的服务: {}",
+                                "Services timed out during startup: {}",
                                 pending_services.join(", ")
                             ));
                         }
-                        error!("❌ 服务启动验证失败: {}", error_msg);
-                        return Err(anyhow::anyhow!("服务启动验证失败: {error_msg}"));
+                        error!("❌ Service startup verification failed: {}", error_msg);
+                        return Err(anyhow::anyhow!("Service startup verification failed: {error_msg}"));
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️ 获取服务状态失败: {}", e);
+                    warn!("⚠️ Failed to get service status: {}", e);
                     if attempt == max_attempts {
-                        error!("❌ 无法获取服务状态: {}", e);
-                        return Err(anyhow::anyhow!("无法获取服务状态: {e}"));
+                        error!("❌ Unable to get service status: {}", e);
+                        return Err(anyhow::anyhow!("Unable to get service status: {e}"));
                     }
                 }
             }
 
             // 等待下次检查
             if attempt < max_attempts {
-                info!("⏳ 等待 {} 秒后进行下次检查...", check_interval.as_secs());
+                info!("⏳ Waiting {} seconds before the next check...", check_interval.as_secs());
                 sleep(check_interval).await;
             }
         }

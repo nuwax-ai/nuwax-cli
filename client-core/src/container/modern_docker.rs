@@ -23,7 +23,7 @@ impl ModernDockerManager {
     pub async fn new(compose_file: impl AsRef<Path>) -> Result<Self> {
         // 连接到 Docker daemon
         let docker = Docker::connect_with_local_defaults()
-            .map_err(|e| anyhow::anyhow!("连接 Docker 失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Docker: {}", e))?;
 
         let compose_file = compose_file.as_ref().to_path_buf();
         let project_name = compose_file
@@ -42,7 +42,7 @@ impl ModernDockerManager {
 
     /// 启动 Compose 项目中的所有服务
     pub async fn start_compose_services(&self) -> Result<()> {
-        info!("🚀 使用 Bollard API 启动 Compose 服务...");
+        info!("🚀 Starting Compose services using the Bollard API...");
 
         // 1. 解析 docker-compose.yml
         let compose_config = self.parse_compose_file().await?;
@@ -56,7 +56,7 @@ impl ModernDockerManager {
         // 4. 创建并启动容器
         self.create_and_start_containers(&compose_config).await?;
 
-        info!("✅ 所有 Compose 服务启动完成");
+        info!("✅ All Compose services started");
         Ok(())
     }
 
@@ -64,10 +64,10 @@ impl ModernDockerManager {
     async fn parse_compose_file(&self) -> Result<YamlValue> {
         let content = tokio::fs::read_to_string(&self.compose_file)
             .await
-            .map_err(|e| anyhow::anyhow!("读取 compose 文件失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to read compose file: {}", e))?;
 
         let compose: YamlValue = serde_yaml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("解析 compose 文件失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse compose file: {}", e))?;
 
         Ok(compose)
     }
@@ -79,7 +79,7 @@ impl ModernDockerManager {
                 let network_name = network_name.as_str().unwrap();
                 let full_name = format!("{}_{}", self.project_name, network_name);
 
-                info!("📡 创建网络: {}", full_name);
+                info!("📡 Creating network: {}", full_name);
 
                 let options = NetworkCreateRequest {
                     name: full_name.clone(),
@@ -88,13 +88,13 @@ impl ModernDockerManager {
                 };
 
                 match self.docker.create_network(options).await {
-                    Ok(_) => info!("✅ 网络 {} 创建成功", full_name),
+                    Ok(_) => info!("✅ Network {} created successfully", full_name),
                     Err(e) => {
                         // 网络已存在不算错误
                         if e.to_string().contains("already exists") {
-                            debug!("网络 {} 已存在", full_name);
+                            debug!("Network {} already exists", full_name);
                         } else {
-                            return Err(anyhow::anyhow!("创建网络失败: {}", e));
+                            return Err(anyhow::anyhow!("Failed to create network: {}", e));
                         }
                     }
                 }
@@ -109,7 +109,7 @@ impl ModernDockerManager {
             for (service_name, service_config) in services {
                 if let Some(image) = service_config.get("image").and_then(|i| i.as_str()) {
                     info!(
-                        "📥 拉取镜像: {} (服务: {})",
+                        "📥 Pulling image: {} (service: {})",
                         image,
                         service_name.as_str().unwrap()
                     );
@@ -125,12 +125,12 @@ impl ModernDockerManager {
                         match result {
                             Ok(info) => {
                                 if let Some(status) = info.status {
-                                    debug!("镜像下载: {}", status);
+                                    debug!("Image download status: {}", status);
                                 }
                             }
                             Err(e) => {
-                                error!("拉取镜像失败: {}", e);
-                                return Err(anyhow::anyhow!("拉取镜像失败: {}", e));
+                                error!("Failed to pull image: {}", e);
+                                return Err(anyhow::anyhow!("Failed to pull image: {}", e));
                             }
                         }
                     }
@@ -147,7 +147,7 @@ impl ModernDockerManager {
                 let service_name = service_name.as_str().unwrap();
                 let container_name = format!("{}_{}_1", self.project_name, service_name);
 
-                info!("🐳 创建容器: {}", container_name);
+                info!("🐳 Creating container: {}", container_name);
 
                 // 构建容器配置
                 let mut config = ContainerCreateBody::default();
@@ -182,21 +182,21 @@ impl ModernDockerManager {
                     .docker
                     .create_container(Some(options), config)
                     .await
-                    .map_err(|e| anyhow::anyhow!("创建容器失败: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to create container: {}", e))?;
 
                 info!(
-                    "✅ 容器 {} 创建成功, ID: {}",
+                    "✅ Container {} created successfully, ID: {}",
                     container_name, create_result.id
                 );
 
                 // 启动容器
-                info!("▶️ 启动容器: {}", container_name);
+                info!("▶️ Starting container: {}", container_name);
                 self.docker
                     .start_container(&create_result.id, None::<StartContainerOptions>)
                     .await
-                    .map_err(|e| anyhow::anyhow!("启动容器失败: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to start container: {}", e))?;
 
-                info!("✅ 容器 {} 启动成功", container_name);
+                info!("✅ Container {} started successfully", container_name);
             }
         }
         Ok(())
@@ -273,20 +273,20 @@ impl ModernDockerManager {
 
     /// 停止所有服务
     pub async fn stop_compose_services(&self) -> Result<()> {
-        info!("🛑 停止所有 Compose 服务...");
+        info!("🛑 Stopping all Compose services...");
 
         // 获取项目相关的所有容器
         let containers = self
             .docker
             .list_containers(None::<ListContainersOptions>)
             .await
-            .map_err(|e| anyhow::anyhow!("获取容器列表失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to list containers: {}", e))?;
 
         for container in containers {
             if let Some(names) = container.names {
                 for name in names {
                     if name.contains(&self.project_name) {
-                        info!("🛑 停止容器: {}", name);
+                        info!("🛑 Stopping container: {}", name);
                         if let Some(id) = &container.id {
                             let _ = self
                                 .docker
@@ -302,7 +302,7 @@ impl ModernDockerManager {
             }
         }
 
-        info!("✅ 所有 Compose 服务已停止");
+        info!("✅ All Compose services stopped");
         Ok(())
     }
 
@@ -314,7 +314,7 @@ impl ModernDockerManager {
             .docker
             .list_containers(None::<ListContainersOptions>)
             .await
-            .map_err(|e| anyhow::anyhow!("获取容器列表失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to list containers: {}", e))?;
 
         let mut services = Vec::new();
 

@@ -28,7 +28,7 @@ pub enum ComposeCommandType {
 
 /// 检测 docker compose 命令类型（执行命令检测）
 pub async fn detect_compose_command_type() -> ComposeCommandType {
-    info!("🔍 检测 Docker Compose 命令类型...");
+    info!("🔍 Detecting Docker Compose command type...");
 
     // 1. 尝试 docker compose version（新语法）
     let output = Command::new("docker")
@@ -40,19 +40,19 @@ pub async fn detect_compose_command_type() -> ComposeCommandType {
         if output.status.success() {
             let version_info = String::from_utf8_lossy(&output.stdout);
             info!(
-                "   ✅ 使用 docker compose 子命令: {}",
+                "   ✅ Using docker compose subcommand: {}",
                 version_info.trim()
             );
             return ComposeCommandType::DockerComposeSubcommand;
         }
         debug!(
-            "   docker compose version 返回非零退出码: {:?}",
+            "   docker compose version returned non-zero status: {:?}",
             output.status
         );
     }
 
     // 2. 回退到 docker-compose --version（旧语法）
-    debug!("   尝试 docker-compose 独立命令...");
+    debug!("   Trying standalone docker-compose command...");
     let output = Command::new("docker-compose")
         .arg("--version")
         .output()
@@ -62,14 +62,14 @@ pub async fn detect_compose_command_type() -> ComposeCommandType {
         if output.status.success() {
             let version_info = String::from_utf8_lossy(&output.stdout);
             info!(
-                "   ✅ 使用 docker-compose 独立命令: {}",
+                "   ✅ Using standalone docker-compose command: {}",
                 version_info.trim()
             );
             return ComposeCommandType::DockerComposeStandalone;
         }
     }
 
-    warn!("   ⚠️ 未检测到可用的 Docker Compose 命令");
+    warn!("   ⚠️ No available Docker Compose command detected");
     ComposeCommandType::Unknown
 }
 
@@ -79,7 +79,7 @@ pub async fn detect_compose_command_type() -> ComposeCommandType {
 /// 使用此函数存储检测结果，后续无需再次检测。
 pub fn set_compose_command_type(compose_type: ComposeCommandType) {
     if COMPOSE_COMMAND_TYPE.set(compose_type).is_err() {
-        debug!("Compose 命令类型已设置，忽略重复设置");
+        debug!("Compose command type already set; ignoring duplicate initialization");
     }
 }
 
@@ -193,25 +193,25 @@ impl RuntimeEnvironment {
 
 /// 检测当前运行环境
 pub fn detect_runtime_environment() -> RuntimeEnvironment {
-    debug!("🔍 开始检测运行时环境...");
+    debug!("🔍 Detecting runtime environment...");
 
     // 检测主机操作系统
     let host_os = detect_host_os();
-    debug!("   主机 OS: {:?}", host_os);
+    debug!("   Host OS: {:?}", host_os);
 
     // 检测路径格式
     let path_format = detect_path_format(&host_os);
-    debug!("   路径格式: {:?}", path_format);
+    debug!("   Path format: {:?}", path_format);
 
     let env = RuntimeEnvironment {
         host_os,
         path_format,
     };
 
-    info!("✅ 运行环境检测完成: {}", env.summary());
+    info!("✅ Runtime environment detected: {}", env.summary());
 
     if env.needs_special_handling() {
-        info!("⚠️  检测到 Windows 环境，需要提前创建挂载目录");
+        info!("⚠️ Windows environment detected; mount directories should be created early");
     }
 
     env
@@ -230,7 +230,7 @@ fn detect_host_os() -> HostOs {
         "linux" => HostOs::LinuxNative,
         "macos" => HostOs::MacOs,
         other => {
-            debug!("未知操作系统: {}, 假设为 Linux", other);
+            debug!("Unknown operating system: {}, assuming Linux", other);
             HostOs::LinuxNative
         }
     }
@@ -241,19 +241,19 @@ fn is_running_in_wsl() -> bool {
     // 方法 1: 检查 /proc/version
     if let Ok(version) = std::fs::read_to_string("/proc/version") {
         if version.to_lowercase().contains("microsoft") {
-            debug!("检测到 WSL 标记在 /proc/version 中");
+            debug!("Detected WSL marker in /proc/version");
             return true;
         }
     }
 
     // 方法 2: 检查 WSL 环境变量
     if env::var("WSL_DISTRO_NAME").is_ok() {
-        debug!("检测到 WSL_DISTRO_NAME 环境变量");
+        debug!("Detected WSL_DISTRO_NAME environment variable");
         return true;
     }
 
     if env::var("WSLENV").is_ok() {
-        debug!("检测到 WSLENV 环境变量");
+        debug!("Detected WSLENV environment variable");
         return true;
     }
 

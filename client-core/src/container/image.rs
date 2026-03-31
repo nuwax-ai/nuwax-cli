@@ -8,11 +8,11 @@ impl DockerManager {
     pub async fn load_image<P: AsRef<Path>>(&self, image_path: P) -> Result<String> {
         let image_path = image_path.as_ref();
         if !image_path.exists() {
-            return Err(anyhow::anyhow!("镜像文件不存在: {}", image_path.display()));
+            return Err(anyhow::anyhow!("Image file does not exist: {}", image_path.display()));
         }
 
         info!(
-            "执行docker load命令: docker load -i {}",
+            "Running docker load command: docker load -i {}",
             image_path.display()
         );
 
@@ -23,34 +23,34 @@ impl DockerManager {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            warn!("docker load命令执行失败:");
-            warn!("  状态码: {}", output.status);
+            warn!("docker load command failed:");
+            warn!("  Exit status: {}", output.status);
             warn!("  stdout: {}", stdout);
             warn!("  stderr: {}", stderr);
-            return Err(anyhow::anyhow!("加载镜像失败: {stderr}"));
+            return Err(anyhow::anyhow!("Failed to load image: {stderr}"));
         }
 
         // 解析输出来获取实际加载的镜像名称
         let stdout = String::from_utf8_lossy(&output.stdout);
-        debug!("docker load命令成功执行");
-        debug!("完整stdout输出:");
+        debug!("docker load command completed successfully");
+        debug!("Full stdout output:");
         for (i, line) in stdout.lines().enumerate() {
-            debug!("  第{}行: {}", i + 1, line);
+            debug!("  Line {}: {}", i + 1, line);
         }
 
         for line in stdout.lines() {
             if line.starts_with("Loaded image:") {
                 if let Some(image_name) = line.strip_prefix("Loaded image:").map(|s| s.trim()) {
-                    info!("成功解析加载的镜像名称: {}", image_name);
+                    info!("Parsed loaded image name successfully: {}", image_name);
                     return Ok(image_name.to_string());
                 }
             }
         }
 
         // 如果没有找到"Loaded image:"，但命令成功了，返回一个默认值
-        warn!("docker load命令成功但无法解析镜像名称");
-        warn!("完整输出: {}", stdout);
-        Err(anyhow::anyhow!("无法解析docker load输出: {stdout}"))
+        warn!("docker load succeeded but image name could not be parsed");
+        warn!("Full output: {}", stdout);
+        Err(anyhow::anyhow!("Unable to parse docker load output: {stdout}"))
     }
 
     /// 拉取最新镜像
@@ -62,7 +62,7 @@ impl DockerManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("拉取镜像失败: {stderr}"));
+            return Err(anyhow::anyhow!("Failed to pull images: {stderr}"));
         }
 
         Ok(())

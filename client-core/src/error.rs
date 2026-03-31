@@ -2,73 +2,73 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DuckError {
-    #[error("{}", t!("error.config"))]
+    #[error("Configuration parse error: {0}")]
     Config(#[from] toml::de::Error),
 
-    #[error("{}", t!("error.duckdb", details = 0))]
+    #[error("DuckDB error: {0}")]
     DuckDb(String),
 
-    #[error("{}", t!("error.http"))]
+    #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
-    #[error("{}", t!("error.io"))]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("{}", t!("error.uuid"))]
+    #[error("UUID error: {0}")]
     Uuid(#[from] uuid::Error),
 
-    #[error("{}", t!("error.serde"))]
+    #[error("Serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
-    #[error("{}", t!("error.join"))]
+    #[error("Task join error: {0}")]
     Join(#[from] tokio::task::JoinError),
 
-    #[error("{}", t!("error.zip"))]
+    #[error("ZIP error: {0}")]
     Zip(#[from] zip::result::ZipError),
 
-    #[error("{}", t!("error.walkdir"))]
+    #[error("Directory walk error: {0}")]
     WalkDir(#[from] walkdir::Error),
 
-    #[error("{}", t!("error.strip_prefix"))]
+    #[error("Path strip-prefix error: {0}")]
     StripPrefix(#[from] std::path::StripPrefixError),
 
-    #[error("{}", t!("error.template", details = 0))]
+    #[error("Template error: {0}")]
     Template(String),
 
-    #[error("{}", t!("error.docker", details = 0))]
+    #[error("Docker error: {0}")]
     Docker(String),
 
-    #[error("{}", t!("error.backup", details = 0))]
+    #[error("Backup error: {0}")]
     Backup(String),
 
-    #[error("{}", t!("error.upgrade", details = 0))]
+    #[error("Upgrade error: {0}")]
     Upgrade(String),
 
-    #[error("{}", t!("error.client_not_registered"))]
+    #[error("Client is not registered")]
     ClientNotRegistered,
 
-    #[error("{}", t!("error.invalid_response", details = 0))]
+    #[error("Invalid response: {0}")]
     InvalidResponse(String),
 
-    #[error("{}", t!("error.custom", details = 0))]
+    #[error("Custom error: {0}")]
     Custom(String),
 
-    #[error("{}", t!("error.config_not_found"))]
+    #[error("Configuration file not found")]
     ConfigNotFound,
 
-    #[error("{}", t!("error.api", details = 0))]
+    #[error("API error: {0}")]
     Api(String),
 
-    #[error("{}", t!("error.docker_service", details = 0))]
+    #[error("Docker service error: {0}")]
     DockerService(String),
 
-    #[error("{}", t!("error.bad_request", details = 0))]
+    #[error("Bad request: {0}")]
     BadRequest(String),
 
-    #[error("{}", t!("error.version_parse", details = 0))]
+    #[error("Version parse error: {0}")]
     VersionParse(String),
 
-    #[error("{}", t!("error.service_upgrade_parse", details = 0))]
+    #[error("Service upgrade parse error: {0}")]
     ServiceUpgradeParse(String),
 }
 

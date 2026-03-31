@@ -90,15 +90,15 @@ impl DockerManager {
                 .as_secs();
 
             if now - cached.timestamp < 30 {
-                debug!("从缓存中获取docker-compose配置");
+                debug!("Loaded docker-compose config from cache");
                 return Ok(cached.config.clone());
             } else {
-                debug!("缓存已过期，重新加载配置");
+                debug!("Cache expired, reloading config");
             }
         }
 
         // 缓存未命中或已过期，重新加载
-        debug!("重新加载docker-compose配置");
+        debug!("Reloading docker-compose config");
         let compose_config = load_compose_config_with_env(&self.compose_file, &self.env_file)?;
 
         // 更新缓存
@@ -139,7 +139,7 @@ impl DockerManager {
 
             Ok(false)
         } else {
-            Err(anyhow::anyhow!("服务: {service_name} 不存在"))
+            Err(anyhow::anyhow!("Service does not exist: {service_name}"))
         }
     }
 
@@ -151,7 +151,7 @@ impl DockerManager {
         let service = services
             .0
             .get(service_name)
-            .ok_or_else(|| DuckError::Docker(format!("找不到服务: {service_name}")))?;
+            .ok_or_else(|| DuckError::Docker(format!("Service not found: {service_name}")))?;
 
         let restart = service.as_ref().and_then(|s| s.restart.clone());
 
@@ -175,7 +175,7 @@ impl DockerManager {
     pub fn get_compose_project_name(&self) -> String {
         // 优先使用指定的项目名称
         if let Some(ref project_name) = self.project_name {
-            info!("使用指定的项目名称: {}", project_name);
+            info!("Using provided project name: {}", project_name);
             // 设置环境变量，确保docker-compose使用相同的项目名称
             unsafe {
                 std::env::set_var("COMPOSE_PROJECT_NAME", project_name);
@@ -188,7 +188,7 @@ impl DockerManager {
             // 尝试访问name字段，基于docker-compose-types v0.19的结构
             // 注意：这里假设name字段是Option<String>类型
             if let Some(project_name) = compose_config.name {
-                info!("从compose文件读取到项目名称: {}", project_name);
+                info!("Read project name from compose file: {}", project_name);
                 // 设置环境变量，确保docker-compose使用相同的项目名称
                 unsafe {
                     std::env::set_var("COMPOSE_PROJECT_NAME", &project_name);

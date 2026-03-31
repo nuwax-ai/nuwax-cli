@@ -14,7 +14,7 @@ impl DockerManager {
     /// 根据全局检测结果选择使用 `docker compose`（新语法）或 `docker-compose`（旧语法）。
     /// 如果未提前检测，则先检测命令可用性，再执行实际操作。
     pub(crate) async fn run_compose_command(&self, args: &[&str]) -> Result<std::process::Output> {
-        debug!("执行docker-compose命令: {:?}", args);
+        debug!("Running docker-compose command: {:?}", args);
 
         // 获取已检测的命令类型
         let compose_type = get_compose_command_type();
@@ -22,17 +22,17 @@ impl DockerManager {
         match compose_type {
             ComposeCommandType::DockerComposeSubcommand => {
                 // 已确认支持 docker compose 子命令，直接使用
-                debug!("使用已检测的 docker compose 子命令");
+                debug!("Using detected docker compose subcommand");
                 self.run_docker_compose_subcommand_direct(args).await
             }
             ComposeCommandType::DockerComposeStandalone => {
                 // 已确认只有 docker-compose 独立命令，直接使用
-                debug!("使用已检测的 docker-compose 独立命令");
+                debug!("Using detected standalone docker-compose command");
                 self.run_docker_compose_standalone(args).await
             }
             ComposeCommandType::Unknown => {
                 // 未检测，先检测再执行
-                debug!("Compose 命令类型未检测，先检测命令可用性");
+                debug!("Compose command type not detected; probing availability first");
                 self.run_compose_command_with_detection(args).await
             }
         }
@@ -55,22 +55,25 @@ impl DockerManager {
                 set_compose_command_type(compose_type);
             }
         } else {
-            debug!("Compose 命令类型已被其他调用设置: {:?}", compose_type);
+            debug!(
+                "Compose command type was already initialized by another call: {:?}",
+                compose_type
+            );
         }
 
         match compose_type {
             ComposeCommandType::DockerComposeSubcommand => {
-                debug!("使用 docker compose 子命令执行");
+                debug!("Executing via docker compose subcommand");
                 self.run_docker_compose_subcommand_direct(args).await
             }
             ComposeCommandType::DockerComposeStandalone => {
-                debug!("使用 docker-compose 独立命令执行");
+                debug!("Executing via standalone docker-compose command");
                 self.run_docker_compose_standalone(args).await
             }
             ComposeCommandType::Unknown => {
                 // 两种命令都不可用
                 Err(anyhow::anyhow!(
-                    "未找到可用的 Docker Compose 命令，请确保已安装 Docker Compose"
+                    "No available Docker Compose command found; make sure Docker Compose is installed"
                 ))
             }
         }
@@ -92,7 +95,7 @@ impl DockerManager {
         cmd_args.extend(&["-f", &compose_path]);
         cmd_args.extend(args);
 
-        debug!("执行 docker compose 子命令: {:?}", cmd_args);
+        debug!("Executing docker compose subcommand: {:?}", cmd_args);
         self.run_docker_command(&cmd_args).await
     }
 
@@ -109,7 +112,7 @@ impl DockerManager {
         cmd_args.extend(&["-f", &compose_path]);
         cmd_args.extend(args);
 
-        debug!("执行 docker-compose 独立命令: {:?}", cmd_args);
+        debug!("Executing standalone docker-compose command: {:?}", cmd_args);
         let output = Command::new("docker-compose")
             .args(&cmd_args)
             .stdout(Stdio::piped())
@@ -122,7 +125,7 @@ impl DockerManager {
 
     /// 执行 docker 命令
     pub(crate) async fn run_docker_command(&self, args: &[&str]) -> Result<std::process::Output> {
-        debug!("执行docker命令: {:?}", args);
+        debug!("Executing docker command: {:?}", args);
         let output = Command::new("docker")
             .args(args)
             .stdout(Stdio::piped())
