@@ -1,4 +1,4 @@
-.PHONY: build release dev clean test fmt clippy check help
+.PHONY: build release dev install clean test fmt clippy check help
 
 # Default target
 help:
@@ -8,6 +8,7 @@ help:
 	@echo "  make build      - Build nuwax-cli (release)"
 	@echo "  make release    - Build nuwax-cli (release)"
 	@echo "  make dev        - Build nuwax-cli (debug)"
+	@echo "  make install    - Install nuwax-cli to ~/.cargo/bin"
 	@echo "  make clean      - Clean build artifacts"
 	@echo "  make test       - Run all tests"
 	@echo "  make fmt        - Format code"
@@ -21,6 +22,10 @@ build release:
 # Build debug version
 dev:
 	cargo build -p nuwax-cli
+
+# Install nuwax-cli to ~/.cargo/bin
+install:
+	cargo install --path nuwax-cli --force
 
 # Clean build artifacts
 clean:
