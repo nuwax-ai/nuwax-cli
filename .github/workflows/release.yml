@@ -50,8 +50,8 @@ jobs:
           echo "📋 检测到版本: ${VERSION}"
           echo "📋 对应标签: ${TAG_NAME}"
 
-          # 检查这个版本的 tag 是否已经存在于远程
-          if git ls-remote --tags origin | grep -q "refs/tags/${TAG_NAME}$"; then
+          # 检查这个版本的 GitHub Release 是否已经存在
+          if gh release view ${TAG_NAME} &>/dev/null; then
             echo "⚠️ 标签 ${TAG_NAME} 已存在"
             if [[ "${{ github.event.inputs.force_release }}" == "true" ]]; then
               echo "🔧 强制发布模式，将删除现有标签"
