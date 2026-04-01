@@ -3,12 +3,8 @@ name: Release
 
 on:
   push:
-    branches:
-      - main  # 监听 main 分支推送
-    paths:
-      - 'nuwax-cli/Cargo.toml'  # 当 Cargo.toml 版本变化时触发
-      - 'client-core/**'       # 核心代码变化时触发
-      - 'nuwax-cli/src/**'      # CLI代码变化时触发
+    tags:
+      - 'v*'  # 通过 v* 标签触发发布，例如 v1.0.0
   workflow_dispatch:
     inputs:
       force_release:
@@ -41,19 +37,19 @@ jobs:
         with:
           fetch-depth: 0  # 获取完整历史以检查现有 tags
 
-      - name: Read version from Cargo.toml
+      - name: Read version from tag
         id: version_check
         run: |
-          # 从 Cargo.toml 读取版本号
-          VERSION=$(grep '^version = ' nuwax-cli/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          TAG_NAME="v${VERSION}"
-          
+          # 从标签名提取版本号 (例如 v1.0.0 -> 1.0.0)
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG_NAME#v}"
+
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
-          
+
           echo "📋 检测到版本: ${VERSION}"
           echo "📋 对应标签: ${TAG_NAME}"
-          
+
           # 检查这个版本的 tag 是否已经存在
           if git tag -l | grep -q "^${TAG_NAME}$"; then
             echo "⚠️ 标签 ${TAG_NAME} 已存在"

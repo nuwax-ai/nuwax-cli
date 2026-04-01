@@ -14,17 +14,11 @@ name: CLI-UI Build & Release
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'nuwax-cli/**'
-      - 'client-core/**'
-      - 'cli-ui/**'
-      - '.github/workflows/cli-ui-build.yml'
+    tags:
+      - 'cli-ui-v*'  # 通过 cli-ui-v* 标签触发发布，例如 cli-ui-v1.0.0
   pull_request:
     branches: [main]
     paths:
-      - 'duck-cli/**'
-      - 'client-core/**'
       - 'cli-ui/**'
       - '.github/workflows/cli-ui-build.yml'
   workflow_dispatch:
@@ -69,18 +63,18 @@ jobs:
 
       - name: Check CLI-UI version
         id: cli_ui_check
-        if: ${{ github.ref == 'refs/heads/main' }}
+        if: ${{ startsWith(github.ref, 'refs/tags/cli-ui-v') }}
         run: |
-          # 从 cli-ui/src-tauri/tauri.conf.json 读取版本号
-          VERSION=$(cat cli-ui/src-tauri/tauri.conf.json | grep '"version"' | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
-          TAG_NAME="cli-ui-v${VERSION}"
-          
+          # 从标签名提取版本号 (例如 cli-ui-v1.0.0 -> 1.0.0)
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG_NAME#cli-ui-v}"
+
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
-          
+
           echo "📋 检测到 CLI-UI 版本: ${VERSION}"
           echo "📋 对应标签: ${TAG_NAME}"
-          
+
           # 检查这个版本的 tag 是否已经存在
           if git tag -l | grep -q "^${TAG_NAME}$"; then
             echo "⚠️ CLI-UI 标签 ${TAG_NAME} 已存在"
