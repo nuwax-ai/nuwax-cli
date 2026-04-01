@@ -780,11 +780,11 @@ warn!("Bollard failed to connect to Docker: {error}", error = e.to_string());
             // 1. 检查项目名称是否匹配
             if let Some(label_project) = &labels.project {
                 if label_project != project_name {
-                    info!("❌ Container {container} project mismatch: {label} vs {expected}", container = container_name, label = label_project, expected = project_name);
+                    info!("⚠️ Container {container} project mismatch: {label} vs {expected}", container = container_name, label = label_project, expected = project_name);
                     return false;
                 }
             } else {
-                info!("❌ Container {container} missing project label", container = container_name);
+                info!("⚠️ Container {container} missing project label", container = container_name);
                 return false;
             }
 
@@ -836,7 +836,7 @@ warn!("Bollard failed to connect to Docker: {error}", error = e.to_string());
             true
         } else {
             // 如果无法获取标签，说明不是compose容器
-            info!("❌ Container {container} cannot get compose labels", container = container_name);
+            info!("⚠️ Container {container} cannot get compose labels", container = container_name);
             false
         }
     }
@@ -910,7 +910,7 @@ error!("⏰ Health check timeout! elapsed: {elapsed}s", elapsed = elapsed.as_sec
                 if !failed_containers.is_empty() {
                     let failed_names: Vec<&str> =
                         failed_containers.iter().map(|c| c.name.as_str()).collect();
-                    info!("❌ Not started containers: {names}", names = format!("{:?}", failed_names));
+                    info!("⚠️ Not started containers: {names}", names = format!("{:?}", failed_names));
                 }
             }
 

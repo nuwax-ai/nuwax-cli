@@ -447,7 +447,7 @@ impl DockerManager {
                         info!("⏳ Pending services: {}", pending_services.join(", "));
                     }
                     if !failed_services.is_empty() {
-                        info!("❌ Failed services: {}", failed_services.join(", "));
+                        info!("⚠️ Failed services: {}", failed_services.join(", "));
                     }
 
                     // 如果没有失败的服务且没有待定的服务，说明启动成功
