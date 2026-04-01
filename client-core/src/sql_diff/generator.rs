@@ -49,7 +49,7 @@ pub fn generate_schema_diff(
 
             let description = if diff_sql.trim().is_empty() {
                 format!(
-                    "版本 {} 到 {}: 仅有注释或格式变化，无实际架构差异",
+                    "Version {} to {}: only comments or format changes, no actual schema differences",
                     from_version.unwrap_or("unknown"),
                     to_version
                 )
@@ -62,35 +62,35 @@ pub fn generate_schema_diff(
                 // 分析差异类型
                 let mut change_types = Vec::new();
                 if diff_sql.contains("CREATE TABLE") {
-                    change_types.push("新增表");
+                    change_types.push("new tables");
                 }
                 if diff_sql.contains("DROP TABLE") {
-                    change_types.push("删除表");
+                    change_types.push("dropped tables");
                 }
                 if diff_sql.contains("ALTER TABLE") && diff_sql.contains("ADD COLUMN") {
-                    change_types.push("新增列");
+                    change_types.push("new columns");
                 }
                 if diff_sql.contains("ALTER TABLE") && diff_sql.contains("DROP COLUMN") {
-                    change_types.push("删除列");
+                    change_types.push("dropped columns");
                 }
                 if diff_sql.contains("ALTER TABLE") && diff_sql.contains("MODIFY COLUMN") {
-                    change_types.push("修改列");
+                    change_types.push("modified columns");
                 }
                 if diff_sql.contains("ALTER TABLE") && diff_sql.contains("ADD KEY") {
-                    change_types.push("新增索引");
+                    change_types.push("new indexes");
                 }
                 if diff_sql.contains("ALTER TABLE") && diff_sql.contains("DROP KEY") {
-                    change_types.push("删除索引");
+                    change_types.push("dropped indexes");
                 }
 
                 let change_summary = if change_types.is_empty() {
-                    "架构变更".to_string()
+                    "schema changes".to_string()
                 } else {
-                    change_types.join("、")
+                    change_types.join(", ")
                 };
 
                 format!(
-                    "版本 {} 到 {}: {} - 生成 {} 行可执行的差异SQL",
+                    "Version {} to {}: {} - generated {} lines of executable diff SQL",
                     from_version.unwrap_or("unknown"),
                     to_version,
                     change_summary,
@@ -120,7 +120,7 @@ pub async fn generate_live_schema_diff(
     let (live_tables, live_sql) = executor
         .fetch_live_schema_with_sql()
         .await
-        .map_err(|e| DuckError::custom(format!("抓取在线架构失败: {e}")))?;
+        .map_err(|e| DuckError::custom(format!("Failed to fetch online schema: {e}")))?;
 
     let (diff_sql, stats) = generate_mysql_diff(&live_tables, &to_tables)?;
 
@@ -129,9 +129,9 @@ pub async fn generate_live_schema_diff(
     let has_warnings = stats.has_dangerous_operations();
 
     let description = if !stats.has_changes() {
-        format!("在线架构到 {to_version}: 无实际架构差异")
+        format!("Online schema to {to_version}: no actual schema differences")
     } else if !has_executable_sql && has_warnings {
-        format!("在线架构到 {to_version}: 仅包含删除操作警告，无可执行SQL")
+        format!("Online schema to {to_version}: only includes delete operation warnings, no executable SQL")
     } else {
         let executable_lines = diff_sql
             .lines()
@@ -139,7 +139,7 @@ pub async fn generate_live_schema_diff(
             .count();
 
         format!(
-            "在线架构到 {}: {} - 生成 {} 行可执行的差异SQL",
+            "Online schema to {}: {} - generated {} lines of executable diff SQL",
             to_version,
             stats.summary(),
             executable_lines
