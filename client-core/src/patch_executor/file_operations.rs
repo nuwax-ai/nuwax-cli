@@ -27,11 +27,11 @@ impl FileOperationExecutor {
     pub fn new(work_dir: PathBuf) -> Result<Self> {
         if !work_dir.exists() {
             return Err(PatchExecutorError::path_error(format!(
-                "工作目录不存在: {work_dir:?}"
+                "Working directory does not exist: {work_dir:?}"
             )));
         }
 
-        debug!("创建文件操作执行器，工作目录: {:?}", work_dir);
+        debug!("Creating file operation executor, working directory: {:?}", work_dir);
 
         Ok(Self {
             work_dir,
@@ -43,7 +43,7 @@ impl FileOperationExecutor {
     /// 启用备份模式（支持回滚）
     pub fn enable_backup(&mut self) -> Result<()> {
         self.backup_dir = Some(TempDir::new()?);
-        info!("📦 已启用文件操作备份模式");
+        info!("File operation backup mode enabled");
         Ok(())
     }
 
@@ -51,48 +51,48 @@ impl FileOperationExecutor {
     pub fn set_patch_source(&mut self, patch_source: &Path) -> Result<()> {
         if !patch_source.exists() {
             return Err(PatchExecutorError::path_error(format!(
-                "补丁源目录不存在: {patch_source:?}"
+                "Patch source directory does not exist: {patch_source:?}"
             )));
         }
 
         self.patch_source = Some(patch_source.to_owned());
-        debug!("设置补丁源目录: {:?}", patch_source);
+        debug!("Setting patch source directory: {:?}", patch_source);
         Ok(())
     }
 
     /// 执行文件替换操作
     pub async fn replace_files(&self, files: &[String]) -> Result<()> {
-        info!("🔄 开始替换 {} 个文件", files.len());
+        info!("Starting to replace {} files", files.len());
 
         for file_path in files {
             self.replace_single_file(file_path).await?;
         }
 
-        info!("✅ 文件替换完成");
+        info!("File replacement completed");
         Ok(())
     }
 
     /// 执行目录替换操作
     pub async fn replace_directories(&self, directories: &[String]) -> Result<()> {
-        info!("🔄 开始替换 {} 个目录", directories.len());
+        info!("Starting to replace {} directories", directories.len());
 
         for dir_path in directories {
             self.replace_single_directory(dir_path).await?;
         }
 
-        info!("✅ 目录替换完成");
+        info!("Directory replacement completed");
         Ok(())
     }
 
     /// 执行删除操作
     pub async fn delete_items(&self, items: &[String]) -> Result<()> {
-        info!("🗑️ 开始删除 {} 个项目", items.len());
+        info!("Starting to delete {} items", items.len());
 
         for item_path in items {
             self.delete_single_item(item_path).await?;
         }
 
-        info!("✅ 删除操作完成");
+        info!("Delete operation completed");
         Ok(())
     }
 
@@ -111,14 +111,14 @@ impl FileOperationExecutor {
                     fs::create_dir_all(parent).await?;
                 }
                 fs::copy(&target_path, &backup_path).await?;
-                debug!("已备份文件: {} -> {:?}", file_path, backup_path);
+                debug!("Backed up file: {} -> {:?}", file_path, backup_path);
             }
         }
 
         // 原子性替换
         self.atomic_file_replace(&source_path, &target_path).await?;
 
-        info!("📄 已替换文件: {}", file_path);
+        info!("File replaced: {}", file_path);
         Ok(())
     }
 
@@ -134,7 +134,7 @@ impl FileOperationExecutor {
             if target_path.exists() {
                 let backup_path = backup_dir.path().join(dir_path);
                 self.backup_directory(&target_path, &backup_path).await?;
-                debug!("已备份目录: {} -> {:?}", dir_path, backup_path);
+                debug!("Backed up directory: {} -> {:?}", dir_path, backup_path);
             }
         }
 
@@ -146,7 +146,7 @@ impl FileOperationExecutor {
         // 复制新目录
         self.copy_directory(&source_path, &target_path).await?;
 
-        info!("📁 已替换目录: {}", dir_path);
+        info!("Directory replaced: {}", dir_path);
         Ok(())
     }
 
@@ -155,7 +155,7 @@ impl FileOperationExecutor {
         let target_path = self.work_dir.join(item_path);
 
         if !target_path.exists() {
-            warn!("⚠️ 删除目标不存在，跳过: {}", item_path);
+            warn!("Delete target does not exist, skipping: {}", item_path);
             return Ok(());
         }
 
@@ -170,7 +170,7 @@ impl FileOperationExecutor {
                 }
                 fs::copy(&target_path, &backup_path).await?;
             }
-            debug!("已备份待删除项: {} -> {:?}", item_path, backup_path);
+            debug!("Backed up item for deletion: {} -> {:?}", item_path, backup_path);
         }
 
         // 执行删除
@@ -180,7 +180,7 @@ impl FileOperationExecutor {
             fs::remove_file(&target_path).await?;
         }
 
-        info!("🗑️ 已删除: {}", item_path);
+        info!("Deleted: {}", item_path);
         Ok(())
     }
 
@@ -195,7 +195,7 @@ impl FileOperationExecutor {
 
         if !source_path.exists() {
             return Err(PatchExecutorError::path_error(format!(
-                "补丁源文件不存在: {source_path:?}"
+                "Patch source file does not exist: {source_path:?}"
             )));
         }
 
@@ -219,7 +219,7 @@ impl FileOperationExecutor {
         // 原子性移动
         temp_file.persist(target)?;
 
-        debug!("原子性替换完成: {:?} -> {:?}", source, target);
+        debug!("Atomic replacement completed: {:?} -> {:?}", source, target);
         Ok(())
     }
 
@@ -228,9 +228,9 @@ impl FileOperationExecutor {
         let path_clone = path.to_owned();
         tokio::task::spawn_blocking(move || remove_dir_all(&path_clone))
             .await
-            .map_err(|e| PatchExecutorError::custom(format!("删除目录任务失败: {e}")))??;
+            .map_err(|e| PatchExecutorError::custom(format!("Delete directory task failed: {e}")))??;
 
-        debug!("安全删除目录: {:?}", path);
+        debug!("Safely deleted directory: {:?}", path);
         Ok(())
     }
 
@@ -245,13 +245,13 @@ impl FileOperationExecutor {
             // 确保目标目录的父目录存在
             if let Some(parent) = target_clone.parent() {
                 std::fs::create_dir_all(parent)
-                    .map_err(|e| PatchExecutorError::custom(format!("创建目标父目录失败: {e}")))?;
+                    .map_err(|e| PatchExecutorError::custom(format!("Failed to create target parent directory: {e}")))?;
             }
 
             // 如果目标目录不存在，创建它
             if !target_clone.exists() {
                 std::fs::create_dir_all(&target_clone)
-                    .map_err(|e| PatchExecutorError::custom(format!("创建目标目录失败: {e}")))?;
+                    .map_err(|e| PatchExecutorError::custom(format!("Failed to create target directory: {e}")))?;
             }
 
             // 复制源目录内容到目标目录
@@ -260,14 +260,14 @@ impl FileOperationExecutor {
                 target_clone.parent().unwrap_or(&target_clone),
                 &options,
             )
-            .map_err(|e| PatchExecutorError::custom(format!("目录复制失败: {e}")))?;
+            .map_err(|e| PatchExecutorError::custom(format!("Directory copy failed: {e}")))?;
 
             Ok::<(), PatchExecutorError>(())
         })
         .await
-        .map_err(|e| PatchExecutorError::custom(format!("复制目录任务失败: {e}")))??;
+        .map_err(|e| PatchExecutorError::custom(format!("Failed to copy directory task: {e}")))??;
 
-        debug!("复制目录完成: {:?} -> {:?}", source, target);
+        debug!("Directory copied: {:?} -> {:?}", source, target);
         Ok(())
     }
 
@@ -278,14 +278,14 @@ impl FileOperationExecutor {
         }
 
         self.copy_directory(source, backup).await?;
-        debug!("备份目录完成: {:?} -> {:?}", source, backup);
+        debug!("Directory backed up: {:?} -> {:?}", source, backup);
         Ok(())
     }
 
     /// 回滚操作
     pub async fn rollback(&self) -> Result<()> {
         if let Some(backup_dir) = &self.backup_dir {
-            warn!("🔙 开始回滚文件操作...");
+            warn!("Starting file operation rollback...");
 
             // 遍历备份目录，恢复所有文件
             let backup_path = backup_dir.path().to_owned();
@@ -294,7 +294,7 @@ impl FileOperationExecutor {
             tokio::task::spawn_blocking(move || {
                 for entry in WalkDir::new(&backup_path) {
                     let entry = entry.map_err(|e| {
-                        PatchExecutorError::custom(format!("遍历备份目录失败: {e}"))
+                        PatchExecutorError::custom(format!("Failed to traverse backup directory: {e}"))
                     })?;
 
                     let backup_file_path = entry.path();
@@ -302,7 +302,7 @@ impl FileOperationExecutor {
                         // 计算相对路径
                         let relative_path =
                             backup_file_path.strip_prefix(&backup_path).map_err(|e| {
-                                PatchExecutorError::custom(format!("计算相对路径失败: {e}"))
+                                PatchExecutorError::custom(format!("Failed to calculate relative path: {e}"))
                             })?;
 
                         let target_path = work_dir.join(relative_path);
@@ -310,25 +310,25 @@ impl FileOperationExecutor {
                         // 确保目标目录存在
                         if let Some(parent) = target_path.parent() {
                             std::fs::create_dir_all(parent).map_err(|e| {
-                                PatchExecutorError::custom(format!("创建回滚目标目录失败: {e}"))
+                                PatchExecutorError::custom(format!("Failed to create rollback target directory: {e}"))
                             })?;
                         }
 
                         // 恢复文件
                         std::fs::copy(backup_file_path, &target_path).map_err(|e| {
-                            PatchExecutorError::custom(format!("恢复文件失败: {e}"))
+                            PatchExecutorError::custom(format!("Failed to restore file: {e}"))
                         })?;
 
-                        debug!("恢复文件: {:?} -> {:?}", backup_file_path, target_path);
+                        debug!("Restoring file: {:?} -> {:?}", backup_file_path, target_path);
                     }
                 }
 
                 Ok::<(), PatchExecutorError>(())
             })
             .await
-            .map_err(|e| PatchExecutorError::custom(format!("回滚任务失败: {e}")))??;
+            .map_err(|e| PatchExecutorError::custom(format!("Rollback task failed: {e}")))??;
 
-            info!("✅ 文件操作回滚完成");
+            info!("File operation rollback completed");
         } else {
             return Err(PatchExecutorError::BackupNotEnabled);
         }

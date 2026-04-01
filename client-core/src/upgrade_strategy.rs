@@ -119,11 +119,11 @@ impl UpgradeStrategyManager {
 
     /// 确定升级策略（简化版本）
     pub fn determine_strategy(&self) -> Result<UpgradeStrategy> {
-        info!("🔍 开始升级策略决策");
-        info!("   当前版本: {}", self.current_version);
-        info!("   服务器版本: {}", self.manifest.version);
-        info!("   目标架构: {}", self.architecture.as_str());
-        info!("   强制全量: {}", self.force_full);
+        info!("Starting upgrade strategy decision");
+        info!("   Current version: {}", self.current_version);
+        info!("   Server version: {}", self.manifest.version);
+        info!("   Target architecture: {}", self.architecture.as_str());
+        info!("   Force full upgrade: {}", self.force_full);
 
         // 1. 解析当前版本
         let current_ver = self.current_version.parse::<Version>()?;
@@ -133,27 +133,27 @@ impl UpgradeStrategyManager {
         //比较当前版本和服务器版本，判断是全量，还是增量升级，还是不需要升级
         let base_comparison = current_ver.compare_detailed(&server_ver);
 
-        info!("📊 当前版本详细: {:?}", current_ver);
-        info!("📊 服务器版本详细: {:?}", server_ver);
-        info!("📊 基础版本比较结果: {:?}", base_comparison);
+        info!("Current version details: {:?}", current_ver);
+        info!("Server version details: {:?}", server_ver);
+        info!("Base version comparison result: {:?}", base_comparison);
 
         // 3. 强制全量升级
         if self.force_full {
-            info!("🔄 强制执行全量升级");
+            info!("Force executing full upgrade");
             return self.select_full_upgrade_strategy();
         }
         //判断工作目录下,是否有docker目录,如果没有docker目录,则也使用全量升级
         let work_dir = get_docker_work_dir();
         let compose_file_path = get_compose_file_path();
         if !work_dir.exists() || !compose_file_path.exists() {
-            info!("❌ 工作目录下没有docker目录或compose文件，选择全量升级策略");
+            info!("No docker directory or compose file found in working directory, selecting full upgrade strategy");
             return self.select_full_upgrade_strategy();
         }
 
         // 4. 根据版本比较结果决策
         match base_comparison {
             crate::version::VersionComparison::Equal | crate::version::VersionComparison::Newer => {
-                info!("✅ 当前版本已是最新，无需升级");
+                info!("Current version is already latest, no upgrade needed");
                 Ok(UpgradeStrategy::NoUpgrade {
                     target_version: self.manifest.version.clone(),
                 })
@@ -161,16 +161,16 @@ impl UpgradeStrategyManager {
             crate::version::VersionComparison::PatchUpgradeable => {
                 // 可以进行增量升级
                 if !self.has_patch_for_architecture() {
-                    info!("📦 当前架构无增量升级包，选择全量升级策略");
+                    info!("No incremental upgrade package for current architecture, selecting full upgrade strategy");
                     self.select_full_upgrade_strategy()
                 } else {
-                    info!("⚡ 选择增量升级策略");
+                    info!("Selecting incremental upgrade strategy");
                     self.select_patch_upgrade_strategy()
                 }
             }
             crate::version::VersionComparison::FullUpgradeRequired => {
                 // 需要全量升级
-                info!("📦 选择全量升级策略");
+                info!("Selecting full upgrade strategy");
                 self.select_full_upgrade_strategy()
             }
         }
@@ -178,13 +178,13 @@ impl UpgradeStrategyManager {
 
     /// 选择全量升级策略
     pub fn select_full_upgrade_strategy(&self) -> Result<UpgradeStrategy> {
-        debug!("🔍 选择全量升级策略");
+        debug!("Selecting full upgrade strategy");
 
         if let Some(_) = &self.manifest.platforms {
             //使用分架构的全量包
             let platform_info = self.get_platform_package()?;
 
-            debug!("📦 使用架构特定的全量包: {}", &platform_info.url);
+            debug!("Using architecture-specific full package: {}", &platform_info.url);
             Ok(UpgradeStrategy::FullUpgrade {
                 url: platform_info.url.clone(),
                 hash: "external".to_string(), // 平台包通常没有预设哈希
@@ -195,7 +195,7 @@ impl UpgradeStrategyManager {
         } else {
             if let Some(package_info) = &self.manifest.packages {
                 let full_info = &package_info.full;
-                debug!("📦 使用通用的全量包: {}", &full_info.url);
+                debug!("Using generic full package: {}", &full_info.url);
                 Ok(UpgradeStrategy::FullUpgrade {
                     url: full_info.url.clone(),
                     hash: full_info.hash.clone(),
@@ -205,18 +205,18 @@ impl UpgradeStrategyManager {
                 })
             } else {
                 //未找到对应架构的全量升级包，这里主动报错
-                Err(anyhow::anyhow!("未找到对应架构的全量升级包"))
+                Err(anyhow::anyhow!("Full upgrade package for corresponding architecture not found"))
             }
         }
     }
 
     /// 选择增量升级策略
     pub fn select_patch_upgrade_strategy(&self) -> Result<UpgradeStrategy> {
-        debug!("🔍 选择增量升级策略");
+        debug!("Selecting incremental upgrade strategy");
 
         let patch_info = self.get_patch_package()?;
 
-        debug!("📦 使用架构特定的补丁包: {}", &patch_info.url);
+        debug!("Using architecture-specific patch package: {}", &patch_info.url);
         Ok(UpgradeStrategy::PatchUpgrade {
             patch_info: patch_info.clone(),
             target_version: self.manifest.version.clone(),
@@ -231,12 +231,12 @@ impl UpgradeStrategyManager {
                 Architecture::X86_64 => platforms
                     .x86_64
                     .clone()
-                    .ok_or_else(|| anyhow::anyhow!("未找到对应架构的全量升级包")),
+                    .ok_or_else(|| anyhow::anyhow!("Full upgrade package for x86_64 architecture not found")),
                 Architecture::Aarch64 => platforms
                     .aarch64
                     .clone()
-                    .ok_or_else(|| anyhow::anyhow!("未找到对应架构的全量升级包")),
-                Architecture::Unsupported(_) => Err(anyhow::anyhow!("未找到对应架构的全量升级包")),
+                    .ok_or_else(|| anyhow::anyhow!("Full upgrade package for aarch64 architecture not found")),
+                Architecture::Unsupported(_) => Err(anyhow::anyhow!("Full upgrade package for this architecture not found")),
             }
         } else {
             //未找到对应架构的全量升级包，这里主动报错
@@ -250,17 +250,17 @@ impl UpgradeStrategyManager {
             .manifest
             .patch
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("服务器不支持增量升级"))?;
+            .ok_or_else(|| anyhow::anyhow!("Server does not support incremental upgrade"))?;
         match self.architecture {
             Architecture::X86_64 => patch_info
                 .x86_64
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("x86_64架构的补丁包不可用")),
+                .ok_or_else(|| anyhow::anyhow!("Patch package for x86_64 architecture not available")),
             Architecture::Aarch64 => patch_info
                 .aarch64
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("aarch64架构的补丁包不可用")),
-            Architecture::Unsupported(_) => Err(anyhow::anyhow!("不支持的架构")),
+                .ok_or_else(|| anyhow::anyhow!("Patch package for aarch64 architecture not available")),
+            Architecture::Unsupported(_) => Err(anyhow::anyhow!("Unsupported architecture")),
         }
     }
 

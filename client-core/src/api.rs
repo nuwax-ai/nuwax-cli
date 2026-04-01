@@ -82,15 +82,15 @@ impl ApiClient {
         if response.status().is_success() {
             let register_response: RegisterClientResponse = response.json().await?;
             info!(
-                "客户端注册成功，获得客户端ID: {}",
+                "Client registered successfully, client ID: {}",
                 register_response.client_id
             );
             Ok(register_response.client_id)
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            error!("客户端注册失败: {} - {}", status, text);
-            Err(anyhow::anyhow!("注册失败: {status} - {text}"))
+            error!("Client registration failed: {} - {}", status, text);
+            Err(anyhow::anyhow!("Registration failed: {status} - {text}"))
         }
     }
 
@@ -112,8 +112,8 @@ impl ApiClient {
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            error!("获取公告失败: {} - {}", status, text);
-            Err(anyhow::anyhow!("获取公告失败: {status} - {text}"))
+            error!("Failed to get announcements: {} - {}", status, text);
+            Err(anyhow::anyhow!("Failed to get announcements: {status} - {text}"))
         }
     }
 
@@ -144,8 +144,8 @@ impl ApiClient {
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            error!("检查Docker版本失败: {} - {}", status, text);
-            Err(anyhow::anyhow!("检查Docker版本失败: {status} - {text}"))
+            error!("Failed to check Docker version: {} - {}", status, text);
+            Err(anyhow::anyhow!("Failed to check Docker version: {status} - {text}"))
         }
     }
 
@@ -163,8 +163,8 @@ impl ApiClient {
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            error!("获取Docker版本列表失败: {} - {}", status, text);
-            Err(anyhow::anyhow!("获取Docker版本列表失败: {status} - {text}"))
+            error!("Failed to get Docker version list: {} - {}", status, text);
+            Err(anyhow::anyhow!("Failed to get Docker version list: {status} - {text}"))
         }
     }
 
@@ -194,7 +194,7 @@ impl ApiClient {
         save_path: P,
         use_auth: bool,
     ) -> Result<()> {
-        info!("开始下载Docker服务更新包: {}", url);
+        info!("Starting to download Docker service update package: {}", url);
 
         // 根据是否需要认证决定使用哪种客户端
         let response = if use_auth && self.authenticated_client.is_some() {
@@ -203,21 +203,21 @@ impl ApiClient {
             match auth_client.get(url).await {
                 Ok(request_builder) => auth_client.send(request_builder, url).await?,
                 Err(e) => {
-                    warn!("使用AuthenticatedClient失败，回退到普通请求: {}", e);
+                    warn!("AuthenticatedClient failed, falling back to regular request: {}", e);
                     self.build_request(url).send().await?
                 }
             }
         } else {
             // 使用普通客户端（直接URL下载）
-            info!("使用普通HTTP客户端下载");
+            info!("Using regular HTTP client for download");
             self.build_request(url).send().await?
         };
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            error!("下载Docker服务更新包失败: {} - {}", status, text);
-            return Err(anyhow::anyhow!("下载失败: {status} - {text}"));
+            error!("Failed to download Docker service update package: {} - {}", status, text);
+            return Err(anyhow::anyhow!("Download failed: {status} - {text}"));
         }
 
         // 获取文件大小
@@ -225,7 +225,7 @@ impl ApiClient {
 
         if let Some(size) = total_size {
             info!(
-                "Docker服务更新包大小: {} bytes ({:.1} MB)",
+                "Docker service update package size: {} bytes ({:.1} MB)",
                 size,
                 size as f64 / 1024.0 / 1024.0
             );
@@ -259,13 +259,13 @@ impl ApiClient {
                 if let Some(size) = total_size {
                     let percentage = (downloaded as f64 / size as f64 * 100.0) as u32;
                     info!(
-                        "🌐 下载进度: {}% ({:.1}/{:.1} MB)",
+                        "Download progress: {}% ({:.1}/{:.1} MB)",
                         percentage,
                         downloaded as f64 / 1024.0 / 1024.0,
                         size as f64 / 1024.0 / 1024.0
                     );
                 } else {
-                    info!("🌐 已下载: {:.1} MB", downloaded as f64 / 1024.0 / 1024.0);
+                    info!("Downloaded: {:.1} MB", downloaded as f64 / 1024.0 / 1024.0);
                 }
 
                 // 更新上次显示进度的时间
@@ -282,19 +282,19 @@ impl ApiClient {
             let bar_width = 30;
             let progress_bar = "█".repeat(bar_width);
 
-            print!("\r📦 下载进度: [{progress_bar}] 100.0% ({downloaded_mb:.1}/{total_mb:.1} MB)");
+            print!("\rDownload progress: [{progress_bar}] 100.0% ({downloaded_mb:.1}/{total_mb:.1} MB)");
             io::stdout().flush().unwrap();
         } else {
             // 没有总大小信息时，显示最终下载量
             let downloaded_mb = downloaded as f64 / 1024.0 / 1024.0;
-            print!("\r📦 下载进度: {downloaded_mb:.1} MB (完成)");
+            print!("\rDownload progress: {downloaded_mb:.1} MB (completed)");
             io::stdout().flush().unwrap();
         }
 
         // 下载完成，换行并显示完成信息
         println!(); // 换行
         file.flush().await?;
-        info!("Docker服务更新包下载完成: {}", save_path.as_ref().display());
+        info!("Docker service update package download completed: {}", save_path.as_ref().display());
         Ok(())
     }
 
@@ -310,12 +310,12 @@ impl ApiClient {
         let response = self.build_post_request(&url).json(&request).send().await?;
 
         if response.status().is_success() {
-            info!("服务升级历史上报成功");
+            info!("Service upgrade history reported successfully");
             Ok(())
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            warn!("服务升级历史上报失败: {} - {}", status, text);
+            warn!("Failed to report service upgrade history: {} - {}", status, text);
             // 上报失败不影响主流程，只记录警告
             Ok(())
         }
@@ -333,12 +333,12 @@ impl ApiClient {
         let response = self.build_post_request(&url).json(&request).send().await?;
 
         if response.status().is_success() {
-            info!("客户端自升级历史上报成功");
+            info!("Client self-upgrade history reported successfully");
             Ok(())
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            warn!("客户端自升级历史上报失败: {} - {}", status, text);
+            warn!("Failed to report client self-upgrade history: {} - {}", status, text);
             // 上报失败不影响主流程，只记录警告
             Ok(())
         }
@@ -353,12 +353,12 @@ impl ApiClient {
         let response = self.build_post_request(&url).json(&request).send().await?;
 
         if response.status().is_success() {
-            info!("遥测数据上报成功");
+            info!("Telemetry data reported successfully");
             Ok(())
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            warn!("遥测数据上报失败: {} - {}", status, text);
+            warn!("Failed to report telemetry data: {} - {}", status, text);
             // 上报失败不影响主流程，只记录警告
             Ok(())
         }
@@ -374,11 +374,11 @@ impl ApiClient {
     /// 计算文件的SHA256哈希值
     pub async fn calculate_file_hash(file_path: &Path) -> Result<String> {
         if !file_path.exists() {
-            return Err(anyhow::anyhow!("文件不存在: {}", file_path.display()));
+            return Err(anyhow::anyhow!("File does not exist: {}", file_path.display()));
         }
 
         let mut file = File::open(file_path).await.map_err(|e| {
-            DuckError::Custom(format!("无法打开文件 {}: {}", file_path.display(), e))
+            DuckError::Custom(format!("Failed to open file {}: {}", file_path.display(), e))
         })?;
 
         let mut hasher = Sha256::new();
@@ -386,7 +386,7 @@ impl ApiClient {
 
         loop {
             let bytes_read = file.read(&mut buffer).await.map_err(|e| {
-                DuckError::Custom(format!("读取文件失败 {}: {}", file_path.display(), e))
+                DuckError::Custom(format!("Failed to read file {}: {}", file_path.display(), e))
             })?;
 
             if bytes_read == 0 {
@@ -405,7 +405,7 @@ impl ApiClient {
         let hash_file_path = file_path.with_extension("hash");
         let mut hash_file = File::create(&hash_file_path).await.map_err(|e| {
             DuckError::Custom(format!(
-                "无法创建哈希文件 {}: {}",
+                "Failed to create hash file {}: {}",
                 hash_file_path.display(),
                 e
             ))
@@ -413,13 +413,13 @@ impl ApiClient {
 
         hash_file.write_all(hash.as_bytes()).await.map_err(|e| {
             DuckError::Custom(format!(
-                "写入哈希文件失败 {}: {}",
+                "Failed to write hash file {}: {}",
                 hash_file_path.display(),
                 e
             ))
         })?;
 
-        info!("已保存文件哈希: {}", hash_file_path.display());
+        info!("File hash saved: {}", hash_file_path.display());
         Ok(())
     }
 
@@ -433,7 +433,7 @@ impl ApiClient {
 
         let mut hash_file = File::open(&hash_file_path).await.map_err(|e| {
             DuckError::Custom(format!(
-                "无法打开哈希文件 {}: {}",
+                "Failed to open hash file {}: {}",
                 hash_file_path.display(),
                 e
             ))
@@ -456,7 +456,7 @@ impl ApiClient {
 
     /// 验证文件完整性
     pub async fn verify_file_integrity(file_path: &Path, expected_hash: &str) -> Result<bool> {
-        info!("验证文件完整性: {}", file_path.display());
+        info!("Verifying file integrity: {}", file_path.display());
 
         // 计算当前文件的哈希值
         let actual_hash = Self::calculate_file_hash(file_path).await?;
@@ -465,11 +465,11 @@ impl ApiClient {
         let matches = actual_hash.to_lowercase() == expected_hash.to_lowercase();
 
         if matches {
-            info!("✅ 文件完整性验证通过: {}", file_path.display());
+            info!("File integrity verification passed: {}", file_path.display());
         } else {
-            warn!("❌ 文件完整性验证失败: {}", file_path.display());
-            warn!("   期望哈希: {}", expected_hash);
-            warn!("   实际哈希: {}", actual_hash);
+            warn!("File integrity verification failed: {}", file_path.display());
+            warn!("   Expected hash: {}", expected_hash);
+            warn!("   Actual hash: {}", actual_hash);
         }
 
         Ok(matches)
@@ -480,19 +480,19 @@ impl ApiClient {
         // 计算当前文件哈希值并比较
         match Self::calculate_file_hash(file_path).await {
             Ok(actual_hash) => {
-                info!("🧮 计算出的文件哈希: {}", actual_hash);
+                info!("Calculated file hash: {}", actual_hash);
                 if actual_hash.to_lowercase() == remote_hash.to_lowercase() {
-                    info!("✅ 文件哈希匹配，跳过下载");
+                    info!("File hash matches, skipping download");
                     Ok(false)
                 } else {
-                    info!("🔄 文件哈希不匹配，需要下载新版本");
-                    info!("   本地哈希: {}", actual_hash);
-                    info!("   远程哈希: {}", remote_hash);
+                    info!("File hash mismatch, need to download new version");
+                    info!("   Local hash: {}", actual_hash);
+                    info!("   Remote hash: {}", remote_hash);
                     Ok(true)
                 }
             }
             Err(e) => {
-                warn!("💥 计算文件哈希失败: {}，需要重新下载", e);
+                warn!("Failed to calculate file hash: {}, need to re-download", e);
                 Ok(true)
             }
         }
@@ -500,98 +500,98 @@ impl ApiClient {
 
     /// 检查文件是否需要下载（完整版本，包含哈希文件缓存）
     pub async fn should_download_file(&self, file_path: &Path, remote_hash: &str) -> Result<bool> {
-        info!("🔍 开始智能下载决策检查...");
-        info!("   目标文件: {}", file_path.display());
-        info!("   远程哈希: {}", remote_hash);
+        info!("Starting intelligent download decision check...");
+        info!("   Target file: {}", file_path.display());
+        info!("   Remote hash: {}", remote_hash);
 
         // 文件不存在，需要下载
         if !file_path.exists() {
-            info!("📂 文件不存在，需要下载: {}", file_path.display());
+            info!("File does not exist, need to download: {}", file_path.display());
             // 清理可能存在的哈希文件
             let hash_file_path = file_path.with_extension("hash");
             if hash_file_path.exists() {
                 info!(
-                    "🧹 发现孤立的哈希文件，正在清理: {}",
+                    "Found orphaned hash file, cleaning up: {}",
                     hash_file_path.display()
                 );
                 if let Err(e) = tokio::fs::remove_file(&hash_file_path).await {
-                    warn!("⚠️ 清理哈希文件失败: {}", e);
+                    warn!("Failed to clean up hash file: {}", e);
                 }
             }
             return Ok(true);
         }
 
-        info!("🔍 检查本地文件: {}", file_path.display());
+        info!("Checking local file: {}", file_path.display());
 
         // 检查文件大小
         match tokio::fs::metadata(file_path).await {
             Ok(metadata) => {
                 let file_size = metadata.len();
-                info!("📊 本地文件大小: {} bytes", file_size);
+                info!("Local file size: {} bytes", file_size);
                 if file_size == 0 {
-                    warn!("⚠️ 本地文件大小为0，需要重新下载");
+                    warn!("Local file size is 0, need to re-download");
                     return Ok(true);
                 }
             }
             Err(e) => {
-                warn!("⚠️ 无法获取文件元数据: {}，需要重新下载", e);
+                warn!("Failed to get file metadata: {}, need to re-download", e);
                 return Ok(true);
             }
         }
 
         // 尝试读取本地保存的哈希值
         if let Some(saved_hash) = Self::load_file_hash(file_path).await? {
-            info!("📜 找到本地哈希记录: {}", saved_hash);
-            info!("🌐 远程文件哈希值: {}", remote_hash);
+            info!("Found local hash record: {}", saved_hash);
+            info!("Remote file hash: {}", remote_hash);
 
             // 比较保存的哈希值与远程哈希值
             if saved_hash.to_lowercase() == remote_hash.to_lowercase() {
-                info!("✅ 哈希值匹配，验证文件完整性...");
+                info!("Hash matches, verifying file integrity...");
                 // 再验证文件是否真的完整（防止文件被损坏）
                 match Self::verify_file_integrity(file_path, &saved_hash).await {
                     Ok(true) => {
-                        info!("🎯 文件已是最新且完整，跳过下载");
+                        info!("File is already latest and complete, skipping download");
                         return Ok(false);
                     }
                     Ok(false) => {
-                        warn!("💥 文件哈希记录正确但文件已损坏，需要重新下载");
+                        warn!("Hash record is correct but file is corrupted, need to re-download");
                         return Ok(true);
                     }
                     Err(e) => {
-                        warn!("💥 文件完整性验证出错: {}，需要重新下载", e);
+                        warn!("File integrity verification error: {}, need to re-download", e);
                         return Ok(true);
                     }
                 }
             } else {
-                info!("🆕 检测到新版本，需要下载更新");
-                info!("   本地哈希: {}", saved_hash);
-                info!("   远程哈希: {}", remote_hash);
+                info!("New version detected, need to download update");
+                info!("   Local hash: {}", saved_hash);
+                info!("   Remote hash: {}", remote_hash);
                 return Ok(true);
             }
         }
 
         // 没有哈希文件，计算当前文件哈希值并比较
-        info!("📝 未找到哈希记录，计算当前文件哈希值...");
+        info!("No hash record found, calculating current file hash...");
         match Self::calculate_file_hash(file_path).await {
             Ok(actual_hash) => {
-                info!("🧮 计算出的文件哈希: {}", actual_hash);
+                info!("Calculated file hash: {}", actual_hash);
 
                 if actual_hash.to_lowercase() == remote_hash.to_lowercase() {
                     // 文件匹配，保存哈希值以供下次使用
                     if let Err(e) = Self::save_file_hash(file_path, &actual_hash).await {
-                        warn!("⚠️ 保存哈希文件失败: {}", e);
+                        warn!("Failed to save hash file: {}", e);
                     }
-                    info!("💾 文件与远程匹配，已保存哈希记录，跳过下载");
+                    info!("File matches remote, hash record saved, skipping download");
                     Ok(false)
                 } else {
-                    info!("🔄 文件与远程不匹配，需要下载新版本");
-                    info!("   本地哈希: {}", actual_hash);
-                    info!("   远程哈希: {}", remote_hash);
+                    info!("File does not match remote, need to download new version");
+                    info!("   Local hash: {}", actual_hash);
+                    info!("   Remote hash: {}", remote_hash);
                     Ok(true)
                 }
             }
             Err(e) => {
-                warn!("💥 计算文件哈希失败: {}，需要重新下载", e);
+                warn!("Failed to calculate file hash: {}, need to re-download", e);
                 Ok(true)
             }
         }
@@ -609,7 +609,7 @@ impl ApiClient {
             // 先获取原始json文本，解析为serde_json::Value，判断根对象是否有 platforms 字段
             let text = response.text().await?;
             let json_value: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| DuckError::Api(format!("服务清单JSON解析失败: {e}")))?;
+                .map_err(|e| DuckError::Api(format!("Service manifest JSON parsing failed: {e}")))?;
 
             let has_platforms = match &json_value {
                 serde_json::Value::Object(map) => map.contains_key("platforms"),
@@ -620,20 +620,20 @@ impl ApiClient {
                 // 有 platforms 字段，按增强格式解析
                 match serde_json::from_value::<EnhancedServiceManifest>(json_value) {
                     Ok(manifest) => {
-                        info!("📋 成功解析增强服务清单");
+                        info!("Successfully parsed enhanced service manifest");
                         manifest.validate()?; // 进行数据验证
                         Ok(manifest)
                     }
                     Err(e) => {
-                        error!("💥 应用服务升级解析失败 - 增强格式: {}", e);
-                        Err(anyhow::anyhow!("应用服务升级解析失败 - 增强格式: {}", e))
+                        error!("Failed to parse service upgrade - enhanced format: {}", e);
+                        Err(anyhow::anyhow!("Failed to parse service upgrade - enhanced format: {}", e))
                     }
                 }
             } else {
                 // 没有 platforms 字段，按旧格式解析并转换
                 match serde_json::from_value::<ServiceManifest>(json_value) {
                     Ok(old_manifest) => {
-                        info!("📋 成功解析旧版服务清单，转换为增强格式");
+                        info!("Successfully parsed legacy service manifest, converting to enhanced format");
                         let enhanced_manifest = EnhancedServiceManifest {
                             version: old_manifest.version.parse::<Version>()?,
                             release_date: old_manifest.release_date,
@@ -646,16 +646,16 @@ impl ApiClient {
                         Ok(enhanced_manifest)
                     }
                     Err(e) => {
-                        error!("💥 应用服务升级解析失败 - 旧格式: {}", e);
-                        Err(anyhow::anyhow!("应用服务升级解析失败 - 旧格式: {}", e))
+                        error!("Failed to parse service upgrade - legacy format: {}", e);
+                        Err(anyhow::anyhow!("Failed to parse service upgrade - legacy format: {}", e))
                     }
                 }
             }
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            error!("获取增强服务清单失败: {} - {}", status, text);
-            Err(anyhow::anyhow!("获取增强服务清单失败: {status} - {text}"))
+            error!("Failed to get enhanced service manifest: {} - {}", status, text);
+            Err(anyhow::anyhow!("Failed to get enhanced service manifest: {status} - {text}"))
         }
     }
 
@@ -673,63 +673,63 @@ impl ApiClient {
         // 3. 获取哈希文件路径
         let hash_file_path = download_path.with_extension("zip.hash");
 
-        info!("🔍 下载方式判断:");
-        info!("   下载URL: {}", download_url);
+        info!("Determining download method:");
+        info!("   Download URL: {}", download_url);
 
         // 5. 检查文件是否已存在且完整
         let mut should_download = true;
         if download_path.exists() && hash_file_path.exists() {
-            info!("📁 发现已存在的文件: {}", download_path.display());
-            info!("📋 发现哈希文件: {}", hash_file_path.display());
+            info!("Found existing file: {}", download_path.display());
+            info!("Found hash file: {}", hash_file_path.display());
             // 读取保存的哈希和版本信息
             if let Ok(hash_content) = std::fs::read_to_string(&hash_file_path) {
                 let hash_info: DownloadHashInfo = hash_content
                     .parse()
-                    .map_err(|e| DuckError::custom(format!("下载文件的哈希信息格式无效: {e}")))?;
+                    .map_err(|e| DuckError::custom(format!("Invalid hash info format for downloaded file: {e}")))?;
 
-                info!("📊 哈希文件信息:");
-                info!("   保存的哈希: {}", hash_info.hash);
-                info!("   保存的版本: {}", hash_info.version);
-                info!("   保存时间: {}", hash_info.timestamp);
+                info!("Hash file info:");
+                info!("   Saved hash: {}", hash_info.hash);
+                info!("   Saved version: {}", hash_info.version);
+                info!("   Saved timestamp: {}", hash_info.timestamp);
 
                 // 验证本地文件哈希
-                info!("🧮 验证本地文件哈希...");
+                info!("Verifying local file hash...");
                 if let Ok(actual_hash) = Self::calculate_file_hash(download_path).await {
                     if actual_hash.to_lowercase() == hash_info.hash.to_lowercase() {
-                        info!("✅ 文件哈希验证通过，跳过下载");
-                        info!("   本地哈希: {}", actual_hash);
-                        info!("   服务器哈希: {}", hash_info.hash);
+                        info!("File hash verification passed, skipping download");
+                        info!("   Local hash: {}", actual_hash);
+                        info!("   Server hash: {}", hash_info.hash);
                         should_download = false;
                     } else {
-                        warn!("⚠️  文件哈希不匹配，需要重新下载");
-                        warn!("   本地哈希: {}", actual_hash);
-                        warn!("   期望哈希: {}", hash_info.hash);
+                        warn!("File hash mismatch, need to re-download");
+                        warn!("   Local hash: {}", actual_hash);
+                        warn!("   Expected hash: {}", hash_info.hash);
                     }
                 } else {
-                    warn!("⚠️  无法计算本地文件哈希，重新下载");
+                    warn!("Unable to calculate local file hash, re-downloading");
                 }
             } else {
-                warn!("⚠️  无法读取哈希文件，重新下载");
+                warn!("Unable to read hash file, re-downloading");
             }
         } else {
-            info!("⚠️  文件不存在，重新下载");
+            info!("File does not exist, re-downloading");
         }
 
         if !should_download {
-            info!("⏭️  跳过下载，使用现有文件");
+            info!("Skipping download, using existing file");
             return Ok(());
         }
 
         // 6. 确保下载目录存在
         if let Some(parent) = download_path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                return Err(anyhow::anyhow!("创建下载目录失败: {e}"));
+                return Err(anyhow::anyhow!("Failed to create download directory: {e}"));
             }
         }
 
-        info!("📥 开始下载服务更新包...");
-        info!("   最终下载URL: {}", download_url);
-        info!("   目标路径: {}", download_path.display());
+        info!("Starting to download service update package...");
+        info!("   Final download URL: {}", download_url);
+        info!("   Target path: {}", download_path.display());
 
         // 7. 执行下载
         // 使用新的下载器模块
@@ -747,24 +747,24 @@ impl ApiClient {
                 version,
             )
             .await
-            .map_err(|e| DuckError::custom(format!("下载失败: {e}")))?;
+            .map_err(|e| DuckError::custom(format!("Download failed: {e}")))?;
 
-        info!("✅ 文件下载完成");
-        info!("   文件路径: {}", download_path.display());
+        info!("File download completed");
+        info!("   File path: {}", download_path.display());
 
         // 10. 保存哈希文件
-        info!("🧮 计算外链文件的本地哈希...");
+        info!("Calculating local hash of external file...");
         match Self::calculate_file_hash(download_path).await {
             Ok(local_hash) => {
-                info!("📋 外链文件本地哈希: {}", local_hash);
+                info!("External file local hash: {}", local_hash);
                 Self::save_hash_file(&hash_file_path, &local_hash, version).await?;
             }
             Err(e) => {
-                warn!("⚠️  计算外链文件哈希失败: {}", e);
+                warn!("Failed to calculate external file hash: {}", e);
             }
         }
-        info!("🎉 服务更新包下载完成!");
-        info!("   文件位置: {}", download_path.display());
+        info!("Service update package download completed!");
+        info!("   File location: {}", download_path.display());
 
         Ok(())
     }
@@ -796,7 +796,7 @@ impl ApiClient {
 
         tokio::fs::write(hash_file_path, content)
             .await
-            .map_err(|e| DuckError::custom(format!("写入哈希文件失败: {e}")))?;
+            .map_err(|e| DuckError::custom(format!("Failed to write hash file: {e}")))?;
 
         Ok(())
     }
@@ -968,11 +968,11 @@ mod tests {
         // 验收标准：超时和重试机制（内置在reqwest客户端中）
         // 这个在单元测试中难以验证，需要集成测试
 
-        println!("✅ Task 1.5: API 客户端扩展 - 验收标准测试通过");
-        println!("   - ✅ 新的API客户端方法能正常创建");
-        println!("   - ✅ 向后兼容性保持");
-        println!("   - ✅ 错误处理机制完善");
-        println!("   - ✅ 文件操作功能正常");
-        println!("   - ✅ 单元测试覆盖充分");
+        println!("Task 1.5: API Client Extension - Acceptance Criteria Test Passed");
+        println!("   - New API client methods can be created normally");
+        println!("   - Backward compatibility maintained");
+        println!("   - Error handling mechanism is complete");
+        println!("   - File operation functions work normally");
+        println!("   - Unit test coverage is adequate");
     }
 }

@@ -51,7 +51,7 @@ impl PatchExecutor {
     pub fn enable_backup(&mut self) -> Result<(), PatchExecutorError> {
         self.file_executor.enable_backup()?;
         self.backup_enabled = true;
-        info!("📦 已启用补丁执行备份模式");
+        info!("Patch execution backup mode enabled");
         Ok(())
     }
 
@@ -70,7 +70,7 @@ impl PatchExecutor {
     where
         F: Fn(f64) + Send + Sync,
     {
-        info!("🔄 开始应用增量补丁...");
+        info!("Starting to apply incremental patch...");
         progress_callback(0.0);
 
         // 验证前置条件
@@ -84,22 +84,22 @@ impl PatchExecutor {
         {
             Ok(_) => {
                 progress_callback(1.0);
-                info!("✅ 增量补丁应用完成");
+                info!("Incremental patch applied successfully");
                 Ok(())
             }
             Err(e) => {
-                error!("❌ 补丁应用失败: {}", e);
+                error!("Patch application failed: {}", e);
 
                 // 根据错误类型决定是否回滚
                 if e.requires_rollback() && self.backup_enabled {
-                    warn!("🔄 开始自动回滚...");
+                    warn!("Starting automatic rollback...");
                     if let Err(rollback_err) = self.rollback().await {
-                        error!("❌ 回滚失败: {}", rollback_err);
+                        error!("Rollback failed: {}", rollback_err);
                         return Err(PatchExecutorError::rollback_failed(format!(
-                            "原始错误: {e}, 回滚错误: {rollback_err}"
+                            "Original error: {e}, rollback error: {rollback_err}"
                         )));
                     }
-                    info!("✅ 自动回滚完成");
+                    info!("Automatic rollback completed");
                 }
 
                 Err(e)
@@ -112,12 +112,12 @@ impl PatchExecutor {
         &self,
         operations: &PatchOperations,
     ) -> Result<(), PatchExecutorError> {
-        debug!("验证补丁应用前置条件");
+        debug!("Validating patch application preconditions");
 
         // 验证工作目录存在且可写
         if !self.work_dir.exists() {
             return Err(PatchExecutorError::path_error(format!(
-                "工作目录不存在: {:?}",
+                "Working directory does not exist: {:?}",
                 self.work_dir
             )));
         }
@@ -126,10 +126,10 @@ impl PatchExecutor {
         let total_operations = operations.total_operations();
 
         if total_operations == 0 {
-            return Err(PatchExecutorError::custom("补丁操作为空"));
+            return Err(PatchExecutorError::custom("Patch operations are empty"));
         }
 
-        debug!("前置条件验证通过，共 {} 个操作", total_operations);
+        debug!("Preconditions validated, total {} operations", total_operations);
         Ok(())
     }
 
@@ -144,30 +144,30 @@ impl PatchExecutor {
         F: Fn(f64) + Send + Sync,
     {
         // 1. 下载并验证补丁包
-        info!("📥 下载补丁包...");
+        info!("Downloading patch package...");
         let patch_path = self.patch_processor.download_patch(patch_info).await?;
         progress_callback(0.25);
 
         // 2. 验证补丁完整性和签名
-        info!("🔍 验证补丁完整性...");
+        info!("Verifying patch integrity...");
         self.patch_processor
             .verify_patch_integrity(&patch_path, patch_info)
             .await?;
         progress_callback(0.35);
 
         // 3. 解压补丁包
-        info!("📦 解压补丁包...");
+        info!("Extracting patch package...");
         let extracted_path = self.patch_processor.extract_patch(&patch_path).await?;
         progress_callback(0.45);
 
         // 4. 验证解压后的文件结构
-        info!("🔍 验证补丁文件结构...");
+        info!("Verifying patch file structure...");
         self.validate_patch_structure(&extracted_path, operations)
             .await?;
         progress_callback(0.5);
 
         // 5. 应用补丁操作
-        info!("🔧 应用补丁操作...");
+        info!("Applying patch operations...");
         self.apply_patch_operations(&extracted_path, operations, progress_callback)
             .await?;
 
@@ -193,7 +193,7 @@ impl PatchExecutor {
                 let dir_path = extracted_path.join(dir);
                 if !dir_path.exists() || !dir_path.is_dir() {
                     return Err(PatchExecutorError::verification_failed(format!(
-                        "补丁中缺少必需的目录: {dir}"
+                        "Required directory missing in patch: {dir}"
                     )));
                 }
             }
@@ -204,7 +204,7 @@ impl PatchExecutor {
             .validate_extracted_structure(&required_files)
             .await?;
 
-        debug!("补丁文件结构验证通过");
+        debug!("Patch file structure verified");
         Ok(())
     }
 
@@ -233,7 +233,7 @@ impl PatchExecutor {
         if let Some(replace) = &operations.replace {
             // 如果有文件需要替换
             if !replace.files.is_empty() {
-                info!("📄 替换 {} 个文件", &replace.files.len());
+                info!("Replacing {} files", &replace.files.len());
                 self.file_executor.replace_files(&replace.files).await?;
                 completed_operations += replace.files.len();
                 let progress = base_progress
@@ -244,7 +244,7 @@ impl PatchExecutor {
 
             // 执行目录替换
             if !replace.directories.is_empty() {
-                info!("📁 替换 {} 个目录", &replace.directories.len());
+                info!("Replacing {} directories", &replace.directories.len());
                 self.file_executor
                     .replace_directories(&replace.directories)
                     .await?;
@@ -260,7 +260,7 @@ impl PatchExecutor {
         if let Some(delete) = &operations.delete {
             // 如果有文件需要删除
             if !delete.files.is_empty() {
-                info!("🗑️ 删除 {} 个项目", &delete.files.len());
+                info!("Deleting {} items", &delete.files.len());
                 self.file_executor.delete_items(&delete.files).await?;
                 completed_operations += &delete.files.len();
                 let progress = base_progress
@@ -270,7 +270,7 @@ impl PatchExecutor {
             }
             // 如果有目录需要删除
             if !delete.directories.is_empty() {
-                info!("🗑️ 删除 {} 个目录", &delete.directories.len());
+                info!("Deleting {} directories", &delete.directories.len());
                 self.file_executor.delete_items(&delete.directories).await?;
                 completed_operations += &delete.directories.len();
                 let progress = base_progress
@@ -280,7 +280,7 @@ impl PatchExecutor {
             }
         }
 
-        info!("✅ 补丁操作应用完成");
+        info!("Patch operations applied");
         Ok(())
     }
 
@@ -290,9 +290,9 @@ impl PatchExecutor {
             return Err(PatchExecutorError::BackupNotEnabled);
         }
 
-        warn!("🔙 开始回滚补丁操作...");
+        warn!("Starting rollback of patch operations...");
         self.file_executor.rollback().await?;
-        info!("✅ 补丁回滚完成");
+        info!("Patch rollback completed");
         Ok(())
     }
 
@@ -322,7 +322,8 @@ impl PatchExecutor {
         }
         let total = operations.total_operations();
         format!(
-            "补丁操作摘要: 总共 {total} 个操作 (文件替换: {replace_file_count}, 目录替换: {replace_dir_count}, 文件删除: {delete_file_count}, 目录删除: {delete_dir_count})"
+            "Patch operation summary: {} total operations (file replacements: {}, directory replacements: {}, file deletions: {}, directory deletions: {})",
+            total, replace_file_count, replace_dir_count, delete_file_count, delete_dir_count
         )
     }
 
@@ -409,10 +410,10 @@ mod tests {
         };
 
         let summary = executor.get_operation_summary(&operations);
-        assert!(summary.contains("总共 4 个操作"));
-        assert!(summary.contains("文件替换: 2"));
-        assert!(summary.contains("目录替换: 1"));
-        assert!(summary.contains("删除: 1"));
+        assert!(summary.contains("4 total operations"));
+        assert!(summary.contains("file replacements: 2"));
+        assert!(summary.contains("directory replacements: 1"));
+        assert!(summary.contains("deletions: 1"));
     }
 
     #[tokio::test]
