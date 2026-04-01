@@ -345,7 +345,7 @@ impl BackupManager {
             let entry_path = entry.path();
 
             if entry_path.is_symlink() {
-                info!("🔗 删除符号链接: {}", entry_path.display());
+                info!("Removing symbolic link: {}", entry_path.display());
                 tokio::fs::remove_file(&entry_path).await?;
             } else if entry_path.is_dir() {
                 // 递归删除子目录

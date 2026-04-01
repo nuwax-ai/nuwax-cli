@@ -29,13 +29,13 @@ impl DuckDbActor {
 
     /// 运行Actor消息循环
     pub async fn run(mut self, mut receiver: mpsc::Receiver<DbMessage>) {
-        debug!("DuckDB Actor 已启动");
+        debug!("DuckDB Actor started");
 
         while let Some(message) = receiver.recv().await {
             self.handle_message(message).await;
         }
 
-        debug!("DuckDB Actor 已关闭");
+        debug!("DuckDB Actor shut down");
     }
 
     /// 处理数据库消息
@@ -234,7 +234,7 @@ impl DuckDbActor {
 
     /// 初始化数据库表
     fn init_tables(&mut self) -> Result<()> {
-        debug!("正在初始化DuckDB表...");
+        debug!("Initializing DuckDB tables...");
 
         // 读取并执行SQL初始化脚本
         let sql_content = include_str!("../../migrations/init_duckdb.sql");
@@ -253,7 +253,7 @@ impl DuckDbActor {
             []
         )?;
 
-        info!("DuckDB表初始化完成");
+        info!("DuckDB tables initialized");
         Ok(())
     }
 

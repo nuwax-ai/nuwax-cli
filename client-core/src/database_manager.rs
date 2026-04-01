@@ -39,7 +39,7 @@ impl DatabaseManager {
 
         // 测试连接是否可以创建
         let _test_conn = Connection::open(&db_path)?;
-        debug!("数据库文件连接测试成功: {:?}", db_path);
+        debug!("Database file connection test successful: {:?}", db_path);
 
         let manager = Self {
             config: Arc::new(DatabaseConfig {
@@ -58,7 +58,7 @@ impl DatabaseManager {
     pub async fn new_memory() -> Result<Self> {
         // 对于内存数据库，我们需要保持一个共享连接
         let connection = Arc::new(Mutex::new(Connection::open_in_memory()?));
-        debug!("内存数据库连接创建成功");
+        debug!("In-memory database connection created successfully");
 
         let manager = Self {
             config: Arc::new(DatabaseConfig {
@@ -75,9 +75,9 @@ impl DatabaseManager {
 
     /// 显式初始化数据库（只应在 nuwax-cli init 时调用）
     pub async fn init_database(&self) -> Result<()> {
-        debug!("显式初始化数据库表结构...");
+        debug!("Explicitly initializing database table structure...");
         self.initialize_schema().await?;
-        debug!("数据库表结构初始化完成");
+        debug!("Database table structure initialization completed");
         Ok(())
     }
 
@@ -91,7 +91,7 @@ impl DatabaseManager {
             let conn = memory_conn.lock().await;
             Ok(conn.try_clone()?)
         } else {
-            Err(anyhow::anyhow!("数据库配置无效"))
+            Err(anyhow::anyhow!("Invalid database configuration"))
         }
     }
 
@@ -115,7 +115,7 @@ impl DatabaseManager {
                         retry_count += 1;
                         let delay = Duration::from_millis(100 * (1 << retry_count)); // 指数退避
                         warn!(
-                            "数据库读操作失败，{}ms后重试 ({}/{}): {}",
+                            "Database read operation failed, retrying in {}ms ({}/{}): {}",
                             delay.as_millis(),
                             retry_count,
                             MAX_RETRIES,
@@ -123,7 +123,7 @@ impl DatabaseManager {
                         );
                         tokio::time::sleep(delay).await;
                     } else {
-                        error!("数据库读操作最终失败: {}", error_msg);
+                        error!("Database read operation ultimately failed: {}", error_msg);
                         return Err(anyhow::anyhow!(e.to_string()));
                     }
                 }
@@ -152,7 +152,7 @@ impl DatabaseManager {
                             retry_count += 1;
                             let delay = Duration::from_millis(50 * (1 << retry_count)); // 较短的重试间隔
                             warn!(
-                                "内存数据库写操作失败，{}ms后重试 ({}/{}): {}",
+                                "In-memory database write operation failed, retrying in {}ms ({}/{}): {}",
                                 delay.as_millis(),
                                 retry_count,
                                 MAX_RETRIES,
@@ -161,7 +161,7 @@ impl DatabaseManager {
                             drop(conn); // 释放锁
                             tokio::time::sleep(delay).await;
                         } else {
-                            error!("内存数据库写操作最终失败: {}", error_msg);
+                            error!("In-memory database write operation ultimately failed: {}", error_msg);
                             return Err(anyhow::anyhow!(e.to_string()));
                         }
                     }
@@ -177,7 +177,7 @@ impl DatabaseManager {
                             retry_count += 1;
                             let delay = Duration::from_millis(100 * (1 << retry_count)); // 指数退避
                             warn!(
-                                "文件数据库写操作失败，{}ms后重试 ({}/{}): {}",
+                                "File database write operation failed, retrying in {}ms ({}/{}): {}",
                                 delay.as_millis(),
                                 retry_count,
                                 MAX_RETRIES,
@@ -185,7 +185,7 @@ impl DatabaseManager {
                             );
                             tokio::time::sleep(delay).await;
                         } else {
-                            error!("文件数据库写操作最终失败: {}", error_msg);
+                            error!("File database write operation ultimately failed: {}", error_msg);
                             return Err(anyhow::anyhow!(e));
                         }
                     }
@@ -222,7 +222,7 @@ impl DatabaseManager {
 
     /// 初始化数据库表结构
     pub async fn initialize_schema(&self) -> Result<()> {
-        debug!("正在初始化数据库表结构...");
+        debug!("Initializing database table structure...");
 
         // 读取SQL初始化脚本
         let schema_sql = include_str!("../migrations/init_duckdb.sql");
@@ -261,7 +261,7 @@ impl DatabaseManager {
                 );
 
                 if let Err(e) = conn.execute(trimmed, []) {
-                    error!("SQL语句执行失败: {}, 语句: {}", e, trimmed);
+                    error!("SQL statement execution failed: {}, statement: {}", e, trimmed);
                     return Err(e);
                 }
             }
@@ -269,7 +269,7 @@ impl DatabaseManager {
         })
         .await?;
 
-        debug!("数据库表结构初始化完成");
+        debug!("Database table structure initialization completed");
         Ok(())
     }
 
@@ -377,7 +377,7 @@ impl DatabaseManager {
     #[cfg(test)]
     pub async fn debug_execute_sql(&self, sql: &str) -> Result<()> {
         self.write_with_retry(|conn| {
-            debug!("执行调试SQL: {}", sql);
+            debug!("Executing debug SQL: {}", sql);
             conn.execute(sql, [])?;
             Ok(())
         })

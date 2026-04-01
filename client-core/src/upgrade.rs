@@ -72,9 +72,9 @@ impl UpgradeManager {
 
     /// 检查docker应用升级策略
     pub async fn check_for_updates(&self, force_full: bool) -> Result<UpgradeStrategy> {
-        info!("检查服务更新...");
+        info!("Checking for service updates...");
         let current_version = &self.config.get_docker_versions();
-        debug!("当前版本: {}", current_version);
+        debug!("Current version: {}", current_version);
         let enhanced_service_manifest = self.api_client.get_enhanced_service_manifest().await?;
 
         let upgrade_strategy_manager = UpgradeStrategyManager::new(

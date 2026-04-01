@@ -306,7 +306,7 @@ pub mod api {
         // 优先检查自定义 API 服务器地址
         if let Ok(custom_url) = std::env::var(NUWAX_API_BASE_URL_ENV) {
             if is_valid_url(&custom_url) {
-                tracing::info!("使用自定义 API 服务器: {}", custom_url);
+                tracing::info!("Using custom API server: {}", custom_url);
                 return custom_url;
             } else {
                 tracing::warn!(

@@ -29,7 +29,7 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
     let dialect = MySqlDialect {};
 
     for create_table_sql in create_table_statements {
-        debug!("解析 CREATE TABLE 语句: {}", create_table_sql);
+        debug!("Parsing CREATE TABLE statement: {}", create_table_sql);
 
         match Parser::parse_sql(&dialect, &create_table_sql) {
             Ok(statements) => {
@@ -37,7 +37,7 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
                     if let Statement::CreateTable(create_table) = statement {
                         // 移除表名中的反引号，确保表名统一
                         let table_name = ident_to_string(&create_table.name);
-                        debug!("解析表: {}", table_name);
+                        debug!("Parsing table: {}", table_name);
 
                         let mut table_columns = Vec::new();
                         let mut table_indexes = Vec::new();
@@ -86,7 +86,7 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
                 }
             }
             Err(e) => {
-                warn!("解析 SQL 语句失败: {} - 错误: {}", create_table_sql, e);
+                warn!("Failed to parse SQL statement: {} - error: {}", create_table_sql, e);
             }
         }
     }
@@ -94,7 +94,7 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
     // 🔧 新增：解析独立的 CREATE INDEX 语句
     parse_standalone_indexes(sql_content, &mut tables)?;
 
-    info!("成功解析 {} 个表", tables.len());
+    info!("Successfully parsed {} tables", tables.len());
     Ok(tables)
 }
 
@@ -110,7 +110,7 @@ fn extract_create_table_statements_with_regex(sql_content: &str) -> Result<Vec<S
     // 查找 USE 语句
     for (line_idx, line) in lines.iter().enumerate() {
         if use_regex.is_match(line) {
-            debug!("找到 USE 语句在第 {} 行: {}", line_idx + 1, line);
+            debug!("Found USE statement at line {}: {}", line_idx + 1, line);
             start_parsing_from_line = line_idx + 1; // 从下一行开始
             break;
         }
@@ -118,7 +118,7 @@ fn extract_create_table_statements_with_regex(sql_content: &str) -> Result<Vec<S
 
     // 如果没有找到 USE 语句，从头开始解析
     if start_parsing_from_line == 0 {
-        debug!("未找到 USE 语句，从头开始解析整个文件");
+        debug!("No USE statement found, parsing entire file from the beginning");
     }
 
     // 从指定位置开始提取内容
@@ -206,7 +206,7 @@ fn extract_create_table_statements_from_content(content: &str) -> Result<Vec<Str
         statements.push(current_statement.trim().to_string());
     }
 
-    debug!("提取到 {} 个 CREATE TABLE 语句", statements.len());
+    debug!("Extracted {} CREATE TABLE statements", statements.len());
     Ok(statements)
 }
 
@@ -313,22 +313,22 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
 
 /// 格式化默认值（特别处理函数类型的默认值）
 fn format_default_value(expr: &sqlparser::ast::Expr) -> String {
-    debug!("🔍 format_default_value 调用，表达式: {:?}", expr);
+    debug!("format_default_value called, expression: {:?}", expr);
 
     match expr {
         // 处理函数调用，如 CURRENT_TIMESTAMP
         sqlparser::ast::Expr::Function(function) => {
             let function_name = function.name.to_string();
-            debug!("🎯 检测到函数调用: {}", function_name);
+            debug!("Detected function call: {}", function_name);
             // 对于 MySQL 的日期时间函数，不需要加引号，直接返回函数名
             match function_name.to_uppercase().as_str() {
                 "CURRENT_TIMESTAMP" | "NOW" | "CURRENT_DATE" | "CURRENT_TIME"
                 | "LOCALTIMESTAMP" | "LOCALTIME" => {
-                    debug!("✅ 识别为MySQL日期时间函数，返回: {}", function_name);
+                    debug!("Recognized as MySQL datetime function, returning: {}", function_name);
                     function_name
                 }
                 _ => {
-                    debug!("⚠️  其他函数，使用默认格式: {}", function_name);
+                    debug!("Other function, using default format: {}", function_name);
                     // 其他函数保持原有格式
                     format!("{expr}")
                 }
@@ -337,28 +337,28 @@ fn format_default_value(expr: &sqlparser::ast::Expr) -> String {
 
         // 处理各种值类型
         sqlparser::ast::Expr::Value(value_with_span) => {
-            debug!("🔢 检测到值类型: {:?}", value_with_span);
+            debug!("Detected value type: {:?}", value_with_span);
             match &value_with_span.value {
                 sqlparser::ast::Value::SingleQuotedString(s) => {
-                    debug!("💬 字符串值: {} -> '{}'", s, s);
+                    debug!("String value: {} -> '{}'", s, s);
                     format!("'{}'", s)
                 }
                 sqlparser::ast::Value::Number(_, _) => {
-                    debug!("🔢 数字值");
+                    debug!("Numeric value");
                     // 数字类型不需要引号，直接返回表达式格式化结果
                     format!("{expr}")
                 }
                 sqlparser::ast::Value::Null => {
-                    debug!("⭕ NULL值");
+                    debug!("NULL value");
                     "NULL".to_string()
                 }
                 sqlparser::ast::Value::Boolean(b) => {
-                    debug!("🔘 布尔值: {}", b);
+                    debug!("Boolean value: {}", b);
                     b.to_string()
                 }
                 // 处理其他值类型
                 _ => {
-                    debug!("❓ 其他值类型");
+                    debug!("Other value type");
                     format!("{expr}")
                 }
             }
@@ -366,7 +366,7 @@ fn format_default_value(expr: &sqlparser::ast::Expr) -> String {
 
         // 其他情况使用默认格式化
         _ => {
-            debug!("❓ 其他表达式类型");
+            debug!("Other expression type");
             format!("{expr}")
         }
     }
@@ -494,7 +494,7 @@ fn parse_standalone_indexes(
     let index_statements = extract_create_index_statements(sql_content)?;
 
     for index_sql in index_statements {
-        debug!("解析 CREATE INDEX 语句: {}", index_sql);
+        debug!("Parsing CREATE INDEX statement: {}", index_sql);
 
         match Parser::parse_sql(&dialect, &index_sql) {
             Ok(statements) => {
@@ -514,7 +514,7 @@ fn parse_standalone_indexes(
                         let columns = extract_index_columns(&create_index.columns);
 
                         if columns.is_empty() {
-                            warn!("索引 {} 没有列定义，跳过", index_name);
+                            warn!("Index {} has no column definition, skipping", index_name);
                             continue;
                         }
 
@@ -525,7 +525,7 @@ fn parse_standalone_indexes(
                         if let Some(table_def) = tables.get_mut(&table_name) {
                             // 检查是否已经存在同名索引
                             if table_def.indexes.iter().any(|idx| idx.name == index_name) {
-                                debug!("索引 {} 已存在于表 {}，跳过", index_name, table_name);
+                                debug!("Index {} already exists in table {}, skipping", index_name, table_name);
                                 continue;
                             }
 
@@ -548,19 +548,19 @@ fn parse_standalone_indexes(
                                 index_name, table_name, columns, is_unique
                             );
                         } else {
-                            warn!("索引 {} 引用的表 {} 不存在，跳过", index_name, table_name);
+                            warn!("Index {} references table {} which does not exist, skipping", index_name, table_name);
                         }
                     }
                 }
             }
             Err(e) => {
-                warn!("解析 CREATE INDEX 语句失败: {} - 错误: {}", index_sql, e);
+                warn!("Failed to parse CREATE INDEX statement: {} - error: {}", index_sql, e);
             }
         }
     }
 
     if index_count > 0 {
-        info!("成功解析 {} 个独立的 CREATE INDEX 语句", index_count);
+        info!("Successfully parsed {} standalone CREATE INDEX statements", index_count);
     }
 
     Ok(())
@@ -610,6 +610,6 @@ fn extract_create_index_statements(sql_content: &str) -> Result<Vec<String>, Duc
         statements.push(current_statement.trim().to_string());
     }
 
-    debug!("提取到 {} 个 CREATE INDEX 语句", statements.len());
+    debug!("Extracted {} CREATE INDEX statements", statements.len());
     Ok(statements)
 }

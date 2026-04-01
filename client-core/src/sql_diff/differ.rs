@@ -23,7 +23,7 @@ pub fn generate_mysql_diff(
     // 1. 检查新增的表
     for (table_name, table_def) in to_tables {
         if !from_tables.contains_key(table_name) {
-            info!("发现新增表: {}", table_name);
+            info!("Found new table: {}", table_name);
             diff_sql.push(format!("-- 新增表: {table_name}"));
             diff_sql.push(generate_create_table_sql(table_def));
             diff_sql.push("".to_string());
@@ -54,7 +54,7 @@ pub fn generate_mysql_diff(
         if let Some(old_table_def) = from_tables.get(table_name) {
             let (table_diffs, table_stats) = generate_table_diff(old_table_def, new_table_def);
             if !table_diffs.is_empty() {
-                info!("发现表结构变化: {}", table_name);
+                info!("Table structure changes detected: {}", table_name);
                 diff_sql.push(format!("-- 修改表: {table_name}"));
                 diff_sql.extend(table_diffs);
                 diff_sql.push("".to_string());
@@ -82,12 +82,12 @@ pub fn generate_mysql_diff(
     let result = diff_sql.join("\n");
 
     if !stats.has_changes() {
-        info!("没有发现实际的表结构差异");
+        info!("No actual table structure differences found");
         return Ok((String::new(), stats));
     }
 
     if !stats.has_executable_operations() && stats.has_dangerous_operations() {
-        info!("检测到架构差异但仅包含删除操作警告，无可执行SQL");
+        info!("Schema differences detected but only includes delete operation warnings, no executable SQL");
     }
 
     Ok((result, stats))

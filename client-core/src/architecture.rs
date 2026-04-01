@@ -38,7 +38,7 @@ impl Architecture {
     pub fn detect() -> Self {
         let arch_str = std::env::consts::ARCH;
         Self::from_str(arch_str).unwrap_or_else(|_| {
-            warn!("检测到未知架构: {}", arch_str);
+            warn!("Detected unknown architecture: {}", arch_str);
             Self::Unsupported(arch_str.to_string())
         })
     }

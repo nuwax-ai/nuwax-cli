@@ -28,15 +28,15 @@ impl PatchProcessor {
     /// 创建新的补丁处理器
     pub fn new() -> Result<Self> {
         let temp_dir = TempDir::new()
-            .map_err(|e| PatchExecutorError::custom(format!("创建临时目录失败: {e}")))?;
+            .map_err(|e| PatchExecutorError::custom(format!("Failed to create temp directory: {e}")))?;
 
         // 创建带超时的HTTP客户端
         let http_client = Client::builder()
             .timeout(std::time::Duration::from_secs(300)) // 5分钟超时
             .build()
-            .map_err(|e| PatchExecutorError::custom(format!("创建HTTP客户端失败: {e}")))?;
+            .map_err(|e| PatchExecutorError::custom(format!("Failed to create HTTP client: {e}")))?;
 
-        debug!("创建补丁处理器，临时目录: {:?}", temp_dir.path());
+        debug!("Creating patch processor, temp directory: {:?}", temp_dir.path());
 
         Ok(Self {
             temp_dir,
@@ -46,7 +46,7 @@ impl PatchProcessor {
 
     /// 下载补丁包
     pub async fn download_patch(&self, patch_info: &PatchPackageInfo) -> Result<PathBuf> {
-        info!("开始下载补丁包: {}", patch_info.url);
+        info!("Starting to download patch package: {}", patch_info.url);
 
         let patch_path = self.temp_dir.path().join("patch.tar.gz");
 
@@ -56,18 +56,18 @@ impl PatchProcessor {
             .get(&patch_info.url)
             .send()
             .await
-            .map_err(|e| PatchExecutorError::download_failed(format!("HTTP请求失败: {e}")))?;
+            .map_err(|e| PatchExecutorError::download_failed(format!("HTTP request failed: {e}")))?;
 
         if !response.status().is_success() {
             return Err(PatchExecutorError::download_failed(format!(
-                "HTTP状态码错误: {}",
+                "HTTP status code error: {}",
                 response.status()
             )));
         }
 
         // 获取内容长度用于进度显示
         let total_size = response.content_length().unwrap_or(0);
-        debug!("补丁包大小: {} 字节", total_size);
+        debug!("Patch package size: {} bytes", total_size);
 
         // 创建文件并写入数据
         let mut file = fs::File::create(&patch_path).await?;
@@ -78,19 +78,19 @@ impl PatchProcessor {
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result
-                .map_err(|e| PatchExecutorError::download_failed(format!("下载数据块失败: {e}")))?;
+                .map_err(|e| PatchExecutorError::download_failed(format!("Failed to download data chunk: {e}")))?;
 
             file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
 
             if total_size > 0 {
                 let progress = (downloaded as f64 / total_size as f64) * 100.0;
-                debug!("下载进度: {:.1}%", progress);
+                debug!("Download progress: {:.1}%", progress);
             }
         }
 
         file.flush().await?;
-        info!("补丁包下载完成: {:?} ({} 字节)", patch_path, downloaded);
+        info!("Patch package download completed: {:?} ({} bytes)", patch_path, downloaded);
 
         Ok(patch_path)
     }
@@ -101,11 +101,11 @@ impl PatchProcessor {
         patch_path: &Path,
         patch_info: &PatchPackageInfo,
     ) -> Result<()> {
-        info!("验证补丁完整性: {:?}", patch_path);
+        info!("Verifying patch integrity: {:?}", patch_path);
 
         // 1. 验证文件存在
         if !patch_path.exists() {
-            return Err(PatchExecutorError::verification_failed("补丁文件不存在"));
+            return Err(PatchExecutorError::verification_failed("Patch file does not exist"));
         }
 
         // 2. 验证哈希值
@@ -118,13 +118,13 @@ impl PatchProcessor {
             self.verify_signature(patch_path, signature).await?;
         }
 
-        info!("补丁完整性验证通过");
+        info!("Patch integrity verification passed");
         Ok(())
     }
 
     /// 验证文件哈希
     async fn verify_hash(&self, file_path: &Path, expected_hash: &str) -> Result<()> {
-        debug!("验证文件哈希: {:?}", file_path);
+        debug!("Verifying file hash: {:?}", file_path);
 
         // 解析期望的哈希值（格式：sha256:hash_value）
         let expected_hash = if expected_hash.starts_with("sha256:") {
@@ -147,18 +147,18 @@ impl PatchProcessor {
             ));
         }
 
-        debug!("哈希验证通过: {}", actual_hash);
+        debug!("Hash verification passed: {}", actual_hash);
         Ok(())
     }
 
     /// 验证数字签名
     async fn verify_signature(&self, _file_path: &Path, signature: &str) -> Result<()> {
-        debug!("验证数字签名: {}", signature);
+        debug!("Verifying digital signature: {}", signature);
 
         // TODO: 这里应该实现真正的数字签名验证
         // 目前只做基本的格式检查
         if signature.is_empty() {
-            warn!("数字签名为空，跳过验证");
+            warn!("Digital signature is empty, skipping verification");
             return Ok(());
         }
 
@@ -166,7 +166,7 @@ impl PatchProcessor {
         use base64::{Engine as _, engine::general_purpose};
         if general_purpose::STANDARD.decode(signature).is_err() {
             return Err(PatchExecutorError::signature_verification_failed(
-                "签名不是有效的base64格式",
+                "Signature is not a valid base64 format",
             ));
         }
 
@@ -175,13 +175,13 @@ impl PatchProcessor {
         // 2. 使用公钥验证签名
         // 3. 验证证书链
 
-        debug!("数字签名验证通过（简化验证）");
+        debug!("Digital signature verification passed (simplified verification)");
         Ok(())
     }
 
     /// 解压补丁包
     pub async fn extract_patch(&self, patch_path: &Path) -> Result<PathBuf> {
-        info!("解压补丁包: {:?}", patch_path);
+        info!("Extracting patch package: {:?}", patch_path);
 
         let extract_dir = self.temp_dir.path().join("extracted");
         fs::create_dir_all(&extract_dir).await?;
@@ -194,9 +194,9 @@ impl PatchProcessor {
             Self::extract_tar_gz(&patch_path_clone, &extract_dir_clone)
         })
         .await
-        .map_err(|e| PatchExecutorError::extraction_failed(format!("解压任务失败: {e}")))??;
+        .map_err(|e| PatchExecutorError::extraction_failed(format!("Extraction task failed: {e}")))??;
 
-        info!("补丁包解压完成: {:?}", extract_dir);
+        info!("Patch package extracted: {:?}", extract_dir);
         Ok(extract_dir)
     }
 
@@ -209,11 +209,11 @@ impl PatchProcessor {
         // 解压所有文件
         for entry_result in archive.entries()? {
             let mut entry = entry_result
-                .map_err(|e| PatchExecutorError::extraction_failed(format!("读取条目失败: {e}")))?;
+                .map_err(|e| PatchExecutorError::extraction_failed(format!("Failed to read entry: {e}")))?;
 
             // 获取文件路径
             let path = entry.path().map_err(|e| {
-                PatchExecutorError::extraction_failed(format!("获取文件路径失败: {e}"))
+                PatchExecutorError::extraction_failed(format!("Failed to get file path: {e}"))
             })?;
 
             // 将路径转换为PathBuf以避免借用问题
@@ -226,7 +226,7 @@ impl PatchProcessor {
                     .any(|c| c == std::path::Component::ParentDir)
             {
                 return Err(PatchExecutorError::extraction_failed(format!(
-                    "不安全的文件路径: {path_buf:?}"
+                    "Unsafe file path: {path_buf:?}"
                 )));
             }
 
@@ -239,10 +239,10 @@ impl PatchProcessor {
 
             // 解压文件
             entry.unpack(&extract_path).map_err(|e| {
-                PatchExecutorError::extraction_failed(format!("解压文件失败 {path_buf:?}: {e}"))
+                PatchExecutorError::extraction_failed(format!("Failed to unpack file {path_buf:?}: {e}"))
             })?;
 
-            debug!("解压文件: {:?} -> {:?}", path_buf, extract_path);
+            debug!("Extracting file: {:?} -> {:?}", path_buf, extract_path);
         }
 
         Ok(())
@@ -284,12 +284,12 @@ impl PatchProcessor {
             let file_path = extract_dir.join(required_file);
             if !file_path.exists() {
                 return Err(PatchExecutorError::verification_failed(format!(
-                    "必需的文件不存在: {required_file}"
+                    "Required file does not exist: {required_file}"
                 )));
             }
         }
 
-        debug!("解压后文件结构验证通过");
+        debug!("Extracted file structure verification passed");
         Ok(())
     }
 }

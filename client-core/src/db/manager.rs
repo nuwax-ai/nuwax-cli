@@ -58,9 +58,9 @@ impl DuckDbManager {
 
     /// 显式初始化数据库（只应在 nuwax-cli init 时调用）
     pub async fn init_database(&self) -> Result<()> {
-        debug!("显式初始化数据库表...");
+        debug!("Explicitly initializing database tables...");
         self.init_tables().await?;
-        debug!("数据库初始化完成");
+        debug!("Database initialization completed");
         Ok(())
     }
 

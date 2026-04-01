@@ -154,7 +154,7 @@ impl ConfigManager {
 
     /// 初始化缓存（从数据库加载所有配置）
     pub async fn initialize_cache(&self) -> Result<()> {
-        debug!("正在初始化配置缓存...");
+        debug!("Initializing configuration cache...");
 
         let configs = match &self.db {
             DatabaseConnection::DatabaseManager(db) => {
@@ -221,7 +221,7 @@ impl ConfigManager {
             DatabaseConnection::Database(_db) => {
                 // 对于传统的 Database，我们暂时返回空的配置列表
                 // 这是为了保持向后兼容性，避免破坏现有代码
-                warn!("传统数据库连接暂不支持配置管理功能");
+                warn!("Traditional database connection does not support configuration management");
                 Vec::new()
             }
         };
@@ -236,7 +236,7 @@ impl ConfigManager {
         // 标记缓存已初始化
         *self.cache_initialized.write().await = true;
 
-        debug!("配置缓存初始化完成，加载了 {} 个配置项", cache.len());
+        debug!("Configuration cache initialized, loaded {} config items", cache.len());
         Ok(())
     }
 
@@ -258,12 +258,12 @@ impl ConfigManager {
             match &config.value {
                 Value::String(s) => Ok(Some(s.clone())),
                 _ => {
-                    warn!("配置项 {} 不是字符串类型: {:?}", key, config.value);
+                    warn!("Config item {} is not a string type: {:?}", key, config.value);
                     Ok(None)
                 }
             }
         } else {
-            debug!("配置项 {} 不存在", key);
+            debug!("Config item {} does not exist", key);
             Ok(None)
         }
     }
@@ -277,12 +277,12 @@ impl ConfigManager {
             match &config.value {
                 Value::Number(n) => Ok(n.as_f64()),
                 _ => {
-                    warn!("配置项 {} 不是数字类型: {:?}", key, config.value);
+                    warn!("Config item {} is not a numeric type: {:?}", key, config.value);
                     Ok(None)
                 }
             }
         } else {
-            debug!("配置项 {} 不存在", key);
+            debug!("Config item {} does not exist", key);
             Ok(None)
         }
     }
@@ -296,12 +296,12 @@ impl ConfigManager {
             match &config.value {
                 Value::Number(n) => Ok(n.as_i64()),
                 _ => {
-                    warn!("配置项 {} 不是数字类型: {:?}", key, config.value);
+                    warn!("Config item {} is not a numeric type: {:?}", key, config.value);
                     Ok(None)
                 }
             }
         } else {
-            debug!("配置项 {} 不存在", key);
+            debug!("Config item {} does not exist", key);
             Ok(None)
         }
     }
@@ -315,12 +315,12 @@ impl ConfigManager {
             match &config.value {
                 Value::Bool(b) => Ok(Some(*b)),
                 _ => {
-                    warn!("配置项 {} 不是布尔类型: {:?}", key, config.value);
+                    warn!("Config item {} is not a boolean type: {:?}", key, config.value);
                     Ok(None)
                 }
             }
         } else {
-            debug!("配置项 {} 不存在", key);
+            debug!("Config item {} does not exist", key);
             Ok(None)
         }
     }
@@ -334,12 +334,12 @@ impl ConfigManager {
             match &config.value {
                 Value::Object(_) => Ok(Some(config.value.clone())),
                 _ => {
-                    warn!("配置项 {} 不是对象类型: {:?}", key, config.value);
+                    warn!("Config item {} is not an object type: {:?}", key, config.value);
                     Ok(None)
                 }
             }
         } else {
-            debug!("配置项 {} 不存在", key);
+            debug!("Config item {} does not exist", key);
             Ok(None)
         }
     }
@@ -353,12 +353,12 @@ impl ConfigManager {
             match &config.value {
                 Value::Array(arr) => Ok(Some(arr.clone())),
                 _ => {
-                    warn!("配置项 {} 不是数组类型: {:?}", key, config.value);
+                    warn!("Config item {} is not an array type: {:?}", key, config.value);
                     Ok(None)
                 }
             }
         } else {
-            debug!("配置项 {} 不存在", key);
+            debug!("Config item {} does not exist", key);
             Ok(None)
         }
     }
@@ -446,7 +446,7 @@ impl ConfigManager {
             config.value = value;
         }
 
-        debug!("配置项 {} 更新成功", key);
+        debug!("Config item {} updated successfully", key);
         Ok(())
     }
 
@@ -495,7 +495,7 @@ impl ConfigManager {
             }
         }
 
-        debug!("批量配置更新成功");
+        debug!("Batch configuration update successful");
         Ok(())
     }
 
@@ -648,7 +648,7 @@ task.target_version.as_deref().unwrap_or(""),
             Ok(())
         }).await?;
 
-        debug!("自动升级任务 {} 创建成功", task.task_id);
+        debug!("Auto upgrade task {} created successfully", task.task_id);
         Ok(())
     }
 
@@ -678,7 +678,7 @@ task.target_version.as_deref().unwrap_or(""),
             })
             .await?;
 
-        debug!("升级任务 {} 状态更新为: {}", task_id, status);
+        debug!("Upgrade task {} status updated to: {}", task_id, status);
         Ok(())
     }
 

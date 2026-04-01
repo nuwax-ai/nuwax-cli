@@ -60,7 +60,7 @@ impl AuthenticatedClient {
 
     /// 自动注册客户端
     async fn auto_register(&self) -> Result<String> {
-        info!("正在尝试自动注册客户端...");
+        info!("Attempting to auto-register client...");
 
         let request = ClientRegisterRequest {
             os: std::env::consts::OS.to_string(),
@@ -84,20 +84,20 @@ impl AuthenticatedClient {
             let register_response: serde_json::Value = response.json().await?;
             if let Some(client_id) = register_response.get("client_id").and_then(|v| v.as_str()) {
                 let client_id = client_id.to_string();
-                info!("自动注册成功，获得客户端ID: {}", client_id);
+                info!("Auto-registration successful, client ID: {}", client_id);
 
                 // 保存新的client_id
                 self.set_client_id(client_id.clone()).await?;
 
                 Ok(client_id)
             } else {
-                Err(anyhow::anyhow!("注册响应格式无效"))
+                Err(anyhow::anyhow!("Invalid registration response format"))
             }
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            error!("客户端注册失败: {} - {}", status, text);
-            Err(anyhow::anyhow!("注册失败: {status} - {text}"))
+            error!("Client registration failed: {} - {}", status, text);
+            Err(anyhow::anyhow!("Registration failed: {status} - {text}"))
         }
     }
 
@@ -146,12 +146,12 @@ impl AuthenticatedClient {
             && self.is_our_server(original_url)
             && !self.is_register_endpoint(original_url)
         {
-            warn!("API请求认证失败 (401)，尝试自动重新注册...");
+            warn!("API request authentication failed (401), attempting to auto-re-register...");
 
             // 尝试自动注册
             match self.auto_register().await {
                 Ok(new_client_id) => {
-                    info!("自动重新注册成功，客户端ID: {}，重试请求...", new_client_id);
+                    info!("Auto re-registration successful, client ID: {}, retrying request...", new_client_id);
 
                     // 重新从头构建请求，使用新的client_id
                     // 我们需要重新创建请求，因为原来的RequestBuilder已经被消费
@@ -164,8 +164,8 @@ impl AuthenticatedClient {
                     Ok(retry_response)
                 }
                 Err(e) => {
-                    error!("自动重新注册失败: {}", e);
-                    Err(anyhow::anyhow!("认证失败且无法重新注册: {e}"))
+                    error!("Auto re-registration failed: {}", e);
+                    Err(anyhow::anyhow!("Authentication failed and unable to re-register: {e}"))
                 }
             }
         } else {

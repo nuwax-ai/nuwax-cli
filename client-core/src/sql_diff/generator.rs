@@ -16,24 +16,24 @@ pub fn generate_schema_diff(
     match from_sql {
         None => {
             // 初始版本，返回完整的创建脚本
-            info!("生成初始版本 {} 的完整数据库架构", to_version);
-            let description = format!("初始版本 {to_version} 的完整数据库架构");
+            info!("Generating complete database schema for initial version {}", to_version);
+            let description = format!("Complete database schema for initial version {}", to_version);
             Ok((to_sql.to_string(), description))
         }
         Some(from_content) => {
             info!(
-                "开始生成版本 {} 到 {} 的SQL差异",
+                "Starting to generate SQL diff from version {} to {}",
                 from_version.unwrap_or("unknown"),
                 to_version
             );
 
             // 如果内容完全相同，返回空差异
             if from_content.trim() == to_sql.trim() {
-                info!("版本内容完全相同，无需生成差异");
+                info!("Version content is identical, no diff needed");
                 return Ok((
                     String::new(),
                     format!(
-                        "版本 {} 到 {}: 无变化",
+                        "Version {} to {}: No changes",
                         from_version.unwrap_or("unknown"),
                         to_version
                     ),
@@ -98,7 +98,7 @@ pub fn generate_schema_diff(
                 )
             };
 
-            info!("差异生成完成: {}", description);
+            info!("Diff generation completed: {}", description);
             Ok((diff_sql, description))
         }
     }
@@ -111,7 +111,7 @@ pub async fn generate_live_schema_diff(
     to_sql: &str,
     to_version: &str,
 ) -> Result<super::types::SchemaDiffResult, DuckError> {
-    info!("开始生成在线架构到 {} 的SQL差异", to_version);
+    info!("Starting to generate online schema to {} SQL diff", to_version);
 
     // 解析目标模板
     let to_tables = parse_sql_tables(to_sql)?;
@@ -146,7 +146,7 @@ pub async fn generate_live_schema_diff(
         )
     };
 
-    info!("Live Diff 完成: {}", description);
+    info!("Live Diff completed: {}", description);
 
     Ok(super::types::SchemaDiffResult {
         diff_sql,

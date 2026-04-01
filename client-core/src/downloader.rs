@@ -280,26 +280,26 @@ impl FileDownloader {
 
     /// 检查服务器是否支持Range请求 ⭐
     async fn check_range_support(&self, url: &str) -> Result<(bool, u64)> {
-        info!("🔍 开始检查Range支持: {}", url);
+        info!("Checking Range support: {}", url);
 
         let response = self
             .get_http_client()
             .head(url)
             .send()
             .await
-            .map_err(|e| DuckError::custom(format!("检查Range支持失败: {e}")))?;
+            .map_err(|e| DuckError::custom(format!("Failed to check Range support: {e}")))?;
 
-        info!("📋 HTTP响应状态: {}", response.status());
+        info!("HTTP response status: {}", response.status());
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
-                "服务器响应错误: HTTP {}",
+                "Server response error: HTTP {}",
                 response.status()
             ));
         }
 
         // 🆕 详细调试信息 ⭐
-        info!("📋 响应头部详情:");
+        info!("Response headers:");
         for (name, value) in response.headers().iter() {
             if let Ok(value_str) = value.to_str() {
                 info!("   {}: {}", name, value_str);
@@ -309,7 +309,7 @@ impl FileDownloader {
         }
 
         let total_size = response.content_length().unwrap_or(0);
-        info!("📦 Content-Length解析结果: {} bytes", total_size);
+        info!("Content-Length parsed result: {} bytes", total_size);
 
         // 🆕 修复content_length解析问题 ⭐
         let total_size = if total_size == 0 {
@@ -317,18 +317,18 @@ impl FileDownloader {
             if let Some(content_length_header) = response.headers().get("content-length") {
                 if let Ok(content_length_str) = content_length_header.to_str() {
                     if let Ok(parsed_size) = content_length_str.parse::<u64>() {
-                        info!("📦 手动解析Content-Length成功: {} bytes", parsed_size);
+                        info!("Manually parsed Content-Length: {} bytes", parsed_size);
                         parsed_size
                     } else {
-                        warn!("⚠️ Content-Length解析失败: {}", content_length_str);
+                        warn!("Content-Length parse failed: {}", content_length_str);
                         0
                     }
                 } else {
-                    warn!("⚠️ Content-Length头部不是有效的UTF-8字符串");
+                    warn!("Content-Length header is not a valid UTF-8 string");
                     0
                 }
             } else {
-                warn!("⚠️ 响应中没有Content-Length头部");
+                warn!("No Content-Length header in response");
                 0
             }
         } else {
@@ -347,27 +347,27 @@ impl FileDownloader {
         let is_object_storage_or_cdn = self.is_object_storage_or_cdn_url(url);
         let supports_range = if is_object_storage_or_cdn {
             // 对象存储和CDN服务器通常支持Range请求，即使不明确返回Accept-Ranges头部
-            info!("🔍 检测到对象存储/CDN服务器，假设支持Range请求（强制启用断点续传）");
+            info!("Detected object storage/CDN server, assuming Range support (force-enabled resume)");
             true
         } else {
             explicit_range_support
         };
 
-        info!("📋 Range支持检测结果:");
+        info!("Range support detection results:");
         info!(
-            "   服务器类型: {}",
+            "   Server type: {}",
             if is_object_storage_or_cdn {
-                "对象存储/CDN"
+                "Object storage/CDN"
             } else {
-                "普通HTTP"
+                "Regular HTTP"
             }
         );
-        info!("   显式Range支持: {}", explicit_range_support);
-        info!("   最终判定: {}", supports_range);
+        info!("   Explicit Range support: {}", explicit_range_support);
+        info!("   Final determination: {}", supports_range);
         if let Some(accept_ranges) = response.headers().get("accept-ranges") {
-            info!("   Accept-Ranges头部: {:?}", accept_ranges);
+            info!("   Accept-Ranges header: {:?}", accept_ranges);
         } else {
-            info!("   Accept-Ranges头部: 未提供");
+            info!("   Accept-Ranges header: not provided");
         }
 
         Ok((supports_range, total_size))
@@ -397,14 +397,14 @@ impl FileDownloader {
 
         let metadata_path = self.get_metadata_path(download_path);
         let json_content = serde_json::to_string_pretty(metadata)
-            .map_err(|e| DuckError::custom(format!("序列化元数据失败: {e}")))?;
+            .map_err(|e| DuckError::custom(format!("Failed to serialize metadata: {e}")))?;
 
         tokio::fs::write(&metadata_path, json_content)
             .await
-            .map_err(|e| DuckError::custom(format!("保存元数据失败: {e}")))?;
+            .map_err(|e| DuckError::custom(format!("Failed to save metadata: {e}")))?;
 
         if show_log {
-            info!("💾 已保存下载元数据: {}", metadata_path.display());
+            info!("Saved download metadata: {}", metadata_path.display());
         }
         Ok(())
     }
@@ -422,12 +422,12 @@ impl FileDownloader {
 
         let content = tokio::fs::read_to_string(&metadata_path)
             .await
-            .map_err(|e| DuckError::custom(format!("读取元数据失败: {e}")))?;
+            .map_err(|e| DuckError::custom(format!("Failed to read metadata: {e}")))?;
 
         let metadata: DownloadMetadata = serde_json::from_str(&content)
-            .map_err(|e| DuckError::custom(format!("解析元数据失败: {e}")))?;
+            .map_err(|e| DuckError::custom(format!("Failed to parse metadata: {e}")))?;
 
-        info!("📋 已加载下载元数据: {}", metadata_path.display());
+        info!("Loaded download metadata: {}", metadata_path.display());
         Ok(Some(metadata))
     }
 
@@ -441,8 +441,8 @@ impl FileDownloader {
         if metadata_path.exists() {
             tokio::fs::remove_file(&metadata_path)
                 .await
-                .map_err(|e| DuckError::custom(format!("清理元数据失败: {e}")))?;
-            info!("🧹 已清理下载元数据: {}", metadata_path.display());
+                .map_err(|e| DuckError::custom(format!("Failed to cleanup metadata: {e}")))?;
+            info!("Cleaned up download metadata: {}", metadata_path.display());
         }
         Ok(())
     }
@@ -454,45 +454,45 @@ impl FileDownloader {
         total_size: u64,
         expected_hash: Option<&str>,
     ) -> Result<Option<u64>> {
-        info!("🔍 检查断点续传可行性...");
+        info!("Checking resume feasibility...");
 
         // 1. 检查文件是否存在
         if !download_path.exists() {
-            info!("📁 目标文件不存在，无法续传");
+            info!("Target file does not exist, cannot resume");
             return Ok(None);
         }
 
         // 2. 获取当前文件大小
         let file_metadata = tokio::fs::metadata(download_path)
             .await
-            .map_err(|e| DuckError::custom(format!("读取文件元数据失败: {e}")))?;
+            .map_err(|e| DuckError::custom(format!("Failed to read file metadata: {e}")))?;
         let existing_size = file_metadata.len();
 
         info!(
-            "📊 当前文件大小: {} bytes ({:.2} MB)",
+            "Current file size: {} bytes ({:.2} MB)",
             existing_size,
             existing_size as f64 / 1024.0 / 1024.0
         );
 
         // 3. 【优先】检查hash文件是否存在，如果存在则优先验证hash ⭐
         if let Some(expected_hash) = expected_hash {
-            info!("🔍 优先进行hash验证...");
+            info!("Prioritizing hash verification...");
             match Self::calculate_file_hash(download_path).await {
                 Ok(actual_hash) => {
                     if actual_hash.to_lowercase() == expected_hash.to_lowercase() {
-                        info!("✅ 文件hash验证通过，文件已完整");
+                        info!("File hash verification passed, file is complete");
                         // 清理元数据（下载已完成）
                         let _ = self.cleanup_metadata(download_path).await;
                         return Ok(None); // 无需下载
                     } else {
-                        info!("❌ 文件hash验证失败，进入断点续传判断");
-                        info!("   期望hash: {}", expected_hash);
-                        info!("   实际hash: {}", actual_hash);
+                        info!("File hash verification failed, entering resume judgment");
+                        info!("   Expected hash: {}", expected_hash);
+                        info!("   Actual hash: {}", actual_hash);
                         // 继续下面的断点续传逻辑，不要立即删除文件
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️ 计算文件hash失败: {}，进入断点续传判断", e);
+                    warn!("Failed to calculate file hash: {}, entering resume judgment", e);
                     // 继续下面的断点续传逻辑
                 }
             }
@@ -502,13 +502,13 @@ impl FileDownloader {
         if existing_size >= total_size {
             // 如果文件大小已完整但hash不匹配，说明文件损坏，重新下载
             if expected_hash.is_some() {
-                warn!("❌ 文件大小完整但hash不匹配，文件已损坏，将重新下载");
+                warn!("File size complete but hash mismatch, file corrupted, will re-download");
                 let _ = tokio::fs::remove_file(download_path).await;
                 let _ = self.cleanup_metadata(download_path).await;
                 return Ok(None); // 重新下载
             } else {
                 // 没有hash验证，认为文件完整
-                info!("✅ 文件大小完整且无hash验证要求，认为文件完整");
+                info!("File size complete and no hash verification required, file considered complete");
                 let _ = self.cleanup_metadata(download_path).await;
                 return Ok(None);
             }
@@ -557,22 +557,22 @@ impl FileDownloader {
         let downloader_type = self.get_downloader_type(url);
         let version = version.unwrap_or("unknown");
 
-        info!("🌐 开始下载文件");
+        info!("Starting file download");
         info!("   URL: {}", url);
-        info!("   目标路径: {}", download_path.display());
-        info!("   下载器类型: {:?}", downloader_type);
+        info!("   Target path: {}", download_path.display());
+        info!("   Downloader type: {:?}", downloader_type);
         info!(
-            "   断点续传: {}",
+            "   Resume: {}",
             if self.config.enable_resume {
-                "启用"
+                "enabled"
             } else {
-                "禁用"
+                "disabled"
             }
         );
         if let Some(hash) = expected_hash {
-            info!("   期望Hash: {}", hash);
+            info!("   Expected hash: {}", hash);
         }
-        info!("   版本标识: {}", version);
+        info!("   Version: {}", version);
 
         // 检查Range支持和文件大小
         let (supports_range, total_size) = self.check_range_support(url).await?;
@@ -586,9 +586,9 @@ impl FileDownloader {
         }
 
         if supports_range && self.config.enable_resume {
-            info!("✅ 服务器支持Range请求，启用断点续传");
+            info!("Server supports Range requests, enabling resume");
         } else if !supports_range {
-            warn!("⚠️ 服务器不支持Range请求，使用普通下载");
+            warn!("Server does not support Range requests, using regular download");
         }
 
         // 智能检查断点续传可行性
@@ -645,25 +645,25 @@ impl FileDownloader {
         match result {
             Ok(_) => {
                 // 下载成功，清理元数据
-                info!("🎉 下载完成，清理元数据");
+                info!("Download completed, cleaning metadata");
                 let _ = self.cleanup_metadata(download_path).await;
 
                 // 最终hash验证（如果提供）
                 if let Some(hash) = expected_hash {
-                    info!("🔍 最终hash验证...");
+                    info!("Performing final hash verification...");
                     match Self::calculate_file_hash(download_path).await {
                         Ok(actual_hash) => {
                             if actual_hash.to_lowercase() == hash.to_lowercase() {
-                                info!("✅ 最终hash验证通过");
+                                info!("Final hash verification passed");
                             } else {
-                                warn!("❌ 最终hash验证失败");
-                                warn!("   期望: {}", hash);
-                                warn!("   实际: {}", actual_hash);
+                                warn!("Final hash verification failed");
+                                warn!("   Expected: {}", hash);
+                                warn!("   Actual: {}", actual_hash);
                                 return Err(anyhow::anyhow!("文件hash验证失败"));
                             }
                         }
                         Err(e) => {
-                            warn!("⚠️ 计算最终hash失败: {}", e);
+                            warn!("Failed to calculate final hash: {}", e);
                         }
                     }
                 }
@@ -671,8 +671,8 @@ impl FileDownloader {
             }
             Err(e) => {
                 // 下载失败，保留元数据用于下次续传
-                warn!("❌ 下载失败: {}", e);
-                info!("💾 保留元数据用于下次续传");
+                warn!("Download failed: {}", e);
+                info!("Preserving metadata for next resume");
                 Err(e)
             }
         }
@@ -691,7 +691,7 @@ impl FileDownloader {
     where
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
-        info!("📥 使用普通 HTTP 下载");
+        info!("Using regular HTTP download");
         self.download_with_resume_internal(
             url,
             download_path,
@@ -718,13 +718,13 @@ impl FileDownloader {
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
         if self.is_object_storage_or_cdn_url(url) {
-            info!("📥 使用扩展超时 HTTP 下载 (对象存储/CDN 公网文件)");
-            info!("   💡 检测到公网访问的对象存储/CDN文件，无需密钥");
+            info!("Using extended timeout HTTP download (object storage/CDN public network file)");
+            info!("   Detected object storage/CDN file for public network access, no key required");
             if existing_size.is_some() {
-                info!("   🔄 支持断点续传");
+                info!("   Supports resume");
             }
         } else {
-            info!("📥 使用扩展超时 HTTP 下载");
+            info!("Using extended timeout HTTP download");
         }
 
         self.download_with_resume_internal(
@@ -760,7 +760,7 @@ impl FileDownloader {
         let mut request = self.get_http_client().get(url);
 
         if is_resume {
-            info!("🔄 断点续传：从字节 {} 开始下载", start_byte);
+            info!("Resume download: starting from byte {}", start_byte);
             request = request.header("Range", format!("bytes={start_byte}-"));
         }
 
@@ -781,21 +781,21 @@ impl FileDownloader {
 
             // 检查是否是服务器不支持Range的错误
             if response.status().as_u16() == 200 || response.status().as_u16() == 416 {
-                warn!("🔄 服务器可能不支持Range请求，自动回退到完整下载");
+                warn!("Server may not support Range request, falling back to full download");
 
                 // 删除已有文件，重新开始下载
                 if download_path.exists() {
-                    info!("🗑️ 删除部分下载的文件，准备重新下载");
+                    info!("Deleting partially downloaded file, preparing to re-download");
                     tokio::fs::remove_file(download_path)
                         .await
-                        .map_err(|e| anyhow::anyhow!("删除部分文件失败: {e}"))?;
+                        .map_err(|e| anyhow::anyhow!("Failed to delete partial file: {e}"))?;
                 }
 
                 // 清理元数据
                 let _ = self.cleanup_metadata(download_path).await;
 
                 // 重新发起不带Range头的请求
-                info!("📥 重新发起完整下载请求");
+                info!("Restarting full download request");
                 let new_response = self
                     .get_http_client()
                     .get(url)
@@ -805,7 +805,7 @@ impl FileDownloader {
 
                 if !new_response.status().is_success() {
                     return Err(anyhow::anyhow!(
-                        "重新下载失败: HTTP {}",
+                        "Re-download failed: HTTP {}",
                         new_response.status()
                     ));
                 }
@@ -813,7 +813,7 @@ impl FileDownloader {
                 // 创建新文件并从头开始下载
                 let mut file = File::create(download_path)
                     .await
-                    .map_err(|e| anyhow::anyhow!("创建文件失败: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to create file: {e}"))?;
 
                 // 重置元数据
                 metadata.downloaded_bytes = 0;
@@ -849,18 +849,18 @@ impl FileDownloader {
 
         // 打开文件（追加模式或创建模式）
         let mut file = if is_resume {
-            info!("📝 以追加模式打开文件");
+            info!("Opening file in append mode");
             OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(download_path)
                 .await
-                .map_err(|e| DuckError::custom(format!("打开文件失败: {e}")))?
+                .map_err(|e| DuckError::custom(format!("Failed to open file: {e}")))?
         } else {
-            info!("📝 创建新文件");
+            info!("Creating new file");
             File::create(download_path)
                 .await
-                .map_err(|e| DuckError::custom(format!("创建文件失败: {e}")))?
+                .map_err(|e| DuckError::custom(format!("Failed to create file: {e}")))?
         };
 
         // 执行下载
@@ -998,7 +998,7 @@ impl FileDownloader {
                             speed_mbps
                         );
                     } else {
-                        info!("📥 已下载: {:.1} MB", downloaded as f64 / 1024.0 / 1024.0);
+                        info!("Downloaded: {:.1} MB", downloaded as f64 / 1024.0 / 1024.0);
                     }
 
                     last_progress_time = now;
@@ -1028,12 +1028,12 @@ impl FileDownloader {
             .map_err(|e| DuckError::custom(format!("刷新文件缓冲区失败: {e}")))?;
 
         let download_type = if is_resume {
-            "断点续传下载"
+            "Resume download"
         } else {
-            "下载"
+            "Download"
         };
-        info!("✅ {}完成", download_type);
-        info!("   文件路径: {}", download_path.display());
+        info!("{} completed", download_type);
+        info!("   File path: {}", download_path.display());
         info!(
             "   最终大小: {} bytes ({:.2} MB)",
             downloaded,
@@ -1082,7 +1082,7 @@ impl FileDownloader {
 
     /// 验证文件完整性
     pub async fn verify_file_integrity(file_path: &Path, expected_hash: &str) -> Result<bool> {
-        info!("验证文件完整性: {}", file_path.display());
+        info!("Verifying file integrity: {}", file_path.display());
 
         // 计算当前文件的哈希值
         let actual_hash = Self::calculate_file_hash(file_path).await?;
@@ -1091,11 +1091,11 @@ impl FileDownloader {
         let matches = actual_hash.to_lowercase() == expected_hash.to_lowercase();
 
         if matches {
-            info!("✅ 文件完整性验证通过: {}", file_path.display());
+            info!("File integrity verification passed: {}", file_path.display());
         } else {
-            warn!("❌ 文件完整性验证失败: {}", file_path.display());
-            warn!("   期望哈希: {}", expected_hash);
-            warn!("   实际哈希: {}", actual_hash);
+            warn!("File integrity verification failed: {}", file_path.display());
+            warn!("   Expected hash: {}", expected_hash);
+            warn!("   Actual hash: {}", actual_hash);
         }
 
         Ok(matches)

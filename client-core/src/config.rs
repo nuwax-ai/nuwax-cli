@@ -84,7 +84,7 @@ impl VersionConfig {
         self.last_full_upgrade = Some(chrono::Utc::now());
         self.applied_patches.clear(); // 清空补丁历史
 
-        tracing::info!("全量版本已更新: {} -> {}", self.docker_service, new_version);
+        tracing::info!("Full version updated: {} -> {}", self.docker_service, new_version);
     }
 
     /// 应用补丁
@@ -103,7 +103,7 @@ impl VersionConfig {
         });
 
         tracing::info!(
-            "补丁已应用: {} (级别: {})",
+            "Patch applied: {} (level: {})",
             patch_version,
             self.local_patch_level
         );
@@ -132,7 +132,7 @@ impl VersionConfig {
             self.full_version_with_patches =
                 format!("{}.{}", self.docker_service, self.local_patch_level);
             tracing::info!(
-                "配置迁移: 构建完整版本号 {}",
+                "Configuration migration: building full version number {}",
                 self.full_version_with_patches
             );
         }
@@ -147,7 +147,7 @@ impl VersionConfig {
     pub fn validate(&self) -> Result<()> {
         // 验证基础版本号格式
         if self.docker_service.is_empty() {
-            return Err(anyhow::anyhow!("docker_service不能为空"));
+            return Err(anyhow::anyhow!("docker_service cannot be empty"));
         }
 
         // 验证完整版本号格式
@@ -155,13 +155,13 @@ impl VersionConfig {
             let _version = self
                 .full_version_with_patches
                 .parse::<Version>()
-                .map_err(|e| anyhow::anyhow!(format!("无效的完整版本号格式: {e}")))?;
+                .map_err(|e| anyhow::anyhow!(format!("Invalid full version number format: {e}")))?;
         }
 
         // 验证补丁级别与历史记录的一致性
         if self.applied_patches.len() != self.local_patch_level as usize {
             tracing::warn!(
-                "补丁级别与历史记录不一致: level={}, history_count={}",
+                "Patch level inconsistent with history: level={}, history_count={}",
                 self.local_patch_level,
                 self.applied_patches.len()
             );
@@ -202,7 +202,7 @@ impl VersionConfig {
             }
 
             tracing::info!(
-                "已回滚补丁: {} (级别: {})",
+                "Rolled back patch: {} (level: {})",
                 last_patch.version,
                 last_patch.level
             );
@@ -301,13 +301,13 @@ impl AppConfig {
 
         for config_file in &config_files {
             if Path::new(config_file).exists() {
-                tracing::info!("找到配置文件: {}", config_file);
+                tracing::info!("Found configuration file: {}", config_file);
                 return Self::load_from_file(config_file);
             }
         }
 
         // 如果没找到配置文件，创建默认配置
-        tracing::warn!("未找到配置文件，创建默认配置: config.toml");
+        tracing::warn!("Configuration file not found, creating default config: config.toml");
         let default_config = Self::default();
         default_config.save_to_file("config.toml")?;
         Ok(default_config)
@@ -386,7 +386,7 @@ impl AppConfig {
                     None => {
                         // 未找到归档文件，返回错误
                         return Err(anyhow::anyhow!(
-                            "未找到归档文件，目录: {}，支持的格式: .zip, .tar.gz",
+                            "Archive file not found, directory: {}, supported formats: .zip, .tar.gz",
                             download_dir.display()
                         ));
                     }
@@ -396,7 +396,7 @@ impl AppConfig {
 
         // 验证文件存在
         if !path.exists() {
-            return Err(anyhow::anyhow!("归档文件不存在: {}", path.display()));
+            return Err(anyhow::anyhow!("Archive file does not exist: {}", path.display()));
         }
 
         Ok(path)
