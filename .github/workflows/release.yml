@@ -462,11 +462,169 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # 上传到阿里云 OSS
+  upload-to-oss:
+    name: Upload to Alibaba Cloud OSS
+    runs-on: ubuntu-latest
+    needs: [check-version, release]
+    if: needs.check-version.outputs.should_release == 'true'
+    env:
+      OSS_ENDPOINT: "https://oss-rg-china-mainland.aliyuncs.com"
+      OSS_REGION: "rg-china-mainland"
+      OSS_BUCKET: "oss://nuwa-packages"
+      OSS_CDN_BASE: "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com"
+      VERSION: ${{ needs.check-version.outputs.version }}
+      TAG_NAME: ${{ needs.check-version.outputs.tag_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+
+      - name: Install ossutil v2
+        run: |
+          curl -fSL -o /tmp/ossutil.zip \
+            "https://gosspublic.alicdn.com/ossutil/v2/2.2.0/ossutil-2.2.0-linux-amd64.zip"
+          unzip -q /tmp/ossutil.zip -d /tmp
+          sudo mv /tmp/ossutil-2.2.0-linux-amd64/ossutil /usr/local/bin/
+          ossutil version
+
+      - name: Generate checksums for assets
+        shell: bash
+        run: |
+          cd release_assets
+          find . \( -name "*.tar.gz" -o -name "*.zip" \) -print0 | while IFS= read -r -d '' file; do
+            echo "=== $file ==="
+            sha256sum "$file"
+          done > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload all release assets to OSS
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          OSS_PREFIX="duck-client-releases/${TAG_NAME}"
+          echo "==> Uploading release assets to OSS: ${OSS_CDN_BASE}/${OSS_PREFIX}/"
+
+          # 只上传二进制压缩包，不上传 SHA256SUMS 和 latest.json
+          shopt -s nullglob
+          for file in release_assets/*.tar.gz release_assets/*.zip; do
+            filename=$(basename "$file")
+            echo "Uploading: ${filename}"
+            ossutil cp --force "$file" "${OSS_BUCKET}/${OSS_PREFIX}/${filename}" \
+              --endpoint "$OSS_ENDPOINT" \
+              --region "$OSS_REGION" \
+              --access-key-id "$OSS_ACCESS_KEY_ID" \
+              --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+            echo "✅ Uploaded: ${filename}"
+          done
+
+      - name: Generate latest.json for auto-update
+        shell: bash
+        run: |
+          cd release_assets
+          PLATFORMS="{}"
+
+          # 生成 signature 的函数 (将 sha512sum hex 转为 base64)
+          gen_signature() {
+            local file="$1"
+            # 兼容 macOS 和 Linux: base64 -w0 在 Linux 上不换行，macOS 不支持 -w 但默认不换行
+            sha512sum "$file" | awk '{print $1}' | xxd -r -p | base64 -w0 2>/dev/null || base64
+          }
+
+          add_platform() {
+            local key="$1" file="$2"
+            local filepath="./$file"
+            if [ -f "$filepath" ]; then
+              local sig size url
+              sig=$(gen_signature "$filepath")
+              size=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath")
+              url="${OSS_CDN_BASE}/${TAG_NAME}/${file}"
+              PLATFORMS=$(echo "$PLATFORMS" | jq \
+                --arg k "$key" \
+                --arg u "$url" \
+                --arg s "$sig" \
+                --argjson sz "$size" \
+                '. + {($k): {"url": $u, "signature": $s, "size": $sz}}')
+              echo "  Added: ${key} -> ${file} (${size} bytes)"
+            fi
+          }
+
+          echo "==> Scanning release assets..."
+          add_platform "darwin-aarch64"  "nuwax-cli-macos-arm64.tar.gz"
+          add_platform "darwin-x86_64"  "nuwax-cli-macos-amd64.tar.gz"
+          add_platform "linux-x86_64"   "nuwax-cli-linux-amd64.tar.gz"
+          add_platform "linux-aarch64" "nuwax-cli-linux-arm64.tar.gz"
+          add_platform "windows-x86_64"   "nuwax-cli-windows-amd64.zip"
+          add_platform "windows-aarch64"  "nuwax-cli-windows-arm64.zip"
+
+          # macOS universal 单独添加
+          if [ -f "./nuwax-cli-macos-universal.tar.gz" ]; then
+            local sig size url
+            sig=$(gen_signature "./nuwax-cli-macos-universal.tar.gz")
+            size=$(stat -c%s "./nuwax-cli-macos-universal.tar.gz" 2>/dev/null || stat -f%z "./nuwax-cli-macos-universal.tar.gz")
+            url="${OSS_CDN_BASE}/${TAG_NAME}/nuwax-cli-macos-universal.tar.gz"
+            PLATFORMS=$(echo "$PLATFORMS" | jq \
+              --arg k "darwin-universal" \
+              --arg u "$url" \
+              --arg s "$sig" \
+              --argjson sz "$size" \
+              '. + {($k): {"url": $u, "signature": $s, "size": $sz}}')
+            echo "  Added: darwin-universal -> nuwax-cli-macos-universal.tar.gz (${size} bytes)"
+          fi
+
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
+          # version 带 v 前缀
+          FULL_VERSION="v${VERSION}"
+          LATEST_JSON=$(jq -n \
+            --arg version "$FULL_VERSION" \
+            --arg notes "Nuwax CLI ${TAG_NAME} release" \
+            --arg pub_date "$PUB_DATE" \
+            --argjson platforms "$PLATFORMS" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}')
+          echo "$LATEST_JSON" > latest.json
+          echo "==> Generated latest.json"
+          cat latest.json | jq .
+
+      - name: Upload latest.json to OSS
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          ossutil cp --force release_assets/latest.json "${OSS_BUCKET}/duck-client-releases/${TAG_NAME}/latest.json" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          ossutil cp --force release_assets/latest.json "${OSS_BUCKET}/duck-client-releases/latest/latest.json" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          echo "✅ Uploaded latest.json to versioned and latest/ paths"
+
+      - name: Verify OSS upload
+        run: |
+          VERIFY_URL="${OSS_CDN_BASE}/duck-client-releases/latest/latest.json"
+          echo "==> Verifying: ${VERIFY_URL}"
+          HTTP_STATUS=$(curl -sS -o /tmp/oss-latest.json -w "%{http_code}" "$VERIFY_URL")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ latest.json verified (HTTP ${HTTP_STATUS})"
+            cat /tmp/oss-latest.json | jq .
+          else
+            echo "❌ latest.json not found on OSS (HTTP ${HTTP_STATUS})"
+            exit 1
+          fi
+
   # 清理构建缓存（可选）
   cleanup:
     name: Cleanup
     runs-on: ubuntu-latest
-    needs: [release]
+    needs: [upload-to-oss]
     if: always()
     steps:
       - name: Delete artifacts
