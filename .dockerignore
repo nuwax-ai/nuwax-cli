@@ -1,0 +1,22 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+target/
+**/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Misc
+*.log
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+!README.md

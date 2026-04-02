@@ -73,15 +73,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build Linux x86_64 binary inside Docker container
+      - name: Build Linux x86_64 binary using Dockerfile
         run: |
+          # 使用 docker run 在容器内构建 (复用 Dockerfile 中的依赖安装)
           docker run --rm \
             -v ${{ github.workspace }}:/workspace \
             -v ${{ runner.temp }}/cargo-cache:/root/.cargo/registry \
             -v ${{ runner.temp }}/cargo-git:/root/.cargo/git \
             -e PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig \
             -w /workspace \
-            rust:1.75-bookworm \
+            -e RUST_TARGET=x86_64-unknown-linux-gnu \
+            nuwax-cli-build:latest || \
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -v ${{ runner.temp }}/cargo-cache:/root/.cargo/registry \
+            -v ${{ runner.temp }}/cargo-git:/root/.cargo/git \
+            -e PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig \
+            -w /workspace \
+            -e RUST_TARGET=x86_64-unknown-linux-gnu \
+            ubuntu:22.04 \
             bash -c "
               apt-get update && apt-get install -y \
                 build-essential \
@@ -91,6 +101,8 @@ jobs:
                 curl \
                 file \
                 && rm -rf /var/lib/apt/lists/*
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              export PATH=\"/root/.cargo/bin:\$PATH\"
               cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
             "
 
@@ -98,7 +110,7 @@ jobs:
         run: |
           docker run --rm \
             -v ${{ github.workspace }}:/workspace \
-            rust:1.75-bookworm \
+            ubuntu:22.04 \
             bash -c "
               cd /workspace
               tar czf nuwax-cli-linux-amd64.tar.gz target/x86_64-unknown-linux-gnu/release/nuwax-cli
