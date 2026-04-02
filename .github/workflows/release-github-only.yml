@@ -4,14 +4,8 @@ name: Release GitHub Only
 on:
   push:
     tags:
-      - 'v*'  # 通过 v* 标签触发发布，例如 v1.0.0
+      - 'dev*'  # 通过 dev* 标签触发测试构建，例如 dev1.0.80
   workflow_dispatch:
-    inputs:
-      force_release:
-        description: 'Force create release even if version unchanged'
-        required: false
-        default: false
-        type: boolean
 
 # 添加必要的权限配置
 permissions:
