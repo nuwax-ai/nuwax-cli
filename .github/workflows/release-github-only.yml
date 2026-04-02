@@ -73,39 +73,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Linux x86_64 binary using Docker
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          load: true
-          tags: nuwax-cli-build:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64
-          build-args: |
-            RUST_TARGET=x86_64-unknown-linux-gnu
-          run: |
-            docker run --rm \
-              -v ${{ github.workspace }}:/workspace \
-              -v ${{ runner.temp }}/cargo-cache:/root/.cargo/registry \
-              -v ${{ runner.temp }}/cargo-git:/root/.cargo/git \
-              -w /workspace \
-              rust:1.75-bookworm \
-              bash -c "
-                apt-get update && apt-get install -y \
-                  build-essential \
-                  pkg-config \
-                  libglib2.0-dev \
-                  libssl-dev \
-                  curl \
-                  file \
-                  && rm -rf /var/lib/apt/lists/*
-                echo 'PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig' >> \$GITHUB_ENV
-                cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
-              "
+      - name: Build Linux x86_64 binary inside Docker container
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -v ${{ runner.temp }}/cargo-cache:/root/.cargo/registry \
+            -v ${{ runner.temp }}/cargo-git:/root/.cargo/git \
+            -e PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig \
+            -w /workspace \
+            rust:1.75-bookworm \
+            bash -c "
+              apt-get update && apt-get install -y \
+                build-essential \
+                pkg-config \
+                libglib2.0-dev \
+                libssl-dev \
+                curl \
+                file \
+                && rm -rf /var/lib/apt/lists/*
+              cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
+            "
 
       - name: Package Linux x86_64 binary
         run: |
