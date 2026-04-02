@@ -521,22 +521,22 @@ jobs:
           }
 
           add_platform() {
-            local key="$1" local_file="$2" artifact_name="$3"
-            local filepath="./${artifact_name}/${local_file}"
+            local filepath
+            filepath="./${3}/${2}"
             if [ -f "$filepath" ]; then
               local sig size url
               sig=$(gen_signature "$filepath")
               size=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath")
-              url="${OSS_CDN_BASE}/${TAG_NAME}/${local_file}"
+              url="${OSS_CDN_BASE}/${TAG_NAME}/${2}"
               PLATFORMS=$(echo "$PLATFORMS" | jq \
-                --arg k "$key" \
+                --arg k "$1" \
                 --arg u "$url" \
                 --arg s "$sig" \
                 --argjson sz "$size" \
                 '. + {($k): {"url": $u, "signature": $s, "size": $sz}}')
-              echo "  Added: ${key} -> ${filepath} (${size} bytes)"
+              echo "  Added: $1 -> $filepath ($size bytes)"
             else
-              echo "  Skipped: ${key} -> ${filepath} (file not found)"
+              echo "  Skipped: $1 -> $filepath (file not found)"
             fi
           }
 
