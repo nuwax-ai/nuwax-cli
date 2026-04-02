@@ -537,36 +537,38 @@ jobs:
           }
 
           add_platform() {
-            local key="$1" file="$2"
-            local filepath="./$file"
+            local key="$1" local_file="$2" artifact_name="$3"
+            local filepath="./${artifact_name}/${local_file}"
             if [ -f "$filepath" ]; then
               local sig size url
               sig=$(gen_signature "$filepath")
               size=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath")
-              url="${OSS_CDN_BASE}/${TAG_NAME}/${file}"
+              url="${OSS_CDN_BASE}/${TAG_NAME}/${local_file}"
               PLATFORMS=$(echo "$PLATFORMS" | jq \
                 --arg k "$key" \
                 --arg u "$url" \
                 --arg s "$sig" \
                 --argjson sz "$size" \
                 '. + {($k): {"url": $u, "signature": $s, "size": $sz}}')
-              echo "  Added: ${key} -> ${file} (${size} bytes)"
+              echo "  Added: ${key} -> ${filepath} (${size} bytes)"
+            else
+              echo "  Skipped: ${key} -> ${filepath} (file not found)"
             fi
           }
 
           echo "==> Scanning release assets..."
-          add_platform "darwin-aarch64"  "nuwax-cli-macos-arm64.tar.gz"
-          add_platform "darwin-x86_64"  "nuwax-cli-macos-amd64.tar.gz"
-          add_platform "linux-x86_64"   "nuwax-cli-linux-amd64.tar.gz"
-          add_platform "linux-aarch64" "nuwax-cli-linux-arm64.tar.gz"
-          add_platform "windows-x86_64"   "nuwax-cli-windows-amd64.zip"
-          add_platform "windows-aarch64"  "nuwax-cli-windows-arm64.zip"
+          add_platform "darwin-aarch64"  "nuwax-cli-macos-arm64.tar.gz"      "nuwax-cli-macos-arm64"
+          add_platform "darwin-x86_64"  "nuwax-cli-macos-amd64.tar.gz"      "nuwax-cli-macos-amd64"
+          add_platform "linux-x86_64"   "nuwax-cli-linux-amd64.tar.gz"       "nuwax-cli-linux-amd64"
+          add_platform "linux-aarch64" "nuwax-cli-linux-arm64.tar.gz"       "nuwax-cli-linux-arm64"
+          add_platform "windows-x86_64"   "nuwax-cli-windows-amd64.zip"       "nuwax-cli-windows-amd64"
+          add_platform "windows-aarch64"  "nuwax-cli-windows-arm64.zip"       "nuwax-cli-windows-arm64"
 
           # macOS universal 单独添加
-          if [ -f "./nuwax-cli-macos-universal.tar.gz" ]; then
+          if [ -f "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz" ]; then
             local sig size url
-            sig=$(gen_signature "./nuwax-cli-macos-universal.tar.gz")
-            size=$(stat -c%s "./nuwax-cli-macos-universal.tar.gz" 2>/dev/null || stat -f%z "./nuwax-cli-macos-universal.tar.gz")
+            sig=$(gen_signature "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz")
+            size=$(stat -c%s "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz" 2>/dev/null || stat -f%z "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz")
             url="${OSS_CDN_BASE}/${TAG_NAME}/nuwax-cli-macos-universal.tar.gz"
             PLATFORMS=$(echo "$PLATFORMS" | jq \
               --arg k "darwin-universal" \
