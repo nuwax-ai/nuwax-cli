@@ -91,8 +91,8 @@ jobs:
                 curl \
                 file \
                 && rm -rf /var/lib/apt/lists/*
-              # 安装 Rust 1.85+ 以支持 edition2024
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0
+              # 安装 Rust stable 以支持 edition2024 和最新依赖
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
               export PATH=\"/root/.cargo/bin:\$PATH\"
               cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
             "
