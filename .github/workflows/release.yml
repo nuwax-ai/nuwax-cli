@@ -527,7 +527,7 @@ jobs:
               local sig size url
               sig=$(gen_signature "$filepath")
               size=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath")
-              url="${OSS_CDN_BASE}/${TAG_NAME}/${2}"
+              url="${OSS_CDN_BASE}/nuwax-cli/${TAG_NAME}/${2}"
               PLATFORMS=$(echo "$PLATFORMS" | jq \
                 --arg k "$1" \
                 --arg u "$url" \
@@ -552,7 +552,7 @@ jobs:
           if [ -f "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz" ]; then
             sig=$(gen_signature "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz")
             size=$(stat -c%s "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz" 2>/dev/null || stat -f%z "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz")
-            url="${OSS_CDN_BASE}/${TAG_NAME}/nuwax-cli-macos-universal.tar.gz"
+            url="${OSS_CDN_BASE}/nuwax-cli/${TAG_NAME}/nuwax-cli-macos-universal.tar.gz"
             PLATFORMS=$(echo "$PLATFORMS" | jq \
               --arg k "darwin-universal" \
               --arg u "$url" \
