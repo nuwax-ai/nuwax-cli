@@ -1,0 +1,155 @@
+# 同步 GitHub Release 到阿里云 OSS
+# 从已有的 GitHub Release 下载资产并上传到 OSS
+# 触发方式: workflow_dispatch 手动选择要同步的标签
+
+name: Sync Release to OSS
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sync (e.g. v1.0.0 or dev1.0.83)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  OSS_ENDPOINT: "https://oss-rg-china-mainland.aliyuncs.com"
+  OSS_REGION: "rg-china-mainland"
+  OSS_BUCKET: "oss://nuwa-packages"
+  OSS_CDN_BASE: "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com"
+
+jobs:
+  sync-to-oss:
+    name: Sync release assets to Alibaba Cloud OSS
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+        run: |
+          mkdir -p release_assets
+          echo "==> Downloading assets for tag: ${RELEASE_TAG}"
+          gh release download "${RELEASE_TAG}" --repo "$GITHUB_REPOSITORY" --dir release_assets
+          echo "==> Downloaded assets:"
+          find release_assets -type f -ls
+
+      - name: Install ossutil v2
+        run: |
+          curl -fSL -o /tmp/ossutil.zip \
+            "https://gosspublic.alicdn.com/ossutil/v2/2.2.0/ossutil-2.2.0-linux-amd64.zip"
+          unzip -q /tmp/ossutil.zip -d /tmp
+          sudo mv /tmp/ossutil-2.2.0-linux-amd64/ossutil /usr/local/bin/
+          ossutil version
+
+      - name: Upload all release assets to OSS
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"  # 去掉 v 前缀
+          OSS_PREFIX="nuwax-cli/${RELEASE_TAG}"
+          echo "==> Uploading to OSS: ${OSS_CDN_BASE}/${OSS_PREFIX}/"
+
+          cd release_assets
+          for file in *.tar.gz *.zip; do
+            if [ -f "$file" ]; then
+              echo "Uploading: $file"
+              ossutil cp --force "$file" "${OSS_BUCKET}/${OSS_PREFIX}/${file}" \
+                --endpoint "$OSS_ENDPOINT" \
+                --region "$OSS_REGION" \
+                --access-key-id "$OSS_ACCESS_KEY_ID" \
+                --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+              echo "✅ Uploaded: $file"
+            fi
+          done
+
+      - name: Generate latest.json
+        shell: bash
+        run: |
+          cd release_assets
+          PLATFORMS="{}"
+
+          gen_signature() {
+            local file="$1"
+            sha512sum "$file" | awk '{print $1}' | xxd -r -p | base64 -w0 2>/dev/null || base64
+          }
+
+          add_platform() {
+            local key="$1"
+            local filename="$2"
+            if [ -f "$filename" ]; then
+              local sig size url
+              sig=$(gen_signature "$filename")
+              size=$(stat -c%s "$filename" 2>/dev/null || stat -f%z "$filename")
+              url="${OSS_CDN_BASE}/nuwax-cli/${RELEASE_TAG}/${filename}"
+              PLATFORMS=$(echo "$PLATFORMS" | jq \
+                --arg k "$key" \
+                --arg u "$url" \
+                --arg s "$sig" \
+                --argjson sz "$size" \
+                '. + {($k): {"url": $u, "signature": $s, "size": $sz}}')
+              echo "  Added: $key -> $filename (${size} bytes)"
+            fi
+          }
+
+          echo "==> Scanning release assets..."
+          add_platform "darwin-aarch64"  "nuwax-cli-macos-arm64.tar.gz"
+          add_platform "darwin-x86_64"  "nuwax-cli-macos-amd64.tar.gz"
+          add_platform "darwin-universal" "nuwax-cli-macos-universal.tar.gz"
+          add_platform "linux-x86_64"   "nuwax-cli-linux-amd64.tar.gz"
+          add_platform "linux-aarch64"  "nuwax-cli-linux-arm64.tar.gz"
+          add_platform "windows-x86_64"  "nuwax-cli-windows-amd64.zip"
+          add_platform "windows-aarch64" "nuwax-cli-windows-arm64.zip"
+
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
+          LATEST_JSON=$(jq -n \
+            --arg version "${RELEASE_TAG}" \
+            --arg notes "Nuwax CLI ${RELEASE_TAG} release" \
+            --arg pub_date "$PUB_DATE" \
+            --argjson platforms "$PLATFORMS" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}')
+          echo "$LATEST_JSON" > latest.json
+          echo "==> Generated latest.json"
+          cat latest.json | jq .
+
+      - name: Upload latest.json to OSS
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          # 上传到版本目录
+          ossutil cp --force release_assets/latest.json "${OSS_BUCKET}/nuwax-cli/${RELEASE_TAG}/latest.json" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          echo "✅ Uploaded latest.json to ${RELEASE_TAG}/"
+
+          # 上传到 latest/latest.json (stable 指针)
+          ossutil cp --force release_assets/latest.json "${OSS_BUCKET}/nuwax-cli/latest/latest.json" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          echo "✅ Uploaded latest.json to latest/ (stable pointer)"
+
+      - name: Verify OSS upload
+        run: |
+          VERIFY_URL="${OSS_CDN_BASE}/nuwax-cli/latest/latest.json"
+          echo "==> Verifying: ${VERIFY_URL}"
+          HTTP_STATUS=$(curl -sS -o /tmp/oss-latest.json -w "%{http_code}" "$VERIFY_URL")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ latest.json verified (HTTP ${HTTP_STATUS})"
+            cat /tmp/oss-latest.json | jq .
+          else
+            echo "❌ latest.json not found (HTTP ${HTTP_STATUS})"
+            exit 1
+          fi
