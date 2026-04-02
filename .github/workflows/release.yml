@@ -491,12 +491,13 @@ jobs:
           OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
         run: |
+          cd release_assets
           OSS_PREFIX="nuwax-cli/${TAG_NAME}"
           echo "==> Uploading release assets to OSS: ${OSS_CDN_BASE}/${OSS_PREFIX}/"
 
           # 只上传二进制压缩包，不上传 SHA256SUMS 和 latest.json
           shopt -s nullglob
-          for file in release_assets/*.tar.gz release_assets/*.zip; do
+          for file in ./*/*.tar.gz ./*/*.zip; do
             filename=$(basename "$file")
             echo "Uploading: ${filename}"
             ossutil cp --force "$file" "${OSS_BUCKET}/${OSS_PREFIX}/${filename}" \
