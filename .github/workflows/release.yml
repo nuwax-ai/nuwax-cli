@@ -550,7 +550,6 @@ jobs:
 
           # macOS universal 单独添加
           if [ -f "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz" ]; then
-            local sig size url
             sig=$(gen_signature "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz")
             size=$(stat -c%s "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz" 2>/dev/null || stat -f%z "./nuwax-cli-macos-universal/nuwax-cli-macos-universal.tar.gz")
             url="${OSS_CDN_BASE}/${TAG_NAME}/nuwax-cli-macos-universal.tar.gz"
