@@ -133,28 +133,41 @@ jobs:
             --access-key-secret "$OSS_ACCESS_KEY_SECRET"
           echo "✅ Uploaded latest.json to ${RELEASE_TAG}/"
 
-          # 只有正式版本 (v*) 才更新 latest/latest.json
-          # dev* 版本不更新 latest/ 指针，避免污染生产环境
+          # 根据版本类型更新对应的 latest 指针
           if [[ "$RELEASE_TAG" == v* ]]; then
+            # 正式版本更新 stable 指针
             ossutil cp --force release_assets/latest.json "${OSS_BUCKET}/nuwax-cli/latest/latest.json" \
               --endpoint "$OSS_ENDPOINT" \
               --region "$OSS_REGION" \
               --access-key-id "$OSS_ACCESS_KEY_ID" \
               --access-key-secret "$OSS_ACCESS_KEY_SECRET"
             echo "✅ Uploaded latest.json to latest/ (stable pointer)"
-          else
-            echo "⚠️ Skipping latest/ update for ${RELEASE_TAG} (dev version)"
+          elif [[ "$RELEASE_TAG" == dev* ]]; then
+            # dev 版本更新 dev/latest.json
+            ossutil cp --force release_assets/latest.json "${OSS_BUCKET}/nuwax-cli/dev/latest.json" \
+              --endpoint "$OSS_ENDPOINT" \
+              --region "$OSS_REGION" \
+              --access-key-id "$OSS_ACCESS_KEY_ID" \
+              --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+            echo "✅ Uploaded latest.json to dev/ (dev pointer)"
           fi
 
       - name: Verify OSS upload
         run: |
-          VERIFY_URL="${OSS_CDN_BASE}/nuwax-cli/latest/latest.json"
+          # 根据版本类型验证不同的 URL
+          if [[ "$RELEASE_TAG" == v* ]]; then
+            VERIFY_URL="${OSS_CDN_BASE}/nuwax-cli/latest/latest.json"
+          elif [[ "$RELEASE_TAG" == dev* ]]; then
+            VERIFY_URL="${OSS_CDN_BASE}/nuwax-cli/dev/latest.json"
+          else
+            VERIFY_URL="${OSS_CDN_BASE}/nuwax-cli/${RELEASE_TAG}/latest.json"
+          fi
           echo "==> Verifying: ${VERIFY_URL}"
           HTTP_STATUS=$(curl -sS -o /tmp/oss-latest.json -w "%{http_code}" "$VERIFY_URL")
           if [ "$HTTP_STATUS" = "200" ]; then
             echo "✅ latest.json verified (HTTP ${HTTP_STATUS})"
             cat /tmp/oss-latest.json | jq .
           else
-            echo "❌ latest.json not found (HTTP ${HTTP_STATUS})"
+            echo "❌ latest.json not found on OSS (HTTP ${HTTP_STATUS})"
             exit 1
           fi

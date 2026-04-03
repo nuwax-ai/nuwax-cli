@@ -468,6 +468,139 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # 上传到阿里云 OSS Beta 测试目录
+  upload-to-beta:
+    name: Upload to Alibaba Cloud OSS Beta
+    runs-on: ubuntu-latest
+    needs: [check-version, release]
+    if: needs.check-version.outputs.should_release == 'true'
+    env:
+      OSS_ENDPOINT: "https://oss-rg-china-mainland.aliyuncs.com"
+      OSS_REGION: "rg-china-mainland"
+      OSS_BUCKET: "oss://nuwa-packages"
+      OSS_CDN_BASE: "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com"
+      TAG_NAME: ${{ needs.check-version.outputs.tag_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+
+      - name: Install ossutil v2
+        run: |
+          curl -fSL -o /tmp/ossutil.zip \
+            "https://gosspublic.alicdn.com/ossutil/v2/2.2.0/ossutil-2.2.0-linux-amd64.zip"
+          unzip -q /tmp/ossutil.zip -d /tmp
+          sudo mv /tmp/ossutil-2.2.0-linux-amd64/ossutil /usr/local/bin/
+          ossutil version
+
+      - name: Upload all release assets to OSS Beta
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          cd release_assets
+          OSS_PREFIX="nuwax-cli/beta/${TAG_NAME}"
+          echo "==> Uploading to OSS Beta: ${OSS_CDN_BASE}/${OSS_PREFIX}/"
+
+          for file in *.tar.gz *.zip; do
+            if [ -f "$file" ]; then
+              echo "Uploading: $file"
+              ossutil cp --force "$file" "${OSS_BUCKET}/${OSS_PREFIX}/${file}" \
+                --endpoint "$OSS_ENDPOINT" \
+                --region "$OSS_REGION" \
+                --access-key-id "$OSS_ACCESS_KEY_ID" \
+                --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+              echo "✅ Uploaded: $file"
+            fi
+          done
+
+      - name: Generate beta latest.json
+        shell: bash
+        run: |
+          cd release_assets
+          PLATFORMS="{}"
+
+          gen_signature() {
+            local file="$1"
+            sha512sum "$file" | awk '{print $1}' | xxd -r -p | base64 -w0 2>/dev/null || base64
+          }
+
+          add_platform() {
+            local key="$1"
+            local filename="$2"
+            if [ -f "$filename" ]; then
+              local sig size url
+              sig=$(gen_signature "$filename")
+              size=$(stat -c%s "$filename" 2>/dev/null || stat -f%z "$filename")
+              url="${OSS_CDN_BASE}/nuwax-cli/beta/${TAG_NAME}/${filename}"
+              PLATFORMS=$(echo "$PLATFORMS" | jq \
+                --arg k "$key" \
+                --arg u "$url" \
+                --arg s "$sig" \
+                --argjson sz "$size" \
+                '. + {($k): {"url": $u, "signature": $s, "size": $sz}}')
+              echo "  Added: $key -> $filename (${size} bytes)"
+            fi
+          }
+
+          echo "==> Scanning release assets..."
+          add_platform "darwin-aarch64"  "nuwax-cli-macos-arm64.tar.gz"
+          add_platform "darwin-x86_64"  "nuwax-cli-macos-amd64.tar.gz"
+          add_platform "darwin-universal" "nuwax-cli-macos-universal.tar.gz"
+          add_platform "linux-x86_64"   "nuwax-cli-linux-amd64.tar.gz"
+          add_platform "linux-aarch64"  "nuwax-cli-linux-arm64.tar.gz"
+          add_platform "windows-x86_64"  "nuwax-cli-windows-amd64.zip"
+          add_platform "windows-aarch64" "nuwax-cli-windows-arm64.zip"
+
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
+          LATEST_JSON=$(jq -n \
+            --arg version "${TAG_NAME}" \
+            --arg notes "Nuwax CLI ${TAG_NAME} beta release" \
+            --arg pub_date "$PUB_DATE" \
+            --argjson platforms "$PLATFORMS" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}')
+          echo "$LATEST_JSON" > latest.json
+          echo "==> Generated latest.json"
+          cat latest.json | jq .
+
+      - name: Upload beta latest.json to OSS
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          # 上传到版本目录
+          ossutil cp --force release_assets/latest.json "${OSS_BUCKET}/nuwax-cli/beta/${TAG_NAME}/latest.json" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          echo "✅ Uploaded latest.json to beta/${TAG_NAME}/"
+
+          # 更新 beta/latest.json 指针
+          ossutil cp --force release_assets/latest.json "${OSS_BUCKET}/nuwax-cli/beta/latest.json" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          echo "✅ Uploaded latest.json to beta/latest.json"
+
+      - name: Verify OSS Beta upload
+        run: |
+          VERIFY_URL="${OSS_CDN_BASE}/nuwax-cli/beta/latest.json"
+          echo "==> Verifying: ${VERIFY_URL}"
+          HTTP_STATUS=$(curl -sS -o /tmp/oss-latest.json -w "%{http_code}" "$VERIFY_URL")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ latest.json verified (HTTP ${HTTP_STATUS})"
+            cat /tmp/oss-latest.json | jq .
+          else
+            echo "❌ latest.json not found on OSS (HTTP ${HTTP_STATUS})"
+            exit 1
+          fi
+
   # 清理构建缓存（可选）
   cleanup:
     name: Cleanup
