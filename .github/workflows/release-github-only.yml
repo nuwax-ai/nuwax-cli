@@ -63,68 +63,65 @@ jobs:
             echo "is_new_version=true" >> $GITHUB_OUTPUT
           fi
 
-  # Linux x86_64 使用 Docker Ubuntu 22.04 构建 (兼容旧 glibc)
-  build-linux-x86_64-docker:
-    name: Build Linux-x86_64 (Docker Ubuntu 22.04)
-    runs-on: ubuntu-latest
+  # Linux x86_64 使用标准 CI 构建
+  build-linux-x86_64:
+    name: Build Linux-x86_64
+    runs-on: ubuntu-22.04
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build Linux x86_64 binary using Docker (source Rust)
-        run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -v ${{ runner.temp }}/cargo-cache:/root/.cargo/registry \
-            -v ${{ runner.temp }}/cargo-git:/root/.cargo/git \
-            -w /workspace \
-            ubuntu:22.04 \
-            bash -c "
-              apt-get update && apt-get install -y \
-                build-essential \
-                pkg-config \
-                libglib2.0-dev \
-                libssl-dev \
-                curl \
-                file \
-                git \
-                cmake \
-                && rm -rf /var/lib/apt/lists/*
-              # 从源码编译 Rust，确保链接到 Ubuntu 22.04 系统的 libstdc++
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile complete
-              export PATH=\"/root/.cargo/bin:\$PATH\"
-              # 验证 Rust 使用系统 libstdc++
-              ls -la /root/.cargo/bin/libstdc++.so* 2>/dev/null || echo 'No bundled libstdc++'
-              # 直接使用系统 GCC 编译
-              CC=gcc CXX=g++ cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
-            "
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
 
-      - name: Package Linux x86_64 binary
+      - name: Install Linux dependencies
         run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/workspace \
-            ubuntu:22.04 \
-            bash -c "
-              cd /workspace
-              tar czf nuwax-cli-linux-amd64.tar.gz -C target/x86_64-unknown-linux-gnu/release nuwax-cli
-            "
+          echo "=== Linux 依赖安装 ==="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl \
+            wget \
+            file \
+            build-essential \
+            libc6-dev \
+            m4 \
+            pkg-config \
+            libglib2.0-dev \
+            libglib2.0-0 \
+            libglib2.0-data \
+            libglib2.0-bin \
+            glib-networking \
+            glib-networking-common \
+            glib-networking-services
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          echo "✅ Linux 依赖安装完成"
 
-      - name: Verify binary compatibility
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: >-
+            ${{ runner.os }}-cargo-${{ matrix.platform.target }}-${{
+            hashFiles('**/Cargo.lock') }}
+
+      - name: Build binary
         run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/workspace \
-            ubuntu:22.04 \
-            bash -c "
-              apt-get update && apt-get install -y file && rm -rf /var/lib/apt/lists/*
-              cd /workspace
-              file target/x86_64-unknown-linux-gnu/release/nuwax-cli
-              ldd target/x86_64-unknown-linux-gnu/release/nuwax-cli
-              ./target/x86_64-unknown-linux-gnu/release/nuwax-cli --version || echo 'Version check completed'
-            "
+          cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
 
-      - name: Upload Linux x86_64 artifact
+      - name: Package binary
+        run: |
+          cd target/x86_64-unknown-linux-gnu/release
+          tar czf ../../../nuwax-cli-linux-amd64.tar.gz nuwax-cli
+          cd -
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nuwax-cli-linux-amd64
@@ -355,7 +352,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [check-version, build, build-linux-x86_64-docker, build-macos-universal]
+    needs: [check-version, build, build-linux-x86_64, build-macos-universal]
     if: needs.check-version.outputs.should_release == 'true'
     steps:
       - name: Checkout
