@@ -20,7 +20,8 @@ help:
 	@echo ""
 	@echo "Linux Build Dependencies:"
 	@echo "  sudo apt-get update && sudo apt-get install -y --no-install-recommends \\"
-	@echo "    build-essential pkg-config libglib2.0-dev libssl-dev curl wget file"
+	@echo "    build-essential pkg-config libglib2.0-dev libssl-dev curl wget file \\"
+	@echo "    gcc-aarch64-linux-gnu"
 
 # Build release version
 build release:
@@ -73,12 +74,23 @@ package-linux-x86:
 	fi
 	@echo "✅ Packaged dist/nuwax-cli-linux-amd64.tar.gz"
 
-# Build and package Linux ARM64 binary (always uses cross)
+# Build and package Linux ARM64 binary
+# On Linux x86_64: native cross-compile with gcc-aarch64-linux-gnu; On macOS: uses cross
 package-linux-arm64:
 	@mkdir -p dist
-	@command -v cross > /dev/null 2>&1 || { echo "Installing cross..."; cargo install cross --git https://github.com/cross-rs/cross; }
-	@cross build --release --target aarch64-unknown-linux-gnu -p nuwax-cli
-	@tar czf dist/nuwax-cli-linux-arm64.tar.gz -C target/aarch64-unknown-linux-gnu/release nuwax-cli
+	@if [ "$(shell uname -s)" = "Linux" ] && [ "$(shell uname -m)" = "x86_64" ]; then \
+		echo "=== Cross-compile ARM64 on Linux x86_64 ==="; \
+		if command -v apt-get > /dev/null 2>&1; then \
+			sudo -n apt-get update > /dev/null 2>&1 && sudo -n apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu || echo "⚠️ Cannot install gcc-aarch64-linux-gnu (need sudo), continuing anyway..."; \
+		fi; \
+		cargo build --release --target aarch64-unknown-linux-gnu -p nuwax-cli; \
+		tar czf dist/nuwax-cli-linux-arm64.tar.gz -C target/aarch64-unknown-linux-gnu/release nuwax-cli; \
+	else \
+		echo "=== Cross-compile ARM64 (macOS/non-x86_64 Linux) ==="; \
+		command -v cross > /dev/null 2>&1 || { echo "Installing cross..."; cargo install cross --git https://github.com/cross-rs/cross; }; \
+		cross build --release --target aarch64-unknown-linux-gnu -p nuwax-cli; \
+		tar czf dist/nuwax-cli-linux-arm64.tar.gz -C target/aarch64-unknown-linux-gnu/release nuwax-cli; \
+	fi
 	@echo "✅ Packaged dist/nuwax-cli-linux-arm64.tar.gz"
 
 # Build and package Linux (x86_64 + arm64)
