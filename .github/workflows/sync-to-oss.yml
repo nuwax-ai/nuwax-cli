@@ -133,13 +133,18 @@ jobs:
             --access-key-secret "$OSS_ACCESS_KEY_SECRET"
           echo "✅ Uploaded latest.json to ${RELEASE_TAG}/"
 
-          # 上传到 latest/latest.json (stable 指针)
-          ossutil cp --force release_assets/latest.json "${OSS_BUCKET}/nuwax-cli/latest/latest.json" \
-            --endpoint "$OSS_ENDPOINT" \
-            --region "$OSS_REGION" \
-            --access-key-id "$OSS_ACCESS_KEY_ID" \
-            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
-          echo "✅ Uploaded latest.json to latest/ (stable pointer)"
+          # 只有正式版本 (v*) 才更新 latest/latest.json
+          # dev* 版本不更新 latest/ 指针，避免污染生产环境
+          if [[ "$RELEASE_TAG" == v* ]]; then
+            ossutil cp --force release_assets/latest.json "${OSS_BUCKET}/nuwax-cli/latest/latest.json" \
+              --endpoint "$OSS_ENDPOINT" \
+              --region "$OSS_REGION" \
+              --access-key-id "$OSS_ACCESS_KEY_ID" \
+              --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+            echo "✅ Uploaded latest.json to latest/ (stable pointer)"
+          else
+            echo "⚠️ Skipping latest/ update for ${RELEASE_TAG} (dev version)"
+          fi
 
       - name: Verify OSS upload
         run: |
