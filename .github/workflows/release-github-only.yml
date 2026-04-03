@@ -73,7 +73,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build Linux x86_64 binary using Docker (musl static)
+      - name: Build Linux x86_64 binary using Docker (source Rust)
         run: |
           docker run --rm \
             -v ${{ github.workspace }}:/workspace \
@@ -89,14 +89,16 @@ jobs:
                 libssl-dev \
                 curl \
                 file \
-                musl-tools \
+                git \
+                cmake \
                 && rm -rf /var/lib/apt/lists/*
-              # 安装 Rust stable 并添加 musl target
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              # 从源码编译 Rust，确保链接到 Ubuntu 22.04 系统的 libstdc++
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile complete
               export PATH=\"/root/.cargo/bin:\$PATH\"
-              rustup target add x86_64-unknown-linux-musl
-              # 使用 musl target 进行静态链接，不依赖系统 glibc/libstdc++
-              cargo build --release --target x86_64-unknown-linux-musl -p nuwax-cli
+              # 验证 Rust 使用系统 libstdc++
+              ls -la /root/.cargo/bin/libstdc++.so* 2>/dev/null || echo 'No bundled libstdc++'
+              # 直接使用系统 GCC 编译
+              CC=gcc CXX=g++ cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
             "
 
       - name: Package Linux x86_64 binary
@@ -106,10 +108,10 @@ jobs:
             ubuntu:22.04 \
             bash -c "
               cd /workspace
-              tar czf nuwax-cli-linux-amd64.tar.gz -C target/x86_64-unknown-linux-musl/release nuwax-cli
+              tar czf nuwax-cli-linux-amd64.tar.gz -C target/x86_64-unknown-linux-gnu/release nuwax-cli
             "
 
-      - name: Verify binary compatibility (static linking check)
+      - name: Verify binary compatibility
         run: |
           docker run --rm \
             -v ${{ github.workspace }}:/workspace \
@@ -117,11 +119,9 @@ jobs:
             bash -c "
               apt-get update && apt-get install -y file && rm -rf /var/lib/apt/lists/*
               cd /workspace
-              file target/x86_64-unknown-linux-musl/release/nuwax-cli
-              # 验证是静态链接（无动态依赖）
-              ldd target/x86_64-unknown-linux-musl/release/nuwax-cli 2>&1 || true
-              # 在 minimal 容器中测试运行
-              ./target/x86_64-unknown-linux-musl/release/nuwax-cli --version || echo 'Version check completed'
+              file target/x86_64-unknown-linux-gnu/release/nuwax-cli
+              ldd target/x86_64-unknown-linux-gnu/release/nuwax-cli
+              ./target/x86_64-unknown-linux-gnu/release/nuwax-cli --version || echo 'Version check completed'
             "
 
       - name: Upload Linux x86_64 artifact
