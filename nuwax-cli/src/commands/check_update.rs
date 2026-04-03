@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use chrono::DateTime;
-use client_core::constants::api;
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,12 +27,12 @@ fn parse_github_repo() -> (&'static str, &'static str) {
     );
 }
 
-//cli 命令工具请求的地址
-pub const CLI_API_URL_PATH: &str = "/api/v1/cli/versions/latest.json";
+//cli 命令工具请求的地址 (阿里云 OSS)
+pub const CLI_API_URL: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-cli/latest/latest.json";
 
-/// 获取完整的 CLI API URL（环境感知）
+/// 获取完整的 CLI API URL
 pub fn get_cli_api_url() -> String {
-    format!("{}{CLI_API_URL_PATH}", api::get_base_url())
+    CLI_API_URL.to_string()
 }
 
 use crate::cli::CheckUpdateCommand;
