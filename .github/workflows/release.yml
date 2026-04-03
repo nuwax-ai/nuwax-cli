@@ -69,10 +69,10 @@ jobs:
             echo "is_new_version=true" >> $GITHUB_OUTPUT
           fi
 
-  # Linux x86_64 使用标准 CI 构建
+  # Linux x86_64 使用标准 CI 构建 (ubuntu-24)
   build-linux-x86_64:
     name: Build Linux-x86_64
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
     steps:
