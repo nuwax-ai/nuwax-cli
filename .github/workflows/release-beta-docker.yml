@@ -91,22 +91,16 @@ jobs:
           # Check what's in the Docker image at /output
           docker run --rm nuwax-cli-builder:latest ls -la /output/
           docker run --rm nuwax-cli-builder:latest file /output/nuwax-cli
-          docker run --rm nuwax-cli-builder:latest test -d /output/nuwax-cli && echo "IS_DIRECTORY" || echo "IS_FILE"
+          # Clean up any existing nuwax-cli file or directory
+          rm -rf ./nuwax-cli
           # Run a temp container to extract the binary
           docker run --rm -v $(pwd):/output-dir nuwax-cli-builder:latest \
             sh -c "cp /output/nuwax-cli /output-dir/"
           ls -la
           file nuwax-cli
-          # Handle both file and directory cases
-          if [ -d ./nuwax-cli ]; then
-            echo "Extracting as directory"
-            tar czf nuwax-cli-linux-amd64.tar.gz -C ./nuwax-cli .
-            rm -rf nuwax-cli
-          else
-            echo "Extracting as file"
-            tar czf nuwax-cli-linux-amd64.tar.gz nuwax-cli
-            rm nuwax-cli
-          fi
+          # Package as file (we confirmed it's a file)
+          tar czf nuwax-cli-linux-amd64.tar.gz nuwax-cli
+          rm nuwax-cli
           ls -la nuwax-cli-linux-amd64.tar.gz
           file nuwax-cli-linux-amd64.tar.gz
 
