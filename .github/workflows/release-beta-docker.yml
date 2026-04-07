@@ -1,0 +1,595 @@
+---
+name: Release Beta (Docker)
+
+on:
+  push:
+    tags:
+      - 'docker*'  # 通过 docker* 标签触发 Docker 构建测试，例如 docker1.0.80
+  workflow_dispatch:
+
+# 添加必要的权限配置
+permissions:
+  contents: write  # 允许创建release和上传文件
+  actions: write  # 允许操作actions
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 检查版本号和决定是否需要发布
+  check-version:
+    name: Check Version and Decide Release
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.version_check.outputs.should_release }}
+      version: ${{ steps.version_check.outputs.version }}
+      tag_name: ${{ steps.version_check.outputs.tag_name }}
+      is_new_version: ${{ steps.version_check.outputs.is_new_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整历史以检查现有 tags
+
+      - name: Read version from tag
+        id: version_check
+        run: |
+          # 从标签名提取版本号 (例如 v1.0.0 -> 1.0.0)
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG_NAME#v}"
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+
+          echo "📋 检测到版本: ${VERSION}"
+          echo "📋 对应标签: ${TAG_NAME}"
+
+          # 检查这个版本的 GitHub Release 是否已经存在
+          if gh release view ${TAG_NAME} &>/dev/null; then
+            echo "⚠️ 标签 ${TAG_NAME} 已存在"
+            if [[ "${{ github.event.inputs.force_release }}" == "true" ]]; then
+              echo "🔧 强制发布模式，将删除现有标签"
+              git tag -d ${TAG_NAME} || true
+              git push origin :refs/tags/${TAG_NAME} || true
+              echo "should_release=true" >> $GITHUB_OUTPUT
+              echo "is_new_version=false" >> $GITHUB_OUTPUT
+            else
+              echo "should_release=false" >> $GITHUB_OUTPUT
+              echo "is_new_version=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "✅ 新版本，准备发布"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "is_new_version=true" >> $GITHUB_OUTPUT
+          fi
+
+  # Linux x86_64 使用 Docker 构建 (Ubuntu 22.04)
+  build-linux-x86_64:
+    name: Build Linux-x86_64 (Docker)
+    runs-on: ubuntu-22.04
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Linux x86_64 binary via Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          tags: nuwax-cli-builder:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract binary from Docker image
+        run: |
+          CONTAINER_ID=$(docker create nuwax-cli-builder:latest)
+          docker cp ${CONTAINER_ID}:/workspace/target/x86_64-unknown-linux-gnu/release/nuwax-cli ./nuwax-cli
+          docker rm ${CONTAINER_ID}
+          tar czf nuwax-cli-linux-amd64.tar.gz nuwax-cli
+          rm nuwax-cli
+          ls -la nuwax-cli-linux-amd64.tar.gz
+          file nuwax-cli-linux-amd64.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuwax-cli-linux-amd64
+          path: nuwax-cli-linux-amd64.tar.gz
+
+  # Linux ARM64 和其他平台使用标准 CI
+  build:
+    name: Build for ${{ matrix.platform.name }}
+    runs-on: ${{ matrix.platform.os }}
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # Linux-aarch64 仍然使用 cross 工具
+          - name: Linux-aarch64
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            bin: nuwax-cli
+            archive_name: nuwax-cli-linux-arm64
+            cross: true
+
+          # Windows builds
+          - name: Windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: nuwax-cli.exe
+            archive_name: nuwax-cli-windows-amd64
+            cross: false
+
+          - name: Windows-aarch64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            bin: nuwax-cli.exe
+            archive_name: nuwax-cli-windows-arm64
+            cross: false
+
+          # macOS builds (单独架构，稍后合并)
+          - name: macOS-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            bin: nuwax-cli
+            archive_name: nuwax-cli-macos-amd64
+            cross: false
+
+          - name: macOS-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            bin: nuwax-cli
+            archive_name: nuwax-cli-macos-arm64
+            cross: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Install Linux dependencies
+        if: startsWith(matrix.platform.os, 'ubuntu')
+        run: |
+          echo "=== Linux 依赖安装 ==="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl \
+            wget \
+            file \
+            build-essential \
+            libc6-dev \
+            m4 \
+            pkg-config \
+            libglib2.0-dev \
+            libglib2.0-0 \
+            libglib2.0-data \
+            libglib2.0-bin \
+            glib-networking \
+            glib-networking-common \
+            glib-networking-services
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          echo "✅ Linux 依赖安装完成"
+
+      - name: Install cross
+        if: matrix.platform.cross
+        run: |
+          echo "=== 安装 cross 工具 ==="
+          cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: >-
+            ${{ runner.os }}-cargo-${{ matrix.platform.target }}-${{
+            hashFiles('**/Cargo.lock') }}
+
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.platform.cross }}" = "true" ]; then
+            echo "=== 使用 cross 工具进行交叉编译 ==="
+            cross build --release --target ${{ matrix.platform.target }} -p nuwax-cli
+          else
+            echo "=== 本地编译 for ${{ matrix.platform.target }} ==="
+            cargo build --release --target ${{ matrix.platform.target }} -p nuwax-cli
+          fi
+        shell: bash
+
+      - name: Package binary (Unix)
+        if: matrix.platform.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.platform.target }}/release
+          tar czf ../../../${{ matrix.platform.archive_name }}.tar.gz \
+            ${{ matrix.platform.bin }}
+          cd -
+
+      - name: Package binary (Windows)
+        if: matrix.platform.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.platform.target }}/release
+          7z a ../../../${{ matrix.platform.archive_name }}.zip \
+            ${{ matrix.platform.bin }}
+          cd -
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.archive_name }}
+          path: |
+            ${{ matrix.platform.archive_name }}.tar.gz
+            ${{ matrix.platform.archive_name }}.zip
+          if-no-files-found: ignore
+
+  # 创建 macOS 通用二进制文件
+  build-macos-universal:
+    name: Build macOS Universal Binary
+    runs-on: macos-latest
+    needs: [check-version, build]
+    if: needs.check-version.outputs.should_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Extract macOS binaries
+        run: |
+          echo "=== 提取 macOS 二进制文件 ==="
+          # 创建工作目录
+          mkdir -p macos-binaries
+          
+          # 提取 x86_64 版本
+          if [ -f "artifacts/nuwax-cli-macos-amd64/nuwax-cli-macos-amd64.tar.gz" ]; then
+            echo "✅ 找到 x86_64 版本"
+            cd macos-binaries
+            tar -xzf ../artifacts/nuwax-cli-macos-amd64/nuwax-cli-macos-amd64.tar.gz
+            mv nuwax-cli nuwax-cli-x86_64
+            cd ..
+          else
+            echo "❌ 未找到 x86_64 版本"
+            exit 1
+          fi
+          
+          # 提取 aarch64 版本
+          if [ -f "artifacts/nuwax-cli-macos-arm64/nuwax-cli-macos-arm64.tar.gz" ]; then
+            echo "✅ 找到 aarch64 版本"
+            cd macos-binaries
+            tar -xzf ../artifacts/nuwax-cli-macos-arm64/nuwax-cli-macos-arm64.tar.gz
+            mv nuwax-cli nuwax-cli-aarch64
+            cd ..
+          else
+            echo "❌ 未找到 aarch64 版本"
+            exit 1
+          fi
+          
+          # 验证文件
+          echo "=== 验证提取的文件 ==="
+          ls -la macos-binaries/
+          file macos-binaries/nuwax-cli-x86_64
+          file macos-binaries/nuwax-cli-aarch64
+
+      - name: Create universal binary
+        run: |
+          echo "=== 创建通用二进制文件 ==="
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create \
+            macos-binaries/nuwax-cli-x86_64 \
+            macos-binaries/nuwax-cli-aarch64 \
+            -output target/universal-apple-darwin/release/nuwax-cli
+          
+          echo "✅ 通用二进制文件创建完成"
+
+      - name: Verify universal binary
+        run: |
+          echo "=== 验证通用二进制文件 ==="
+          file target/universal-apple-darwin/release/nuwax-cli
+          lipo -info target/universal-apple-darwin/release/nuwax-cli
+          
+          # 测试可执行性
+          chmod +x target/universal-apple-darwin/release/nuwax-cli
+          ./target/universal-apple-darwin/release/nuwax-cli --version || echo "⚠️ 版本检查失败，但二进制文件已创建"
+
+      - name: Package universal binary
+        run: |
+          cd target/universal-apple-darwin/release
+          tar czf ../../../nuwax-cli-macos-universal.tar.gz nuwax-cli
+          cd -
+          
+          echo "=== 打包完成 ==="
+          ls -la nuwax-cli-macos-universal.tar.gz
+
+      - name: Upload universal binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuwax-cli-macos-universal
+          path: nuwax-cli-macos-universal.tar.gz
+
+  # 发布到 GitHub Releases
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [check-version, build, build-linux-x86_64, build-macos-universal]
+    if: needs.check-version.outputs.should_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release_assets
+          find artifacts -name "*.tar.gz" -exec cp {} release_assets/ \;
+          find artifacts -name "*.zip" -exec cp {} release_assets/ \;
+          ls -la release_assets/
+
+      - name: Generate checksums
+        run: |
+          cd release_assets
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          TAG_NAME="${{ needs.check-version.outputs.tag_name }}"
+          BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          
+          # 生成发布说明
+          cat > release_notes.md << EOF
+          ## 🦆 Nuwax CLI Release ${{ needs.check-version.outputs.tag_name }}
+          
+          ### 📥 下载说明
+          
+          请根据您的操作系统和架构选择合适的版本：
+          
+          #### 🍎 macOS
+          - **nuwax-cli-macos-universal.tar.gz** - 通用版本（推荐）
+            - 同时支持 Intel (x86_64) 和 Apple Silicon (ARM64) 芯片
+            - 系统会自动选择合适的架构运行
+          
+          #### 🐧 Linux
+          - **nuwax-cli-linux-amd64.tar.gz** - 适用于 x86_64 架构（动态链接，需要 GLIBC 2.31+，兼容 Ubuntu 20.04+）
+          - **nuwax-cli-linux-arm64.tar.gz** - 适用于 ARM64 架构（动态链接，需要 GLIBC 2.35+）
+          
+          #### 🪟 Windows
+          - **nuwax-cli-windows-amd64.zip** - 适用于 x86_64 架构
+          - **nuwax-cli-windows-arm64.zip** - 适用于 ARM64 架构
+          
+          ### 🔧 安装说明
+          
+          1. 下载对应平台的压缩包
+          2. 解压到您希望的目录
+          3. 将可执行文件路径添加到系统 PATH 环境变量
+          4. 运行 `nuwax-cli --help` 验证安装
+          
+          ### 📋 Linux 版本选择指南
+          
+          **系统要求**:
+          - **x86_64**: Ubuntu 20.04+ / Debian 10+ / CentOS 8+ / RHEL 8+ (GLIBC 2.31+)
+          - **ARM64**: Ubuntu 22.04+ / Debian 11+ / CentOS 9+ / RHEL 9+ (GLIBC 2.35+)
+          - 检查方法：`ldd --version` 查看当前 GLIBC 版本
+          
+          📝 **对于旧系统**：
+          - **Ubuntu 18.04、CentOS 7、RHEL 7**: 系统 GLIBC 版本过低，不支持运行
+          - **Ubuntu 20.04+**: 可以使用 x86_64 动态版本
+          - **推荐**: 使用较新的 Linux 发行版以获得最佳兼容性
+          
+          ### 📋 校验文件完整性
+          
+          下载 `SHA256SUMS` 文件，使用以下命令验证文件完整性：
+          
+          ```bash
+          # Linux/macOS
+          sha256sum -c SHA256SUMS
+          
+          # Windows (PowerShell)
+          Get-FileHash *.zip | Format-Table
+          ```
+          
+          ### 🆕 更新说明
+          
+          如果您已安装旧版本，可以使用内置的更新功能：
+          
+          ```bash
+          nuwax-cli check-update check     # 检查更新
+          nuwax-cli check-update install   # 自动安装最新版本
+          ```
+          
+          ### 📝 版本信息
+          
+          - **版本号**: ${{ needs.check-version.outputs.version }}
+          - **构建时间**: ${BUILD_TIME}
+          - **Git提交**: ${{ github.sha }}
+          - **构建分支**: ${{ github.ref_name }}
+          
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.check-version.outputs.tag_name }}
+          name: Nuwax CLI ${{ needs.check-version.outputs.tag_name }}
+          prerelease: false
+          files: |
+            release_assets/*
+          body_path: release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 上传到阿里云 OSS Beta 测试目录
+  upload-to-beta:
+    name: Upload to Alibaba Cloud OSS Beta
+    runs-on: ubuntu-latest
+    needs: [check-version, release]
+    if: needs.check-version.outputs.should_release == 'true'
+    env:
+      OSS_ENDPOINT: "https://oss-rg-china-mainland.aliyuncs.com"
+      OSS_REGION: "rg-china-mainland"
+      OSS_BUCKET: "oss://nuwa-packages"
+      OSS_CDN_BASE: "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com"
+      TAG_NAME: ${{ needs.check-version.outputs.tag_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+
+      - name: Install ossutil v2
+        run: |
+          curl -fSL -o /tmp/ossutil.zip \
+            "https://gosspublic.alicdn.com/ossutil/v2/2.2.0/ossutil-2.2.0-linux-amd64.zip"
+          unzip -q /tmp/ossutil.zip -d /tmp
+          sudo mv /tmp/ossutil-2.2.0-linux-amd64/ossutil /usr/local/bin/
+          ossutil version
+
+      - name: Prepare release assets (flatten subdirectories)
+        run: |
+          mkdir -p release_assets_flat
+          find release_assets -name "*.tar.gz" -exec cp {} release_assets_flat/ \;
+          find release_assets -name "*.zip" -exec cp {} release_assets_flat/ \;
+          ls -la release_assets_flat/
+
+      - name: Upload all release assets to OSS Beta
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          cd release_assets_flat
+          OSS_PREFIX="nuwax-cli/beta/${TAG_NAME}"
+          echo "==> Uploading to OSS Beta: ${OSS_CDN_BASE}/${OSS_PREFIX}/"
+
+          for file in *.tar.gz *.zip; do
+            if [ -f "$file" ]; then
+              echo "Uploading: $file"
+              ossutil cp --force "$file" "${OSS_BUCKET}/${OSS_PREFIX}/${file}" \
+                --endpoint "$OSS_ENDPOINT" \
+                --region "$OSS_REGION" \
+                --access-key-id "$OSS_ACCESS_KEY_ID" \
+                --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+              echo "✅ Uploaded: $file"
+            fi
+          done
+
+      - name: Generate beta latest.json
+        shell: bash
+        run: |
+          cd release_assets_flat
+          PLATFORMS="{}"
+
+          gen_signature() {
+            local file="$1"
+            sha512sum "$file" | awk '{print $1}' | xxd -r -p | base64 -w0 2>/dev/null || base64
+          }
+
+          add_platform() {
+            local key="$1"
+            local filename="$2"
+            if [ -f "$filename" ]; then
+              local sig size url
+              sig=$(gen_signature "$filename")
+              size=$(stat -c%s "$filename" 2>/dev/null || stat -f%z "$filename")
+              url="${OSS_CDN_BASE}/nuwax-cli/beta/${TAG_NAME}/${filename}"
+              PLATFORMS=$(echo "$PLATFORMS" | jq \
+                --arg k "$key" \
+                --arg u "$url" \
+                --arg s "$sig" \
+                --argjson sz "$size" \
+                '. + {($k): {"url": $u, "signature": $s, "size": $sz}}')
+              echo "  Added: $key -> $filename (${size} bytes)"
+            fi
+          }
+
+          echo "==> Scanning release assets..."
+          add_platform "darwin-aarch64"  "nuwax-cli-macos-arm64.tar.gz"
+          add_platform "darwin-x86_64"  "nuwax-cli-macos-amd64.tar.gz"
+          add_platform "darwin-universal" "nuwax-cli-macos-universal.tar.gz"
+          add_platform "linux-x86_64"   "nuwax-cli-linux-amd64.tar.gz"
+          add_platform "linux-aarch64"  "nuwax-cli-linux-arm64.tar.gz"
+          add_platform "windows-x86_64"  "nuwax-cli-windows-amd64.zip"
+          add_platform "windows-aarch64" "nuwax-cli-windows-arm64.zip"
+
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
+          LATEST_JSON=$(jq -n \
+            --arg version "${TAG_NAME}" \
+            --arg notes "Nuwax CLI ${TAG_NAME} beta release" \
+            --arg pub_date "$PUB_DATE" \
+            --argjson platforms "$PLATFORMS" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}')
+          echo "$LATEST_JSON" > latest.json
+          echo "==> Generated latest.json"
+          cat latest.json | jq .
+
+      - name: Upload beta latest.json to OSS
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          # 上传到版本目录
+          ossutil cp --force release_assets_flat/latest.json "${OSS_BUCKET}/nuwax-cli/beta/${TAG_NAME}/latest.json" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          echo "✅ Uploaded latest.json to beta/${TAG_NAME}/"
+
+          # 更新 beta/latest.json 指针
+          ossutil cp --force release_assets_flat/latest.json "${OSS_BUCKET}/nuwax-cli/beta/latest.json" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          echo "✅ Uploaded latest.json to beta/latest.json"
+
+      - name: Verify OSS Beta upload
+        run: |
+          VERIFY_URL="${OSS_CDN_BASE}/nuwax-cli/beta/latest.json"
+          echo "==> Verifying: ${VERIFY_URL}"
+          HTTP_STATUS=$(curl -sS -o /tmp/oss-latest.json -w "%{http_code}" "$VERIFY_URL")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ latest.json verified (HTTP ${HTTP_STATUS})"
+            cat /tmp/oss-latest.json | jq .
+          else
+            echo "❌ latest.json not found on OSS (HTTP ${HTTP_STATUS})"
+            exit 1
+          fi
+
+  # 清理构建缓存（可选）
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: always()
+    steps:
+      - name: Delete artifacts
+        uses: geekyeggo/delete-artifact@v2
+        with:
+          name: |
+            nuwax-cli-*
+        continue-on-error: true

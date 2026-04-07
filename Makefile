@@ -1,4 +1,4 @@
-.PHONY: build release dev install clean test fmt clippy check help package-linux package-linux-x86 package-linux-arm64
+.PHONY: build release dev install clean test fmt clippy check help package-linux package-linux-x86 package-linux-arm64 package-docker
 
 # Default target
 help:
@@ -17,6 +17,7 @@ help:
 	@echo "  make package-linux       - Build and package Linux (x86_64 + arm64) binaries"
 	@echo "  make package-linux-x86    - Build and package Linux x86_64 binary only"
 	@echo "  make package-linux-arm64 - Build and package Linux ARM64 binary only"
+	@echo "  make package-docker      - Build Linux x86_64 binary using Docker (Ubuntu 22.04)"
 	@echo ""
 	@echo "Linux Build Dependencies:"
 	@echo "  sudo apt-get update && sudo apt-get install -y --no-install-recommends \\"
@@ -72,6 +73,19 @@ package-linux-arm64:
 	cargo build --release --target aarch64-unknown-linux-gnu -p nuwax-cli
 	@tar czf dist/nuwax-cli-linux-arm64.tar.gz -C target/aarch64-unknown-linux-gnu/release nuwax-cli
 	@echo "✅ dist/nuwax-cli-linux-arm64.tar.gz"
+
+# Build Linux x86_64 binary using Docker (via buildx for cross-platform)
+package-docker:
+	@mkdir -p dist
+	@echo "=== Building Linux x86_64 via Docker (buildx) ==="
+	docker buildx build --platform linux/amd64 -t nuwax-cli-builder . --load
+	@echo "=== Extracting binary from Docker image ==="
+	docker cp $$(docker create nuwax-cli-builder):/workspace/target/x86_64-unknown-linux-gnu/release/nuwax-cli dist/
+	@rm -f dist/nuwax-cli-linux-amd64.tar.gz
+	@tar czf dist/nuwax-cli-linux-amd64.tar.gz -C dist nuwax-cli
+	@rm -f dist/nuwax-cli
+	@cp dist/nuwax-cli-linux-amd64.tar.gz target/release/
+	@echo "✅ dist/nuwax-cli-linux-amd64.tar.gz (built via Docker)"
 
 # Build and package Linux (x86_64 + arm64)
 # Note: builds sequentially to avoid cargo build lock contention
