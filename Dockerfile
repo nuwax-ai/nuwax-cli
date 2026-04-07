@@ -1,6 +1,7 @@
-# Ubuntu 22.04 based Rust build environment for nuwax-cli
+# Ubuntu 20.04 based Rust build environment for nuwax-cli
+# 使用 Ubuntu 20.04 构建，确保与 Ubuntu 20.04+ 系统兼容
 
-FROM ubuntu:22.04
+FROM ubuntu:20.04
 
 # 设置环境
 ENV DEBIAN_FRONTEND=noninteractive
