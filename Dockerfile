@@ -37,7 +37,6 @@ COPY . .
 
 # 添加 x86_64 target 并交叉编译
 RUN rustup target add x86_64-unknown-linux-gnu && \
-    cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
-
-# 默认输出目录
-CMD ["tail", "-f", "/dev/null"]
+    cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli && \
+    mkdir -p /output && \
+    cp target/x86_64-unknown-linux-gnu/release/nuwax-cli /output/
