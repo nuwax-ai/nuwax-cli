@@ -60,7 +60,9 @@ package-linux-x86:
 	@mkdir -p dist
 	@echo "=== Building Linux x86_64 ==="
 	cargo build --release -p nuwax-cli
+	@rm -f target/release/nuwax-cli-linux-amd64.tar.gz
 	@tar czf dist/nuwax-cli-linux-amd64.tar.gz -C target/release nuwax-cli
+	@cp dist/nuwax-cli-linux-amd64.tar.gz target/release/
 	@echo "✅ dist/nuwax-cli-linux-amd64.tar.gz"
 
 # Build and package Linux ARM64 binary (cross-compile)
@@ -77,7 +79,9 @@ package-linux:
 	@mkdir -p dist
 	@echo "=== Building Linux x86_64 (native) ==="
 	cargo build --release -p nuwax-cli
+	@rm -f target/release/nuwax-cli-linux-amd64.tar.gz
 	@tar czf dist/nuwax-cli-linux-amd64.tar.gz -C target/release nuwax-cli
+	@cp dist/nuwax-cli-linux-amd64.tar.gz target/release/
 	@echo "✅ dist/nuwax-cli-linux-amd64.tar.gz"
 	$(MAKE) package-linux-arm64
 	@echo ""
