@@ -55,51 +55,31 @@ clippy:
 check:
 	cargo check --workspace
 
-# Check Linux build dependencies (fail fast if missing)
-check-linux-deps:
-	@if [ "$(shell uname -s)" = "Linux" ] && [ "$(shell uname -m)" = "x86_64" ]; then \
-		if ! command -v aarch64-linux-gnu-gcc > /dev/null 2>&1; then \
-			echo ""; \
-			echo "❌ Missing gcc-aarch64-linux-gnu!"; \
-			echo ""; \
-			echo "Please install dependencies first:"; \
-			echo "  sudo apt-get update && sudo apt-get install -y --no-install-recommends \\"; \
-			echo "    build-essential pkg-config libglib2.0-dev libssl-dev curl wget file \\"; \
-			echo "    gcc-aarch64-linux-gnu"; \
-			echo ""; \
-			echo "Then run: make package-linux"; \
-			exit 1; \
-		fi; \
-	fi
-
-# Build and package Linux x86_64 binary
-package-linux-x86: check-linux-deps
+# Build and package Linux x86_64 binary (uses make build output)
+package-linux-x86:
 	@mkdir -p dist
 	@echo "=== Building Linux x86_64 ==="
-	cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
-	@tar czf dist/nuwax-cli-linux-amd64.tar.gz -C target/x86_64-unknown-linux-gnu/release nuwax-cli
+	cargo build --release -p nuwax-cli
+	@tar czf dist/nuwax-cli-linux-amd64.tar.gz -C target/release nuwax-cli
 	@echo "✅ dist/nuwax-cli-linux-amd64.tar.gz"
 
-# Build and package Linux ARM64 binary
-package-linux-arm64: check-linux-deps
+# Build and package Linux ARM64 binary (cross-compile)
+package-linux-arm64:
 	@mkdir -p dist
-	@echo "=== Building Linux ARM64 ==="
+	@echo "=== Building Linux ARM64 (cross-compile) ==="
 	cargo build --release --target aarch64-unknown-linux-gnu -p nuwax-cli
 	@tar czf dist/nuwax-cli-linux-arm64.tar.gz -C target/aarch64-unknown-linux-gnu/release nuwax-cli
 	@echo "✅ dist/nuwax-cli-linux-arm64.tar.gz"
 
 # Build and package Linux (x86_64 + arm64)
 # Note: builds sequentially to avoid cargo build lock contention
-package-linux: check-linux-deps
+package-linux:
 	@mkdir -p dist
-	@echo "=== Building Linux x86_64 ==="
-	cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
-	@tar czf dist/nuwax-cli-linux-amd64.tar.gz -C target/x86_64-unknown-linux-gnu/release nuwax-cli
+	@echo "=== Building Linux x86_64 (native) ==="
+	cargo build --release -p nuwax-cli
+	@tar czf dist/nuwax-cli-linux-amd64.tar.gz -C target/release nuwax-cli
 	@echo "✅ dist/nuwax-cli-linux-amd64.tar.gz"
-	@echo "=== Building Linux ARM64 ==="
-	cargo build --release --target aarch64-unknown-linux-gnu -p nuwax-cli
-	@tar czf dist/nuwax-cli-linux-arm64.tar.gz -C target/aarch64-unknown-linux-gnu/release nuwax-cli
-	@echo "✅ dist/nuwax-cli-linux-arm64.tar.gz"
+	$(MAKE) package-linux-arm64
 	@echo ""
 	@echo "=== All Linux packages built ==="
 	@ls -la dist/nuwax-cli-linux-*.tar.gz
