@@ -63,9 +63,9 @@ jobs:
             echo "is_new_version=true" >> $GITHUB_OUTPUT
           fi
 
-  # Linux x86_64 使用标准 CI 构建
+  # Linux x86_64 使用 Docker 构建 (Ubuntu 20.04)
   build-linux-x86_64:
-    name: Build Linux-x86_64
+    name: Build Linux-x86_64 (Docker)
     runs-on: ubuntu-22.04
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
@@ -73,51 +73,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Linux x86_64 binary via Docker
+        uses: docker/build-push-action@v5
         with:
-          targets: x86_64-unknown-linux-gnu
+          context: .
+          platforms: linux/amd64
+          tags: nuwax-cli-builder:latest
+          load: true
+          pull: true
+          no-cache: true
 
-      - name: Install Linux dependencies
+      - name: Extract binary from Docker image
         run: |
-          echo "=== Linux 依赖安装 ==="
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            curl \
-            wget \
-            file \
-            build-essential \
-            libc6-dev \
-            m4 \
-            pkg-config \
-            libglib2.0-dev \
-            libglib2.0-0 \
-            libglib2.0-data \
-            libglib2.0-bin \
-            glib-networking \
-            glib-networking-common \
-            glib-networking-services
-          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
-          echo "✅ Linux 依赖安装完成"
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-x86_64-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build binary
-        run: |
-          cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
-
-      - name: Package binary
-        run: |
-          cd target/x86_64-unknown-linux-gnu/release
-          tar czf ../../../nuwax-cli-linux-amd64.tar.gz nuwax-cli
-          cd -
+          # Clean up any existing nuwax-cli file or directory
+          rm -rf ./nuwax-cli
+          # Run a temp container to extract the binary
+          docker run --rm -v $(pwd):/output-dir nuwax-cli-builder:latest \
+            sh -c "cp /output/nuwax-cli /output-dir/"
+          ls -la
+          file nuwax-cli
+          # Package as file
+          tar czf nuwax-cli-linux-amd64.tar.gz nuwax-cli
+          rm nuwax-cli
+          ls -la nuwax-cli-linux-amd64.tar.gz
+          file nuwax-cli-linux-amd64.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
