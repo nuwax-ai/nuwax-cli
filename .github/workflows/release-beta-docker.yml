@@ -89,8 +89,16 @@ jobs:
       - name: Extract binary from Docker image
         run: |
           CONTAINER_ID=$(docker create nuwax-cli-builder:latest)
+          # Check what's in /output
+          docker exec ${CONTAINER_ID} ls -la /output/
+          docker exec ${CONTAINER_ID} file /output/nuwax-cli
+          docker exec ${CONTAINER_ID} ls -la /output/nuwax-cli
+          # Copy
           docker cp ${CONTAINER_ID}:/output/nuwax-cli ./nuwax-cli
           docker rm ${CONTAINER_ID}
+          # Check what we got
+          ls -la ./nuwax-cli
+          file ./nuwax-cli
           # Handle both file and directory cases
           if [ -d ./nuwax-cli ]; then
             tar czf nuwax-cli-linux-amd64.tar.gz -C ./nuwax-cli .
