@@ -4,6 +4,9 @@ use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
+use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 
 /// GitHub 仓库信息从 Cargo.toml 中的 repository 字段解析
@@ -568,8 +571,73 @@ pub async fn install_release(url: &str, version: &str) -> Result<()> {
     let total_size = response.content_length().unwrap_or(0);
     info!("📦 File size: {size} bytes", size = total_size);
 
-    let bytes = response.bytes().await?;
-    std::fs::write(&download_path, bytes)?;
+    let mut file = tokio::fs::File::create(&download_path).await?;
+    let mut stream = response.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let started_at = Instant::now();
+    let mut last_log_at = Instant::now();
+    let mut last_logged_downloaded: u64 = 0;
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.context(t!("check_update.download_failed"))?;
+        file.write_all(&chunk).await?;
+        downloaded += chunk.len() as u64;
+
+        let now = Instant::now();
+        let should_log_progress = now.duration_since(last_log_at) >= Duration::from_secs(1)
+            || (total_size > 0 && downloaded >= total_size);
+
+        if should_log_progress {
+            let elapsed_secs = started_at.elapsed().as_secs_f64().max(0.001);
+            let avg_speed_bps = downloaded as f64 / elapsed_secs;
+
+            let recent_elapsed_secs = now.duration_since(last_log_at).as_secs_f64().max(0.001);
+            let recent_speed_bps = (downloaded - last_logged_downloaded) as f64 / recent_elapsed_secs;
+            let speed_bps = if recent_speed_bps > 0.0 {
+                recent_speed_bps
+            } else {
+                avg_speed_bps
+            };
+
+            if total_size > 0 {
+                let progress_percent = (downloaded as f64 / total_size as f64 * 100.0).min(100.0);
+                let remaining_bytes = total_size.saturating_sub(downloaded);
+                let eta_secs = if speed_bps > 0.0 {
+                    (remaining_bytes as f64 / speed_bps).round() as u64
+                } else {
+                    0
+                };
+
+                info!(
+                    "📥 Download progress: {percent:.1}% ({downloaded_mb:.1}/{total_mb:.1} MB) | {speed_mb:.2} MB/s | ETA {eta}s",
+                    percent = progress_percent,
+                    downloaded_mb = downloaded as f64 / 1024.0 / 1024.0,
+                    total_mb = total_size as f64 / 1024.0 / 1024.0,
+                    speed_mb = speed_bps / 1024.0 / 1024.0,
+                    eta = eta_secs
+                );
+            } else {
+                info!(
+                    "📥 Downloading... {downloaded_mb:.1} MB | {speed_mb:.2} MB/s",
+                    downloaded_mb = downloaded as f64 / 1024.0 / 1024.0,
+                    speed_mb = speed_bps / 1024.0 / 1024.0
+                );
+            }
+
+            last_log_at = now;
+            last_logged_downloaded = downloaded;
+        }
+    }
+
+    file.flush().await?;
+
+    let total_elapsed_secs = started_at.elapsed().as_secs_f64().max(0.001);
+    info!(
+        "✅ Downloaded {size_mb:.1} MB in {elapsed:.1}s (avg {speed_mb:.2} MB/s)",
+        size_mb = downloaded as f64 / 1024.0 / 1024.0,
+        elapsed = total_elapsed_secs,
+        speed_mb = (downloaded as f64 / total_elapsed_secs) / 1024.0 / 1024.0
+    );
 
     info!("✅ Download complete, starting installation...");
 
