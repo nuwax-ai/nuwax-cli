@@ -219,7 +219,9 @@ impl FromStr for DownloadHashInfo {
                 timestamp,
             })
         } else {
-            Err(serde::de::Error::custom("下载文件的哈希信息格式无效"))
+            Err(serde::de::Error::custom(
+                "Invalid download hash info format",
+            ))
         }
     }
 }
@@ -303,7 +305,7 @@ impl EnhancedServiceManifest {
     pub fn validate(&self) -> Result<()> {
         // 验证发布日期格式
         if chrono::DateTime::parse_from_rfc3339(&self.release_date).is_err() {
-            return Err(anyhow::anyhow!("发布日期格式无效"));
+            return Err(anyhow::anyhow!("Invalid release date format"));
         }
 
         // 验证原有包信息
@@ -369,7 +371,7 @@ impl PackageInfo {
     /// 验证包信息
     pub fn validate(&self) -> Result<()> {
         if self.url.is_empty() {
-            return Err(anyhow::anyhow!("包URL不能为空"));
+            return Err(anyhow::anyhow!("Package URL cannot be empty"));
         }
 
         // 验证URL格式
@@ -377,7 +379,7 @@ impl PackageInfo {
             && !self.url.starts_with("https://")
             && !self.url.starts_with("/")
         {
-            return Err(anyhow::anyhow!("包URL格式无效"));
+            return Err(anyhow::anyhow!("Invalid package URL format"));
         }
 
         Ok(())
@@ -397,7 +399,9 @@ impl PlatformPackages {
 
         // 至少要有一个平台的包
         if self.x86_64.is_none() && self.aarch64.is_none() {
-            return Err(anyhow::anyhow!("至少需要提供一个平台的包信息"));
+            return Err(anyhow::anyhow!(
+                "At least one platform package must be provided"
+            ));
         }
 
         Ok(())
@@ -408,14 +412,14 @@ impl PlatformPackageInfo {
     /// 验证平台包信息
     pub fn validate(&self) -> Result<()> {
         if self.url.is_empty() {
-            return Err(anyhow::anyhow!("平台包URL不能为空"));
+            return Err(anyhow::anyhow!("Platform package URL cannot be empty"));
         }
 
         if !self.url.starts_with("http://")
             && !self.url.starts_with("https://")
             && !self.url.starts_with("/")
         {
-            return Err(anyhow::anyhow!("平台包URL格式无效"));
+            return Err(anyhow::anyhow!("Invalid platform package URL format"));
         }
 
         // 签名可以为空（对于某些部署环境）
@@ -437,7 +441,9 @@ impl PatchInfo {
 
         // 至少要有一个架构的补丁
         if self.x86_64.is_none() && self.aarch64.is_none() {
-            return Err(anyhow::anyhow!("至少需要提供一个架构的补丁信息"));
+            return Err(anyhow::anyhow!(
+                "At least one architecture patch must be provided"
+            ));
         }
 
         Ok(())
@@ -448,19 +454,19 @@ impl PatchPackageInfo {
     /// 验证补丁包信息
     pub fn validate(&self) -> Result<()> {
         if self.url.is_empty() {
-            return Err(anyhow::anyhow!("补丁包URL不能为空"));
+            return Err(anyhow::anyhow!("Patch package URL cannot be empty"));
         }
 
         if !self.url.starts_with("http://")
             && !self.url.starts_with("https://")
             && !self.url.starts_with("/")
         {
-            return Err(anyhow::anyhow!("补丁包URL格式无效"));
+            return Err(anyhow::anyhow!("Invalid patch package URL format"));
         }
 
         if let Some(hash) = &self.hash {
             if hash.is_empty() {
-                return Err(anyhow::anyhow!("补丁包哈希值不能为空"));
+                return Err(anyhow::anyhow!("Patch package hash cannot be empty"));
             }
         }
 
@@ -506,7 +512,7 @@ impl ReplaceOperations {
         // 验证文件路径
         for file_path in &self.files {
             if file_path.is_empty() {
-                return Err(anyhow::anyhow!("文件路径不能为空"));
+                return Err(anyhow::anyhow!("File path cannot be empty"));
             }
 
             // 安全检查：防止访问系统重要路径
@@ -515,14 +521,14 @@ impl ReplaceOperations {
                 || file_path.contains("..\\")
                 || file_path.starts_with("C:\\")
             {
-                return Err(anyhow::anyhow!("危险的文件路径: {}", file_path));
+                return Err(anyhow::anyhow!("Dangerous file path: {}", file_path));
             }
         }
 
         // 验证目录路径
         for dir_path in &self.directories {
             if dir_path.is_empty() {
-                return Err(anyhow::anyhow!("目录路径不能为空"));
+                return Err(anyhow::anyhow!("Directory path cannot be empty"));
             }
 
             // 安全检查：防止访问系统重要路径
@@ -531,7 +537,7 @@ impl ReplaceOperations {
                 || dir_path.contains("..\\")
                 || dir_path.starts_with("C:\\")
             {
-                return Err(anyhow::anyhow!("危险的目录路径: {}", dir_path));
+                return Err(anyhow::anyhow!("Dangerous directory path: {}", dir_path));
             }
         }
 

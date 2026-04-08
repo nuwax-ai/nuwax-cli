@@ -238,11 +238,11 @@ impl ApiClient {
         let mut last_progress_time = std::time::Instant::now();
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| DuckError::custom(format!("下载数据失败: {e}")))?;
+            let chunk = chunk.map_err(|e| DuckError::custom(format!("Failed to download data: {e}")))?;
 
             tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
                 .await
-                .map_err(|e| DuckError::custom(format!("写入文件失败: {e}")))?;
+                .map_err(|e| DuckError::custom(format!("Failed to write file: {e}")))?;
 
             downloaded += chunk.len() as u64;
 
@@ -445,7 +445,7 @@ impl ApiClient {
             .await
             .map_err(|e| {
                 DuckError::Custom(format!(
-                    "读取哈希文件失败 {}: {}",
+                    "Failed to read hash file {}: {}",
                     hash_file_path.display(),
                     e
                 ))

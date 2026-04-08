@@ -78,7 +78,7 @@ impl Architecture {
         match arch_str.to_lowercase().as_str() {
             "x86_64" | "amd64" | "x64" => Ok(Self::X86_64),
             "aarch64" | "arm64" | "armv8" => Ok(Self::Aarch64),
-            _ => Err(anyhow::anyhow!("不支持的架构: {}", arch_str)),
+            _ => Err(anyhow::anyhow!("Unsupported architecture: {}", arch_str)),
         }
     }
 
@@ -112,9 +112,9 @@ impl Architecture {
     /// ```
     pub fn display_name(&self) -> &str {
         match self {
-            Self::X86_64 => "Intel/AMD 64位",
-            Self::Aarch64 => "ARM 64位",
-            Self::Unsupported(_) => "不支持的架构",
+            Self::X86_64 => "Intel/AMD 64-bit",
+            Self::Aarch64 => "ARM 64-bit",
+            Self::Unsupported(_) => "Unsupported architecture",
         }
     }
 
@@ -191,7 +191,7 @@ impl ArchitectureCompatibilityChecker {
             Ok(())
         } else {
             Err(anyhow::anyhow!(format!(
-                "架构不兼容: 当前系统为 {}，目标架构为 {}",
+                "Architecture mismatch: current system is {}, target architecture is {}",
                 current_arch.display_name(),
                 target_arch.display_name()
             )))
@@ -202,11 +202,11 @@ impl ArchitectureCompatibilityChecker {
     pub fn get_system_summary() -> String {
         let arch = Architecture::detect();
         format!(
-            "操作系统: {}, 架构: {} ({}), 64位支持: {}",
+            "OS: {}, architecture: {} ({}), 64-bit support: {}",
             std::env::consts::OS,
             arch.as_str(),
             arch.display_name(),
-            if arch.is_64bit() { "是" } else { "否" }
+            if arch.is_64bit() { "yes" } else { "no" }
         )
     }
 

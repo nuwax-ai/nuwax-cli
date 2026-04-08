@@ -310,7 +310,7 @@ pub mod api {
                 return custom_url;
             } else {
                 tracing::warn!(
-                    "NUWAX_API_BASE_URL 格式无效: '{}'. 预期 http:// 或 https:// 开头。回退到环境模式。",
+                    "Invalid NUWAX_API_BASE_URL: '{}'. Expected to start with http:// or https://. Falling back to environment mode.",
                     custom_url
                 );
             }

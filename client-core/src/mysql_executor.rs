@@ -29,20 +29,20 @@ impl MySqlConfig {
             (Some(c), Some(e)) => DockerManager::with_project(c, e, None)?,
             _ => {
                 return Err(anyhow!(
-                    "未提供 docker-compose.yml 和 .env 文件路径,无法加载解析 Docker Compose 配置"
+                    "docker-compose.yml and .env paths are required to load Docker Compose configuration"
                 ));
             }
         };
         let compose_config = docker_manager
             .load_compose_config()
-            .context("无法加载 Docker Compose 配置")?;
+            .context("Failed to load Docker Compose configuration")?;
 
         let mysql_service = compose_config
             .services
             .0
             .get("mysql")
             .and_then(|s| s.as_ref())
-            .ok_or_else(|| anyhow!("在 docker-compose.yml 中未找到 'mysql' 服务"))?;
+            .ok_or_else(|| anyhow!("'mysql' service not found in docker-compose.yml"))?;
 
         let mut config_map = std::collections::HashMap::new();
         if let dct::Environment::List(env_list) = &mysql_service.environment {
@@ -64,7 +64,7 @@ impl MySqlConfig {
                         None
                     }
                 })
-                .ok_or_else(|| anyhow!("在 'mysql' 服务中未找到到容器端口 3306 的映射"))?,
+                .ok_or_else(|| anyhow!("No mapping to container port 3306 found in 'mysql' service"))?,
             dct::Ports::Long(ports_list) => ports_list
                 .iter()
                 .find_map(|p| {
@@ -80,8 +80,8 @@ impl MySqlConfig {
                         None
                     }
                 })
-                .ok_or_else(|| anyhow!("在 'mysql' 服务中未找到到容器端口 3306 的映射"))?,
-            _ => return Err(anyhow!("不支持的 ports 格式或在 'mysql' 服务中未定义")),
+                .ok_or_else(|| anyhow!("No mapping to container port 3306 found in 'mysql' service"))?,
+            _ => return Err(anyhow!("Unsupported ports format or undefined ports in 'mysql' service")),
         };
 
         Ok(MySqlConfig {
@@ -152,7 +152,7 @@ impl MySqlExecutor {
         for attempt in 0..=max_retries {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
-                results.push(format!("🔄 正在进行第 {attempt}/{max_retries} 次重试..."));
+                results.push(format!("🔄 Retrying attempt {attempt}/{max_retries}..."));
             }
 
             let mut conn = self.pool.get_conn().await?;
@@ -167,21 +167,21 @@ impl MySqlExecutor {
             {
                 Ok(_) => {
                     tx.commit().await?;
-                    results.insert(0, "✅ 差异SQL执行成功".to_string());
+                    results.insert(0, "✅ Diff SQL executed successfully".to_string());
                     return Ok(results);
                 }
                 Err(e) => {
                     tx.rollback().await?;
                     // 移除本次失败尝试中添加的日志
                     results.truncate(results_len_before_attempt);
-                    results.push(format!("❌ 第{}次尝试失败: {}", attempt + 1, e));
+                    results.push(format!("❌ Attempt {} failed: {}", attempt + 1, e));
                     last_error = Some(e);
                 }
             }
         }
 
         Err(anyhow::anyhow!(
-            "❌ 经过 {} 次尝试后，SQL执行最终失败。最后一次错误: {}",
+            "❌ SQL execution failed after {} attempts. Last error: {}",
             max_retries + 1,
             last_error.unwrap()
         ))
@@ -286,7 +286,7 @@ impl MySqlExecutor {
             let row: Row = conn
                 .exec_first(query, ())
                 .await?
-                .ok_or_else(|| anyhow::anyhow!(format!("无法获取表的CREATE语句: {}", table)))?;
+                .ok_or_else(|| anyhow::anyhow!(format!("Failed to get CREATE statement for table: {}", table)))?;
             // MySQL返回两列：Table, Create Table
             let (_tbl_name, create_stmt): (String, String) = from_row(row);
             create_sqls.push_str(&create_stmt);
@@ -300,7 +300,7 @@ impl MySqlExecutor {
 
         // 使用 sqlparser 解析 DDL，严格避免正则
         let tables = parse_sql_tables(&create_sqls)
-            .map_err(|e| anyhow::anyhow!(format!("解析在线DDL失败: {}", e)))?;
+            .map_err(|e| anyhow::anyhow!(format!("Failed to parse online DDL: {}", e)))?;
 
         Ok((tables, create_sqls))
     }

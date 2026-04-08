@@ -86,11 +86,11 @@ impl DuckDbManager {
         self.sender
             .send(DbMessage::InitTables { respond_to })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 获取配置值
@@ -103,11 +103,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 设置配置值
@@ -121,11 +121,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 获取或创建客户端 UUID
@@ -170,11 +170,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 更新下载任务状态
@@ -196,11 +196,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 完成下载任务
@@ -220,11 +220,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 获取下载任务
@@ -237,11 +237,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 获取活跃的下载任务
@@ -251,11 +251,11 @@ impl DuckDbManager {
         self.sender
             .send(DbMessage::GetActiveDownloadTasks { respond_to })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     // ========== 应用状态管理 ==========
@@ -277,11 +277,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 获取当前应用状态
@@ -291,11 +291,11 @@ impl DuckDbManager {
         self.sender
             .send(DbMessage::GetAppState { respond_to })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     // ========== 用户操作历史 ==========
@@ -317,11 +317,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 完成用户操作
@@ -343,11 +343,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 获取用户操作历史
@@ -357,11 +357,11 @@ impl DuckDbManager {
         self.sender
             .send(DbMessage::GetUserActions { limit, respond_to })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     // ========== 现有的备份和任务管理 ==========
@@ -385,11 +385,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 获取所有备份记录
@@ -399,11 +399,11 @@ impl DuckDbManager {
         self.sender
             .send(DbMessage::GetAllBackups { respond_to })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 根据ID获取备份记录
@@ -413,11 +413,11 @@ impl DuckDbManager {
         self.sender
             .send(DbMessage::GetBackupById { id, respond_to })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 删除备份记录
@@ -430,11 +430,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 更新备份文件路径
@@ -448,11 +448,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 创建计划任务
@@ -475,11 +475,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 获取待执行任务
@@ -489,11 +489,11 @@ impl DuckDbManager {
         self.sender
             .send(DbMessage::GetPendingTasks { respond_to })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 更新任务状态
@@ -513,11 +513,11 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 
     /// 取消待执行任务
@@ -530,10 +530,10 @@ impl DuckDbManager {
                 respond_to,
             })
             .await
-            .map_err(|_| DuckError::Custom("数据库Actor已关闭".to_string()))?;
+            .map_err(|_| DuckError::Custom("Database actor has been closed".to_string()))?;
 
         receiver
             .await
-            .map_err(|_| DuckError::Custom("等待数据库响应超时".to_string()))?
+            .map_err(|_| DuckError::Custom("Timed out waiting for database response".to_string()))?
     }
 }
