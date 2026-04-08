@@ -71,8 +71,26 @@ impl DockerManager {
 
     /// 重启所有服务
     pub async fn restart_services(&self) -> Result<()> {
-        self.stop_services().await?;
-        self.start_services().await?;
+        // 跳过环境先决条件检查，避免 Docker 命令导致的高磁盘 IO
+        // self.check_prerequisites().await?;
+        let output = self.run_compose_command(&["restart"]).await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let exit_code = output.status.code().unwrap_or(-1);
+
+            let error_msg = format!(
+                "Failed to restart services (exit code: {exit_code}):\nstderr: {stderr}\nstdout: {stdout}"
+            );
+
+            error!("{}", error_msg);
+            return Err(anyhow::anyhow!(error_msg));
+        }
+
+        // 重启后验证服务状态，保持与启动逻辑一致的可观测性
+        self.verify_services_started(None).await?;
+
         Ok(())
     }
 

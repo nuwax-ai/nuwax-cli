@@ -387,14 +387,38 @@ error!("Failed to stop services: {error}", error = e.to_string());
     pub async fn restart_services(&mut self) -> DockerServiceResult<()> {
         info!("Restarting Docker Compose services...");
 
-        // 先停止服务
-        self.stop_services().await?;
+        // 使用 compose restart 语义，避免 down+up 触发重新创建和潜在拉取行为
+        let result = self.docker_manager.restart_services().await;
 
-        // 等待一下确保服务完全停止
-        tokio::time::sleep(Duration::from_secs(timeout::RESTART_INTERVAL)).await;
+        match result {
+            Ok(_) => {
+                info!("Waiting for services to become ready after restart...");
+                let check_interval = Duration::from_secs(timeout::HEALTH_CHECK_INTERVAL);
 
-        // 重新启动服务（不重新部署，只是启动）
-        self.start_services().await
+                match self
+                    .health_checker
+                    .wait_for_services_ready(check_interval)
+                    .await
+                {
+                    Ok(report) => {
+                        info!("All services restarted successfully!");
+                        self.print_service_status(&report).await;
+                    }
+                    Err(e) => {
+                        warn!("Wait for services after restart failed or timed out: {error}", error = e.to_string());
+                        if let Ok(report) = self.health_checker.health_check().await {
+                            self.print_service_status_with_failures(&report).await;
+                        }
+                    }
+                }
+
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to restart services: {error}", error = e.to_string());
+                Err(DockerServiceError::ServiceManagement(e.to_string()))
+            }
+        }
     }
 
     /// 重启单个容器
