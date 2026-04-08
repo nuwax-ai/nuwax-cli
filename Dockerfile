@@ -7,7 +7,8 @@ FROM ubuntu:20.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DEBCONF_NONINTERACTIVE_SEEN=true
 
-# 安装构建依赖（包括交叉编译工具链）
+# 安装构建依赖
+# gcc-multilib 仅在 x86_64 架构时安装
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
@@ -18,7 +19,6 @@ RUN apt-get update && apt-get install -y \
     wget \
     git \
     cmake \
-    gcc-multilib \
     && rm -rf /var/lib/apt/lists/*
 
 # 使用 rustup 官方安装 Rust
@@ -36,8 +36,17 @@ RUN rustc --version && cargo --version
 WORKDIR /workspace
 COPY . .
 
-# 添加 x86_64 target 并交叉编译
-RUN rustup target add x86_64-unknown-linux-gnu && \
-    cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli && \
+# 动态检测架构并添加对应的 Rust target
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        rustup target add x86_64-unknown-linux-gnu; \
+        cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+        rustup target add aarch64-unknown-linux-gnu; \
+        cargo build --release --target aarch64-unknown-linux-gnu -p nuwax-cli; \
+    else \
+        echo "Unsupported architecture: $ARCH"; \
+        exit 1; \
+    fi && \
     mkdir -p /output && \
-    cp target/x86_64-unknown-linux-gnu/release/nuwax-cli /output/
+    cp target/*/release/nuwax-cli /output/
