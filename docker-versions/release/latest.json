@@ -1,24 +1,67 @@
 {
-  "version": "0.0.64-beta",
-  "release_notes": "测试版本",
-  "release_date": "2026-04-09T00:00:00Z",
-  "packages": {
-    "full": {
-      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/test/docker-x86_64.zip",
-      "hash": "external",
-      "signature": "",
-      "size": 0
-    }
-  },
-  "platforms": {
-    "aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNsaSBzZWNyZXQga2V5CkNMSS1XSU5ET1dTLVg2NC12MS4xLjA=",
-      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/test/docker-aarch64.zip"
+
+    "version": "0.0.64",
+    "release_notes": "测试版本beta",
+    "release_date": "2025-11-15T07:51:53Z",
+    "packages": {
+      "full": {
+        "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20251117124129/docker-x86_64.zip",
+        "hash": "external",
+        "signature": "",
+        "size": 0
+      }
     },
-    "x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNsaSBzZWNyZXQga2V5CkNMSS1MSU5VWC1YNjQtdjEuMS4w",
-      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/test/docker-x86_64.zip"
+    "platforms": {
+      "x86_64": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNsaSBzZWNyZXQga2V5CkNMSS1MSU5VWC1YNjQtdjEuMS4w",
+        "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20251117124129/docker-x86_64.zip"
+      },
+      "aarch64": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNsaSBzZWNyZXQga2V5CkNMSS1XSU5ET1dTLVg2NC12MS4xLjA=",
+        "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20251117124129/docker-aarch64.zip"
+      }
+    },
+     "patch": {
+      "x86_64": {
+        "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20251117115813/diff/docker-x86_64.zip",
+        "hash": "sha256:patch_hash_x86_64",
+        "signature": "patch_signature_x86_64",
+        "operations": {
+          "replace": {
+            "files": [
+              "app/app.jar",
+              "images/mcp-proxy-latest-amd64.tar"
+            ],
+            "directories": [
+               "app/front"
+            ]
+          },
+          "delete": {
+            "files": [],
+            "directories": []
+          }
+        }
+      },
+      "aarch64": {
+        "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20251117115813/diff/docker-aarch64.zip",
+        "hash": "sha256:patch_hash_aarch64",
+        "signature": "patch_signature_aarch64",
+        "operations": {
+           "replace": {
+            "files": [
+              "app/app.jar",
+              "images/mcp-proxy-latest-arm64.tar"
+            ],
+            "directories": [
+               "app/front"
+            ]
+          },
+          "delete": {
+            "files": [],
+            "directories": []
+          }
+        },
+        "notes": "patch包目录结构与docker.zip保持一致"
+      }
     }
-  },
-  "patch": null
 }
