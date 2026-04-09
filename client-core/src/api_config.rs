@@ -20,6 +20,9 @@ pub struct ApiEndpoints {
 
     /// Docker版本JSON (OSS) - 测试/发布环境
     pub docker_version_oss_release: String,
+
+    /// Docker版本获取端点 (用于降级fallback)
+    pub docker_upgrade_version_latest: String,
     /// Docker完整服务包下载端点
     pub docker_download_full: String,
     /// 客户端自升级历史端点
@@ -53,6 +56,8 @@ impl Default for ApiConfig {
                     .to_string(),
                 docker_version_oss_prod: api::endpoints::DOCKER_VERSION_OSS_PROD.to_string(),
                 docker_version_oss_release: api::endpoints::DOCKER_VERSION_OSS_RELEASE
+                    .to_string(),
+                docker_upgrade_version_latest: api::endpoints::DOCKER_UPGRADE_VERSION_LATEST
                     .to_string(),
                 service_upgrade_history: api::endpoints::SERVICE_UPGRADE_HISTORY.to_string(),
                 telemetry: api::endpoints::TELEMETRY.to_string(),

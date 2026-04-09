@@ -602,12 +602,34 @@ impl ApiClient {
     }
 
     /// 获取增强的服务清单（支持分架构和增量升级）
+    /// 优先从 OSS 获取，失败后降级到原 API 地址
     pub async fn get_enhanced_service_manifest(&self) -> Result<EnhancedServiceManifest> {
-        let url = self
-            .config
-            .get_endpoint_url(&self.config.endpoints.docker_check_version);
+        // 优先使用 OSS 地址
+        let oss_url = &self.config.endpoints.docker_version_oss_prod;
+        info!("Fetching service manifest from OSS: {}", oss_url);
 
-        let response = self.build_request(&url).send().await?;
+        match self.fetch_and_parse_manifest(oss_url).await {
+            Ok(manifest) => {
+                info!("Successfully fetched manifest from OSS");
+                return Ok(manifest);
+            }
+            Err(e) => {
+                warn!("Failed to fetch from OSS: {}, falling back to API", e);
+            }
+        }
+
+        // OSS 失败，降级到原 API 地址 (使用 upgrade/versions/latest)
+        let api_url = self
+            .config
+            .get_endpoint_url(&self.config.endpoints.docker_upgrade_version_latest);
+        info!("Fetching service manifest from API: {}", api_url);
+
+        self.fetch_and_parse_manifest(&api_url).await
+    }
+
+    /// 从指定 URL 获取并解析服务清单
+    async fn fetch_and_parse_manifest(&self, url: &str) -> Result<EnhancedServiceManifest> {
+        let response = self.build_request(url).send().await?;
 
         if response.status().is_success() {
             // 先获取原始json文本，解析为serde_json::Value，判断根对象是否有 platforms 字段

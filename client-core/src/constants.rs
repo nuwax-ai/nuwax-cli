@@ -357,6 +357,9 @@ pub mod api {
         /// Docker版本列表更新端点
         pub const DOCKER_UPDATE_VERSION_LIST: &str = "/api/v1/docker/updateVersionList";
 
+        /// Docker版本获取端点 (用于降级fallback)
+        pub const DOCKER_UPGRADE_VERSION_LATEST: &str = "/api/v1/docker/upgrade/versions/latest.json";
+
         /// Docker版本JSON (OSS) - 生产环境
         pub const DOCKER_VERSION_OSS_PROD: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/latest.json";
 
