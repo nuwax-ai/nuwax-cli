@@ -357,6 +357,12 @@ pub mod api {
         /// Docker版本列表更新端点
         pub const DOCKER_UPDATE_VERSION_LIST: &str = "/api/v1/docker/updateVersionList";
 
+        /// Docker版本JSON (OSS) - 生产环境
+        pub const DOCKER_VERSION_OSS_PROD: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/latest.json";
+
+        /// Docker版本JSON (OSS) - 测试/发布环境
+        pub const DOCKER_VERSION_OSS_RELEASE: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/release/latest.json";
+
         /// Docker完整服务包下载端点
         pub const DOCKER_DOWNLOAD_FULL: &str =
             "/api/v1/clients/downloads/docker/services/full/latest";

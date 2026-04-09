@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info, warn};
@@ -31,7 +32,10 @@ impl ApiClient {
         authenticated_client: Option<Arc<AuthenticatedClient>>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("Failed to create HTTP client with timeout"),
             config: Arc::new(ApiConfig::default()),
             client_id,
             authenticated_client,
