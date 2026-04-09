@@ -263,6 +263,9 @@ pub mod api {
     /// 环境变量名称：自定义 API 服务器地址
     pub const NUWAX_API_BASE_URL_ENV: &str = "NUWAX_API_BASE_URL";
 
+    /// Docker版本JSON URL环境变量（最高优先级，允许自定义docker版本JSON地址）
+    pub const NUWAX_API_DOCKER_VERSION_URL_ENV: &str = "NUWAX_API_DOCKER_VERSION_URL";
+
     /// 生产环境API服务器地址
     const PRODUCTION_BASE_URL: &str = "https://api-version.nuwax.com";
 

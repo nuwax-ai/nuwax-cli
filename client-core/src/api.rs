@@ -1,4 +1,5 @@
 use crate::api_config::ApiConfig;
+use crate::constants::api as api_constants;
 use crate::api_types::*;
 use crate::authenticated_client::AuthenticatedClient;
 use crate::downloader::{DownloadProgress, DownloaderConfig, FileDownloader};
@@ -603,18 +604,26 @@ impl ApiClient {
 
     /// 获取增强的服务清单（支持分架构和增量升级）
     /// 优先从 OSS 获取，失败后降级到原 API 地址
+    /// 支持通过 NUWAX_API_DOCKER_VERSION_URL 环境变量自定义 URL
     pub async fn get_enhanced_service_manifest(&self) -> Result<EnhancedServiceManifest> {
-        // 优先使用 OSS 地址
-        let oss_url = &self.config.endpoints.docker_version_oss_prod;
-        info!("Fetching service manifest from OSS: {}", oss_url);
+        // 检查是否设置了自定义 Docker 版本 URL 环境变量
+        let custom_url = std::env::var(api_constants::NUWAX_API_DOCKER_VERSION_URL_ENV);
+        
+        let (oss_url, url_source) = if let Ok(url) = custom_url {
+            (url, "env NUWAX_API_DOCKER_VERSION_URL")
+        } else {
+            (self.config.endpoints.docker_version_oss_prod.clone(), "prod OSS")
+        };
+        
+        info!("Fetching service manifest from {}: {}", url_source, oss_url);
 
-        match self.fetch_and_parse_manifest(oss_url).await {
+        match self.fetch_and_parse_manifest(&oss_url).await {
             Ok(manifest) => {
-                info!("Successfully fetched manifest from OSS");
+                info!("Successfully fetched manifest from {}", url_source);
                 return Ok(manifest);
             }
             Err(e) => {
-                warn!("Failed to fetch from OSS: {}, falling back to API", e);
+                warn!("Failed to fetch from {}: {}, falling back to API", url_source, e);
             }
         }
 
