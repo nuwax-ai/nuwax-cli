@@ -367,7 +367,7 @@ pub mod api {
         pub const DOCKER_VERSION_OSS_PROD: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/latest.json";
 
         /// Docker版本JSON (OSS) - 测试/发布环境
-        pub const DOCKER_VERSION_OSS_RELEASE: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/release/latest.json";
+        pub const DOCKER_VERSION_OSS_BETA: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/beta/latest.json";
 
         /// Docker完整服务包下载端点
         pub const DOCKER_DOWNLOAD_FULL: &str =

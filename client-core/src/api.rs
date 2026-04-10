@@ -605,6 +605,7 @@ impl ApiClient {
     /// 获取增强的服务清单（支持分架构和增量升级）
     /// 优先从 OSS 获取，失败后降级到原 API 地址
     /// 支持通过 NUWAX_API_DOCKER_VERSION_URL 环境变量自定义 URL
+    /// NUWAX_CLI_ENV=test 时使用 beta/latest.json
     pub async fn get_enhanced_service_manifest(&self) -> Result<EnhancedServiceManifest> {
         // 检查是否设置了自定义 Docker 版本 URL 环境变量
         let custom_url = std::env::var(api_constants::NUWAX_API_DOCKER_VERSION_URL_ENV);
@@ -612,7 +613,13 @@ impl ApiClient {
         let (oss_url, url_source) = if let Ok(url) = custom_url {
             (url, "env NUWAX_API_DOCKER_VERSION_URL")
         } else {
-            (self.config.endpoints.docker_version_oss_prod.clone(), "prod OSS")
+            // 检查是否为测试环境
+            let cli_env = std::env::var("NUWAX_CLI_ENV").unwrap_or_default();
+            if cli_env.eq_ignore_ascii_case("test") || cli_env.eq_ignore_ascii_case("testing") {
+                (self.config.endpoints.docker_version_oss_beta.clone(), "beta OSS (test env)")
+            } else {
+                (self.config.endpoints.docker_version_oss_prod.clone(), "prod OSS")
+            }
         };
         
         info!("Fetching service manifest from {}: {}", url_source, oss_url);

@@ -1,5 +1,5 @@
 # 同步 Docker 版本配置到阿里云 OSS
-# 触发方式: push docker-version-prod/* 或 docker-version-release/* tag
+# 触发方式: push docker-version-prod/* 或 docker-version-beta/* tag
 # 示例: git tag docker-version-prod/v0.0.64 && git push
 
 name: Sync Docker Version to OSS
@@ -8,12 +8,12 @@ on:
   push:
     tags:
       - 'docker-version-prod/*'
-      - 'docker-version-release/*'
+      - 'docker-version-beta/*'
 
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Environment (prod or release)'
+        description: 'Environment (prod or beta)'
         required: true
         default: 'prod'
         type: choice
@@ -50,13 +50,13 @@ jobs:
             VERSION="${{ inputs.version }}"
           else
             TAG_NAME="${GITHUB_REF#refs/tags/}"
-            # 解析: docker-version-prod/v0.0.64 或 docker-version-release/v0.0.64
-            if [[ "$TAG_NAME" =~ ^docker-version-(prod|release)/(.+)$ ]]; then
+            # 解析: docker-version-prod/v0.0.64 或 docker-version-beta/v0.0.64
+            if [[ "$TAG_NAME" =~ ^docker-version-(prod|beta)/(.+)$ ]]; then
               ENV="${BASH_REMATCH[1]}"
               VERSION="${BASH_REMATCH[2]}"
             else
               echo "❌ Invalid tag format: $TAG_NAME"
-              echo "Expected: docker-version-prod/v0.0.64 or docker-version-release/v0.0.64"
+              echo "Expected: docker-version-prod/v0.0.64 or docker-version-beta/v0.0.64"
               exit 1
             fi
           fi
