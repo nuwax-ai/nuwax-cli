@@ -1,6 +1,6 @@
 [package]
 name = "nuwax-cli"
-version = "1.0.111"
+version = "1.0.112"
 edition = "2024"
 description = "Docker service management and upgrade CLI"
 authors = ["soddygo"]
