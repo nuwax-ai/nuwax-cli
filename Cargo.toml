@@ -6,7 +6,7 @@ members = ["client-core", "nuwax-cli", "cli-ui/src-tauri"]
 [workspace.dependencies]
 
 # 集成的 ducker Docker TUI (锁定 v0.5.5 版本以兼容 bollard 0.19 和 ratatui 0.29)
-ducker = { version = "0.5.5", git = "https://github.com/robertpsoane/ducker.git", tag = "v0.5.5" }
+ducker = { version = "=0.5.5", git = "https://github.com/robertpsoane/ducker.git", tag = "v0.5.5" }
 
 # 异步运行时
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread"] }
