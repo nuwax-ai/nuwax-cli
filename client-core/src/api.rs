@@ -1,4 +1,5 @@
 use crate::api_config::ApiConfig;
+use crate::constants::api as api_constants;
 use crate::api_types::*;
 use crate::authenticated_client::AuthenticatedClient;
 use crate::downloader::{DownloadProgress, DownloaderConfig, FileDownloader};
@@ -11,6 +12,7 @@ use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info, warn};
@@ -31,7 +33,10 @@ impl ApiClient {
         authenticated_client: Option<Arc<AuthenticatedClient>>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("Failed to create HTTP client with timeout"),
             config: Arc::new(ApiConfig::default()),
             client_id,
             authenticated_client,
@@ -238,11 +243,11 @@ impl ApiClient {
         let mut last_progress_time = std::time::Instant::now();
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| DuckError::custom(format!("下载数据失败: {e}")))?;
+            let chunk = chunk.map_err(|e| DuckError::custom(format!("Failed to download data: {e}")))?;
 
             tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
                 .await
-                .map_err(|e| DuckError::custom(format!("写入文件失败: {e}")))?;
+                .map_err(|e| DuckError::custom(format!("Failed to write file: {e}")))?;
 
             downloaded += chunk.len() as u64;
 
@@ -445,7 +450,7 @@ impl ApiClient {
             .await
             .map_err(|e| {
                 DuckError::Custom(format!(
-                    "读取哈希文件失败 {}: {}",
+                    "Failed to read hash file {}: {}",
                     hash_file_path.display(),
                     e
                 ))
@@ -598,12 +603,49 @@ impl ApiClient {
     }
 
     /// 获取增强的服务清单（支持分架构和增量升级）
+    /// 优先从 OSS 获取，失败后降级到原 API 地址
+    /// 支持通过 NUWAX_API_DOCKER_VERSION_URL 环境变量自定义 URL
+    /// NUWAX_CLI_ENV=test 时使用 beta/latest.json
     pub async fn get_enhanced_service_manifest(&self) -> Result<EnhancedServiceManifest> {
-        let url = self
-            .config
-            .get_endpoint_url(&self.config.endpoints.docker_check_version);
+        // 检查是否设置了自定义 Docker 版本 URL 环境变量
+        let custom_url = std::env::var(api_constants::NUWAX_API_DOCKER_VERSION_URL_ENV);
+        
+        let (oss_url, url_source) = if let Ok(url) = custom_url {
+            (url, "env NUWAX_API_DOCKER_VERSION_URL")
+        } else {
+            // 检查是否为测试环境
+            let cli_env = std::env::var("NUWAX_CLI_ENV").unwrap_or_default();
+            if cli_env.eq_ignore_ascii_case("test") || cli_env.eq_ignore_ascii_case("testing") {
+                (self.config.endpoints.docker_version_oss_beta.clone(), "beta OSS (test env)")
+            } else {
+                (self.config.endpoints.docker_version_oss_prod.clone(), "prod OSS")
+            }
+        };
+        
+        info!("Fetching service manifest from {}: {}", url_source, oss_url);
 
-        let response = self.build_request(&url).send().await?;
+        match self.fetch_and_parse_manifest(&oss_url).await {
+            Ok(manifest) => {
+                info!("Successfully fetched manifest from {}", url_source);
+                return Ok(manifest);
+            }
+            Err(e) => {
+                warn!("Failed to fetch from {}: {}, falling back to API", url_source, e);
+            }
+        }
+
+        // OSS 失败，降级到原 API 地址 (使用 upgrade/versions/latest)
+        let api_url = self
+            .config
+            .get_endpoint_url(&self.config.endpoints.docker_upgrade_version_latest);
+        info!("Fetching service manifest from API: {}", api_url);
+
+        self.fetch_and_parse_manifest(&api_url).await
+    }
+
+    /// 从指定 URL 获取并解析服务清单
+    async fn fetch_and_parse_manifest(&self, url: &str) -> Result<EnhancedServiceManifest> {
+        let response = self.build_request(url).send().await?;
 
         if response.status().is_success() {
             // 先获取原始json文本，解析为serde_json::Value，判断根对象是否有 platforms 字段

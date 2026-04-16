@@ -247,7 +247,7 @@ impl DatabaseManager {
                 }
 
                 debug!(
-                    "执行SQL语句: {}",
+                    "Executing SQL statement: {}",
                     if trimmed.len() > 100 {
                         // 安全地截取字符串，避免切断多字节字符
                         let mut end = 100;

@@ -81,7 +81,9 @@ impl DatabaseConnection {
             DatabaseConnection::DatabaseManager(db) => db.read_with_retry(operation).await,
             DatabaseConnection::Database(_db) => {
                 // 对于传统数据库，我们暂时返回默认值或错误
-                Err(anyhow::anyhow!("传统数据库连接暂不支持配置管理功能"))
+                Err(anyhow::anyhow!(
+                    "Configuration management is not supported for legacy database connections yet"
+                ))
             }
         }
     }
@@ -96,7 +98,9 @@ impl DatabaseConnection {
             DatabaseConnection::DatabaseManager(db) => db.write_with_retry(operation).await,
             DatabaseConnection::Database(_db) => {
                 // 对于传统数据库，我们暂时返回默认值或错误
-                Err(anyhow::anyhow!("传统数据库连接暂不支持配置管理功能"))
+                Err(anyhow::anyhow!(
+                    "Configuration management is not supported for legacy database connections yet"
+                ))
             }
         }
     }
@@ -111,7 +115,9 @@ impl DatabaseConnection {
             DatabaseConnection::DatabaseManager(db) => db.batch_write_with_retry(operations).await,
             DatabaseConnection::Database(_db) => {
                 // 对于传统数据库，我们暂时返回默认值或错误
-                Err(anyhow::anyhow!("传统数据库连接暂不支持配置管理功能"))
+                Err(anyhow::anyhow!(
+                    "Configuration management is not supported for legacy database connections yet"
+                ))
             }
         }
     }
@@ -178,13 +184,15 @@ impl ConfigManager {
 
                         // 解析JSON值
                         let value: Value = serde_json::from_str(&value_str).map_err(|e| {
-                            duckdb::Error::InvalidParameterName(format!("JSON解析失败: {e}"))
+                            duckdb::Error::InvalidParameterName(format!(
+                                "Failed to parse JSON: {e}"
+                            ))
                         })?;
 
                         let default_value = if let Some(default_str) = default_str {
                             Some(serde_json::from_str(&default_str).map_err(|e| {
                                 duckdb::Error::InvalidParameterName(format!(
-                                    "默认值JSON解析失败: {e}"
+                                    "Failed to parse default value JSON: {e}"
                                 ))
                             })?)
                         } else {
@@ -193,7 +201,7 @@ impl ConfigManager {
 
                         let config_type = ConfigType::from_str(&type_str).ok_or_else(|| {
                             duckdb::Error::InvalidParameterName(format!(
-                                "无效的配置类型: {type_str}"
+                                "Invalid config type: {type_str}"
                             ))
                         })?;
 
@@ -404,16 +412,16 @@ impl ConfigManager {
             let cache = self.cache.read().await;
             if let Some(config) = cache.get(key) {
                 if !config.is_user_editable {
-                    return Err(anyhow::anyhow!("配置项 {key} 不可编辑"));
+                    return Err(anyhow::anyhow!("Config item {key} is not editable"));
                 }
                 config.is_user_editable
             } else {
-                return Err(anyhow::anyhow!("配置项 {key} 不存在"));
+                return Err(anyhow::anyhow!("Config item {key} does not exist"));
             }
         };
 
         if !is_editable {
-            return Err(anyhow::anyhow!("配置项 {key} 不可编辑"));
+            return Err(anyhow::anyhow!("Config item {key} is not editable"));
         }
 
         // 验证类型
@@ -425,7 +433,7 @@ impl ConfigManager {
         if let Some(expected_type) = expected_type {
             if !self.validate_value_type(&value, &expected_type) {
                 return Err(anyhow::anyhow!(
-                    "配置项 {key} 的值类型不匹配，期望 {expected_type:?}，实际 {value:?}"
+                    "Config item {key} has mismatched value type: expected {expected_type:?}, actual {value:?}"
                 ));
             }
         }
@@ -460,16 +468,19 @@ impl ConfigManager {
             let cache = self.cache.read().await;
             if let Some(config) = cache.get(&update.key) {
                 if !config.is_user_editable {
-                    return Err(anyhow::anyhow!("配置项 {} 不可编辑", update.key));
+                    return Err(anyhow::anyhow!("Config item {} is not editable", update.key));
                 }
 
                 // 验证类型
                 if update.validate && !self.validate_value_type(&update.value, &config.config_type)
                 {
-                    return Err(anyhow::anyhow!("配置项 {} 的值类型不匹配", update.key));
+                    return Err(anyhow::anyhow!(
+                        "Config item {} has mismatched value type",
+                        update.key
+                    ));
                 }
             } else {
-                return Err(anyhow::anyhow!("配置项 {} 不存在", update.key));
+                return Err(anyhow::anyhow!("Config item {} does not exist", update.key));
             }
         }
 
@@ -477,7 +488,11 @@ impl ConfigManager {
         self.db.batch_write_with_retry(|conn| {
             for update in &updates {
                 let value_json = serde_json::to_string(&update.value)
-                    .map_err(|e| duckdb::Error::InvalidParameterName(format!("JSON序列化失败: {e}")))?;
+                        .map_err(|e| {
+                            duckdb::Error::InvalidParameterName(format!(
+                                "JSON serialization failed: {e}"
+                            ))
+                        })?;
 
                 conn.execute(
                     "UPDATE app_config SET config_value = ?, updated_at = CURRENT_TIMESTAMP WHERE config_key = ?",
@@ -507,18 +522,18 @@ impl ConfigManager {
             let cache = self.cache.read().await;
             if let Some(config) = cache.get(key) {
                 if !config.is_user_editable {
-                    return Err(anyhow::anyhow!("配置项 {key} 不可编辑"));
+                    return Err(anyhow::anyhow!("Config item {key} is not editable"));
                 }
                 config.default_value.clone()
             } else {
-                return Err(anyhow::anyhow!("配置项 {key} 不存在"));
+                return Err(anyhow::anyhow!("Config item {key} does not exist"));
             }
         };
 
         if let Some(default_value) = default_value {
             self.update_config(key, default_value).await
         } else {
-            Err(anyhow::anyhow!("配置项 {key} 没有默认值"))
+            Err(anyhow::anyhow!("Config item {key} does not have a default value"))
         }
     }
 

@@ -263,6 +263,9 @@ pub mod api {
     /// 环境变量名称：自定义 API 服务器地址
     pub const NUWAX_API_BASE_URL_ENV: &str = "NUWAX_API_BASE_URL";
 
+    /// Docker版本JSON URL环境变量（最高优先级，允许自定义docker版本JSON地址）
+    pub const NUWAX_API_DOCKER_VERSION_URL_ENV: &str = "NUWAX_API_DOCKER_VERSION_URL";
+
     /// 生产环境API服务器地址
     const PRODUCTION_BASE_URL: &str = "https://api-version.nuwax.com";
 
@@ -310,7 +313,7 @@ pub mod api {
                 return custom_url;
             } else {
                 tracing::warn!(
-                    "NUWAX_API_BASE_URL 格式无效: '{}'. 预期 http:// 或 https:// 开头。回退到环境模式。",
+                    "Invalid NUWAX_API_BASE_URL: '{}'. Expected to start with http:// or https://. Falling back to environment mode.",
                     custom_url
                 );
             }
@@ -356,6 +359,15 @@ pub mod api {
 
         /// Docker版本列表更新端点
         pub const DOCKER_UPDATE_VERSION_LIST: &str = "/api/v1/docker/updateVersionList";
+
+        /// Docker版本获取端点 (用于降级fallback)
+        pub const DOCKER_UPGRADE_VERSION_LATEST: &str = "/api/v1/docker/upgrade/versions/latest.json";
+
+        /// Docker版本JSON (OSS) - 生产环境
+        pub const DOCKER_VERSION_OSS_PROD: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/latest.json";
+
+        /// Docker版本JSON (OSS) - 测试/发布环境
+        pub const DOCKER_VERSION_OSS_BETA: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/beta/latest.json";
 
         /// Docker完整服务包下载端点
         pub const DOCKER_DOWNLOAD_FULL: &str =

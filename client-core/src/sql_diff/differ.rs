@@ -13,9 +13,9 @@ pub fn generate_mysql_diff(
     let mut stats = super::types::DiffStats::default();
 
     // 添加注释头
-    diff_sql.push("-- 数据库架构差异SQL".to_string());
+    diff_sql.push("-- Database schema diff SQL".to_string());
     diff_sql.push(format!(
-        "-- 生成时间: {}",
+        "-- Generated at: {}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     ));
     diff_sql.push("".to_string());
@@ -24,7 +24,7 @@ pub fn generate_mysql_diff(
     for (table_name, table_def) in to_tables {
         if !from_tables.contains_key(table_name) {
             info!("Found new table: {}", table_name);
-            diff_sql.push(format!("-- 新增表: {table_name}"));
+            diff_sql.push(format!("-- Added table: {table_name}"));
             diff_sql.push(generate_create_table_sql(table_def));
             diff_sql.push("".to_string());
             stats.tables_added += 1;
@@ -35,14 +35,14 @@ pub fn generate_mysql_diff(
     for table_name in from_tables.keys() {
         if !to_tables.contains_key(table_name) {
             tracing::warn!(
-                "⚠️  检测到表 `{}` 在新版本中被删除，为确保数据安全，不生成 DROP TABLE 语句",
+                "⚠️  Table `{}` was removed in the new version. For data safety, DROP TABLE SQL will not be generated",
                 table_name
             );
             diff_sql.push(format!(
-                "-- ⚠️  警告: 表 `{table_name}` 在新版本中不存在，但为了数据安全未生成删除语句"
+                "-- ⚠️  Warning: table `{table_name}` does not exist in the new version; no drop statement was generated for data safety"
             ));
             diff_sql.push(format!(
-                "-- 如需删除，请手动执行: DROP TABLE IF EXISTS `{table_name}`;"
+                "-- To delete it, run manually: DROP TABLE IF EXISTS `{table_name}`;"
             ));
             diff_sql.push("".to_string());
             stats.tables_dropped += 1;
@@ -55,7 +55,7 @@ pub fn generate_mysql_diff(
             let (table_diffs, table_stats) = generate_table_diff(old_table_def, new_table_def);
             if !table_diffs.is_empty() {
                 info!("Table structure changes detected: {}", table_name);
-                diff_sql.push(format!("-- 修改表: {table_name}"));
+                diff_sql.push(format!("-- Modified table: {table_name}"));
                 diff_sql.extend(table_diffs);
                 diff_sql.push("".to_string());
 
@@ -155,15 +155,15 @@ fn generate_column_diffs(
     for col_name in old_columns.keys() {
         if !new_columns.contains_key(col_name) {
             tracing::warn!(
-                "⚠️  检测到表 `{}` 的列 `{}` 在新版本中被删除，为确保数据安全，不生成 DROP COLUMN 语句",
+                "⚠️  Column `{}` in table `{}` was removed in the new version. For data safety, DROP COLUMN SQL will not be generated",
+                col_name,
                 table_name,
-                col_name
             );
             diffs.push(format!(
-                "-- ⚠️  警告: 列 `{col_name}` 在新版本中不存在，但为了数据安全未生成删除语句"
+                "-- ⚠️  Warning: column `{col_name}` does not exist in the new version; no drop statement was generated for data safety"
             ));
             diffs.push(format!(
-                "-- 如需删除，请手动执行: ALTER TABLE `{table_name}` DROP COLUMN `{col_name}`;"
+                "-- To delete it, run manually: ALTER TABLE `{table_name}` DROP COLUMN `{col_name}`;"
             ));
             stats.columns_dropped += 1;
         }
@@ -234,7 +234,7 @@ fn generate_index_diffs(
             // 找到了语义上相同的索引，这是索引重命名
             // 我们选择保留旧索引名，不做任何操作
             tracing::debug!(
-                "索引重命名检测: 表 {} 的索引 '{}' 在数据库中名为 '{}', 列相同，跳过操作",
+                "Index rename detected: table {} index '{}' exists as '{}' in DB with same columns; skipping operation",
                 table_name,
                 idx_name,
                 old_idx.name
@@ -304,7 +304,7 @@ fn generate_index_diffs(
             // 找到了语义上相同的索引，这是索引重命名
             // 我们选择保留旧索引名，不做任何操作
             tracing::debug!(
-                "索引重命名检测: 表 {} 的索引 '{}' 在目标中有不同名称但列相同，跳过删除",
+                "Index rename detected: table {} index '{}' has a different name in target but same columns; skipping drop",
                 table_name,
                 idx_name
             );
@@ -314,27 +314,27 @@ fn generate_index_diffs(
         // 真正需要删除的索引（仅警告）
         if idx_def.is_primary {
             tracing::warn!(
-                "⚠️  检测到表 `{}` 的主键在新版本中被删除，为确保数据安全，不生成 DROP PRIMARY KEY 语句",
+                "⚠️  Primary key in table `{}` was removed in the new version. For data safety, DROP PRIMARY KEY SQL will not be generated",
                 table_name
             );
             diffs.push(format!(
-                "-- ⚠️  警告: 主键在新版本中不存在，但为了数据安全未生成删除语句"
+                "-- ⚠️  Warning: primary key does not exist in the new version; no drop statement was generated for data safety"
             ));
             diffs.push(format!(
-                "-- 如需删除，请手动执行: ALTER TABLE `{table_name}` DROP PRIMARY KEY;"
+                "-- To delete it, run manually: ALTER TABLE `{table_name}` DROP PRIMARY KEY;"
             ));
             stats.indexes_dropped += 1;
         } else {
             tracing::warn!(
-                "⚠️  检测到表 `{}` 的索引 `{}` 在新版本中被删除，为确保数据安全，不生成 DROP KEY 语句",
+                "⚠️  Index `{}` in table `{}` was removed in the new version. For data safety, DROP KEY SQL will not be generated",
+                idx_name,
                 table_name,
-                idx_name
             );
             diffs.push(format!(
-                "-- ⚠️  警告: 索引 `{idx_name}` 在新版本中不存在，但为了数据安全未生成删除语句"
+                "-- ⚠️  Warning: index `{idx_name}` does not exist in the new version; no drop statement was generated for data safety"
             ));
             diffs.push(format!(
-                "-- 如需删除，请手动执行: ALTER TABLE `{table_name}` DROP KEY `{idx_name}`;"
+                "-- To delete it, run manually: ALTER TABLE `{table_name}` DROP KEY `{idx_name}`;"
             ));
             stats.indexes_dropped += 1;
         }
@@ -347,24 +347,24 @@ fn generate_index_diffs(
                 // 警告需要删除旧索引（不生成删除SQL）
                 if old_idx.is_primary {
                     tracing::warn!(
-                        "⚠️  检测到表 `{}` 的主键定义发生变化，需要先删除旧主键，为确保数据安全，不自动生成删除语句",
+                        "⚠️  Primary key definition changed in table `{}`. Old primary key must be dropped first; no automatic drop SQL is generated for data safety",
                         table_name
                     );
-                    diffs.push(format!("-- ⚠️  警告: 主键定义已变化，需要先手动删除旧主键"));
+                    diffs.push(format!("-- ⚠️  Warning: primary key definition changed; manually drop old primary key first"));
                     diffs.push(format!(
-                        "-- 请手动执行: ALTER TABLE `{table_name}` DROP PRIMARY KEY;"
+                        "-- Please run manually: ALTER TABLE `{table_name}` DROP PRIMARY KEY;"
                     ));
                 } else {
                     tracing::warn!(
-                        "⚠️  检测到表 `{}` 的索引 `{}` 定义发生变化，需要先删除旧索引，为确保数据安全，不自动生成删除语句",
+                        "⚠️  Index definition for `{}` in table `{}` changed. Old index must be dropped first; no automatic drop SQL is generated for data safety",
+                        idx_name,
                         table_name,
-                        idx_name
                     );
                     diffs.push(format!(
-                        "-- ⚠️  警告: 索引 `{idx_name}` 定义已变化，需要先手动删除旧索引"
+                        "-- ⚠️  Warning: index `{idx_name}` definition changed; manually drop old index first"
                     ));
                     diffs.push(format!(
-                        "-- 请手动执行: ALTER TABLE `{table_name}` DROP KEY `{idx_name}`;"
+                        "-- Please run manually: ALTER TABLE `{table_name}` DROP KEY `{idx_name}`;"
                     ));
                 }
                 stats.indexes_modified += 1;

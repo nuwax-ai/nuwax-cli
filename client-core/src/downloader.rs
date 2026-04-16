@@ -517,7 +517,7 @@ impl FileDownloader {
         // 5. 检查文件大小是否符合续传阈值
         if existing_size < self.config.resume_threshold {
             info!(
-                "📁 文件过小 ({} bytes < {} bytes)，将重新下载",
+                "📁 File too small ({} bytes < {} bytes), re-downloading",
                 existing_size, self.config.resume_threshold
             );
             let _ = tokio::fs::remove_file(download_path).await;
@@ -579,7 +579,7 @@ impl FileDownloader {
 
         if total_size > 0 {
             info!(
-                "📦 服务器文件大小: {} bytes ({:.2} MB)",
+                "📦 Server file size: {} bytes ({:.2} MB)",
                 total_size,
                 total_size as f64 / 1024.0 / 1024.0
             );
@@ -659,7 +659,7 @@ impl FileDownloader {
                                 warn!("Final hash verification failed");
                                 warn!("   Expected: {}", hash);
                                 warn!("   Actual: {}", actual_hash);
-                                return Err(anyhow::anyhow!("文件hash验证失败"));
+                                return Err(anyhow::anyhow!("File hash verification failed"));
                             }
                         }
                         Err(e) => {
@@ -767,7 +767,7 @@ impl FileDownloader {
         let response = request
             .send()
             .await
-            .map_err(|e| DuckError::custom(format!("发起下载请求失败: {e}")))?;
+            .map_err(|e| DuckError::custom(format!("Failed to start download request: {e}")))?;
 
         // 检查响应状态
         let expected_status = if is_resume { 206 } else { 200 };
@@ -775,7 +775,7 @@ impl FileDownloader {
         // 🆕 断点续传失败自动回退机制 ⭐
         if is_resume && response.status().as_u16() != 206 {
             warn!(
-                "⚠️ 断点续传请求失败: HTTP {} (期望: 206)",
+                "⚠️ Resume request failed: HTTP {} (expected: 206)",
                 response.status()
             );
 
@@ -801,7 +801,7 @@ impl FileDownloader {
                     .get(url)
                     .send()
                     .await
-                    .map_err(|e| anyhow::anyhow!("发起重新下载请求失败: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to start re-download request: {e}"))?;
 
                 if !new_response.status().is_success() {
                     return Err(anyhow::anyhow!(
@@ -834,14 +834,14 @@ impl FileDownloader {
                     .await;
             } else {
                 return Err(anyhow::anyhow!(
-                    "下载失败: HTTP {} (期望: {})",
+                    "Download failed: HTTP {} (expected: {})",
                     response.status(),
                     expected_status,
                 ));
             }
         } else if response.status().as_u16() != expected_status {
             return Err(anyhow::anyhow!(
-                "下载失败: HTTP {} (期望: {})",
+                "Download failed: HTTP {} (expected: {})",
                 response.status(),
                 expected_status,
             ));
@@ -929,11 +929,11 @@ impl FileDownloader {
         }
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| DuckError::custom(format!("下载数据失败: {e}")))?;
+            let chunk = chunk.map_err(|e| DuckError::custom(format!("Failed to download data: {e}")))?;
 
             file.write_all(&chunk)
                 .await
-                .map_err(|e| DuckError::custom(format!("写入文件失败: {e}")))?;
+                .map_err(|e| DuckError::custom(format!("Failed to write file: {e}")))?;
 
             downloaded += chunk.len() as u64;
 
@@ -990,7 +990,7 @@ impl FileDownloader {
                         };
 
                         info!(
-                            "{} 下载进度: {}% ({:.1}/{:.1} MB) 速度: {:.1} MB/s",
+                            "{} Download progress: {}% ({:.1}/{:.1} MB) Speed: {:.1} MB/s",
                             status_icon,
                             percentage,
                             downloaded as f64 / 1024.0 / 1024.0,
@@ -1025,7 +1025,7 @@ impl FileDownloader {
         // 确保文件已刷新到磁盘
         file.flush()
             .await
-            .map_err(|e| DuckError::custom(format!("刷新文件缓冲区失败: {e}")))?;
+            .map_err(|e| DuckError::custom(format!("Failed to flush file buffer: {e}")))?;
 
         let download_type = if is_resume {
             "Resume download"
@@ -1035,13 +1035,13 @@ impl FileDownloader {
         info!("{} completed", download_type);
         info!("   File path: {}", download_path.display());
         info!(
-            "   最终大小: {} bytes ({:.2} MB)",
+            "   Final size: {} bytes ({:.2} MB)",
             downloaded,
             downloaded as f64 / 1024.0 / 1024.0
         );
         if is_resume {
             info!(
-                "   续传大小: {} bytes ({:.2} MB)",
+                "   Resumed size: {} bytes ({:.2} MB)",
                 downloaded - start_byte,
                 (downloaded - start_byte) as f64 / 1024.0 / 1024.0
             );
@@ -1053,12 +1053,12 @@ impl FileDownloader {
     /// 计算文件的SHA256哈希值
     pub async fn calculate_file_hash(file_path: &Path) -> Result<String> {
         if !file_path.exists() {
-            return Err(anyhow::anyhow!("文件不存在: {}", file_path.display()));
+            return Err(anyhow::anyhow!("File does not exist: {}", file_path.display()));
         }
 
         let mut file = File::open(file_path)
             .await
-            .map_err(|e| anyhow::anyhow!("无法打开文件 {}: {}", file_path.display(), e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", file_path.display(), e))?;
 
         let mut hasher = Sha256::new();
         let mut buffer = vec![0u8; 8192]; // 8KB buffer
@@ -1067,7 +1067,7 @@ impl FileDownloader {
             let bytes_read = file
                 .read(&mut buffer)
                 .await
-                .map_err(|e| anyhow::anyhow!("读取文件失败 {}: {}", file_path.display(), e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to read file {}: {}", file_path.display(), e))?;
 
             if bytes_read == 0 {
                 break;

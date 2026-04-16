@@ -240,7 +240,9 @@ impl UpgradeStrategyManager {
             }
         } else {
             //未找到对应架构的全量升级包，这里主动报错
-            Err(anyhow::anyhow!("未找到对应架构的全量升级包"))
+            Err(anyhow::anyhow!(
+                "Full upgrade package for the current architecture not found"
+            ))
         }
     }
 

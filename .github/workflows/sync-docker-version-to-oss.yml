@@ -1,0 +1,162 @@
+# 同步 Docker 版本配置到阿里云 OSS
+# 触发方式: push docker-version-prod/* 或 docker-version-beta/* tag
+# 示例: git tag docker-version-prod/v0.0.64 && git push
+
+name: Sync Docker Version to OSS
+
+on:
+  push:
+    tags:
+      - 'docker-version-prod/*'
+      - 'docker-version-beta/*'
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment (prod or beta)'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - prod
+          - release
+      version:
+        description: 'Version number (e.g., 0.0.64)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  OSS_ENDPOINT: "https://oss-rg-china-mainland.aliyuncs.com"
+  OSS_REGION: "rg-china-mainland"
+  OSS_BUCKET: "oss://nuwa-packages"
+  OSS_CDN_BASE: "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com"
+
+jobs:
+  sync-docker-version:
+    name: Sync docker version JSON to OSS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine environment and version
+        id: vars
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ inputs.environment }}"
+            VERSION="${{ inputs.version }}"
+          else
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            # 解析: docker-version-prod/v0.0.64 或 docker-version-beta/v0.0.64
+            if [[ "$TAG_NAME" =~ ^docker-version-(prod|beta)/(.+)$ ]]; then
+              ENV="${BASH_REMATCH[1]}"
+              VERSION="${BASH_REMATCH[2]}"
+            else
+              echo "❌ Invalid tag format: $TAG_NAME"
+              echo "Expected: docker-version-prod/v0.0.64 or docker-version-beta/v0.0.64"
+              exit 1
+            fi
+          fi
+          
+          echo "Environment: $ENV"
+          echo "Version: $VERSION"
+          echo "env=$ENV" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Read docker-version JSON
+        id: read_json
+        run: |
+          JSON_FILE="docker-versions/${{ steps.vars.outputs.env }}/latest.json"
+          echo "Reading: $JSON_FILE"
+          
+          if [ ! -f "$JSON_FILE" ]; then
+            echo "❌ File not found: $JSON_FILE"
+            exit 1
+          fi
+          
+          # 验证 JSON 格式
+          jq empty "$JSON_FILE" || { echo "❌ Invalid JSON format"; exit 1; }
+          
+          # 更新 version 和 release_date 字段
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          UPDATED_JSON=$(jq --arg version "${{ steps.vars.outputs.version }}" \
+                              --arg release_date "$TIMESTAMP" \
+                              '.version = $version | .release_date = $release_date' \
+                              "$JSON_FILE")
+          
+          echo "==> Updated JSON:"
+          echo "$UPDATED_JSON" | jq .
+          
+          echo "$UPDATED_JSON" > /tmp/latest.json
+          echo "json_path=$JSON_FILE" >> $GITHUB_OUTPUT
+
+      - name: Install ossutil v2
+        run: |
+          curl -fSL -o /tmp/ossutil.zip \
+            "https://gosspublic.alicdn.com/ossutil/v2/2.2.0/ossutil-2.2.0-linux-amd64.zip"
+          unzip -q /tmp/ossutil.zip -d /tmp
+          sudo mv /tmp/ossutil-2.2.0-linux-amd64/ossutil /usr/local/bin/
+          ossutil version
+
+      - name: Upload latest.json to OSS
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          ENV="${{ steps.vars.outputs.env }}"
+          VERSION="${{ steps.vars.outputs.version }}"
+          TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+          
+          # 1. 上传到 docker-version/{env}/latest.json (覆盖最新)
+          echo "==> Uploading to docker-version/${ENV}/latest.json"
+          ossutil cp --force /tmp/latest.json \
+            "${OSS_BUCKET}/docker-version/${ENV}/latest.json" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          echo "✅ Uploaded latest.json"
+          
+          # 2. 上传到 docker-version/history/{env}/{timestamp}.json (历史)
+          echo "==> Uploading to docker-version/history/${ENV}/${TIMESTAMP}.json"
+          ossutil cp --force /tmp/latest.json \
+            "${OSS_BUCKET}/docker-version/history/${ENV}/${TIMESTAMP}.json" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          echo "✅ Uploaded history file"
+          
+          echo "==> OSS paths:"
+          echo "    Latest: ${OSS_CDN_BASE}/docker-version/${ENV}/latest.json"
+          echo "    History: ${OSS_CDN_BASE}/docker-version/history/${ENV}/${TIMESTAMP}.json"
+
+      - name: Verify OSS upload
+        run: |
+          ENV="${{ steps.vars.outputs.env }}"
+          TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+          
+          VERIFY_URL="${OSS_CDN_BASE}/docker-version/${ENV}/latest.json"
+          echo "==> Verifying: ${VERIFY_URL}"
+          
+          HTTP_STATUS=$(curl -sS -o /tmp/verify.json -w "%{http_code}" "$VERIFY_URL")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ latest.json verified (HTTP ${HTTP_STATUS})"
+            cat /tmp/verify.json | jq .
+          else
+            echo "❌ latest.json not found on OSS (HTTP ${HTTP_STATUS})"
+            exit 1
+          fi
+          
+          # 也验证历史文件
+          HISTORY_URL="${OSS_CDN_BASE}/docker-version/history/${ENV}/${TIMESTAMP}.json"
+          echo "==> Verifying history: ${HISTORY_URL}"
+          HTTP_STATUS=$(curl -sS -o /tmp/history.json -w "%{http_code}" "$HISTORY_URL")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ history.json verified (HTTP ${HTTP_STATUS})"
+          else
+            echo "❌ history.json not found on OSS (HTTP ${HTTP_STATUS})"
+          fi

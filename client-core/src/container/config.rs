@@ -7,7 +7,7 @@ use quick_cache::sync::Cache;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use tracing::{debug, error, info};
+use tracing::{debug, info, warn};
 
 // 缓存条目的结构
 #[derive(Debug, Clone)]
@@ -40,7 +40,7 @@ impl DockerManager {
         let compose_config = if compose_file.exists() {
             Some(load_compose_config_with_env(&compose_file, &env_file)?)
         } else {
-            error!("docker-compose file does not exist");
+            warn!("docker-compose file does not exist");
             None
         };
         if compose_config.is_none() {

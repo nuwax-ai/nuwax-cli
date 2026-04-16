@@ -13,6 +13,7 @@ config.toml
 test_deploy
 tmp/
 logs/
+dist/
 
 cli-ui/src-tauri/binaries
 data/duck_client.db

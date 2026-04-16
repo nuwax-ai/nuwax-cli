@@ -57,10 +57,10 @@ impl FromStr for Version {
 
     fn from_str(s: &str) -> Result<Self> {
         if s.is_empty() {
-            return Err(anyhow::anyhow!("版本号不能为空"));
+            return Err(anyhow::anyhow!("Version string cannot be empty"));
         }
         let version =
-            Version::parse_version(s).map_err(|e| anyhow::anyhow!("版本号解析失败: {}", e))?;
+            Version::parse_version(s).map_err(|e| anyhow::anyhow!("Failed to parse version: {}", e))?;
         Ok(version)
     }
 }
@@ -104,9 +104,9 @@ impl Version {
         if !input_slice.is_empty() {
             // 创建一个简单的错误，包含额外的字符信息
             let error_msg = format!(
-                "版本号格式错误：在 '{}' 后还有额外字符 '{}'",
-                &input[..input.len() - input_slice.len()],
-                input_slice
+                "Invalid version format: extra characters '{}' found after '{}'",
+                input_slice,
+                &input[..input.len() - input_slice.len()]
             );
             error!("{}", error_msg);
             return Err(ErrMode::Cut(ContextError::default()));
@@ -178,7 +178,9 @@ impl Version {
     pub fn validate(&self) -> Result<()> {
         // 通常版本号各部分都应该在合理范围内
         if self.major > 999 || self.minor > 999 || self.patch > 999 || self.build > 9999 {
-            return Err(anyhow::anyhow!("版本号数值过大，可能不是有效的版本号"));
+            return Err(anyhow::anyhow!(
+                "Version number values are too large and may be invalid"
+            ));
         }
 
         Ok(())

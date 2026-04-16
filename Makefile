@@ -1,4 +1,4 @@
-.PHONY: build release dev install clean test fmt clippy check help package-linux package-linux-x86 package-linux-arm64
+.PHONY: build release dev install clean test fmt clippy check help package-linux package-linux-x86 package-linux-arm64 package-docker
 
 # Default target
 help:
@@ -17,10 +17,12 @@ help:
 	@echo "  make package-linux       - Build and package Linux (x86_64 + arm64) binaries"
 	@echo "  make package-linux-x86    - Build and package Linux x86_64 binary only"
 	@echo "  make package-linux-arm64 - Build and package Linux ARM64 binary only"
+	@echo "  make package-docker      - Build Linux x86_64 binary using Docker (Ubuntu 22.04)"
 	@echo ""
 	@echo "Linux Build Dependencies:"
 	@echo "  sudo apt-get update && sudo apt-get install -y --no-install-recommends \\"
-	@echo "    build-essential pkg-config libglib2.0-dev libssl-dev curl wget file"
+	@echo "    build-essential pkg-config libglib2.0-dev libssl-dev curl wget file \\"
+	@echo "    gcc-aarch64-linux-gnu"
 
 # Build release version
 build release:
@@ -54,40 +56,48 @@ clippy:
 check:
 	cargo check --workspace
 
-# Build and package Linux x86_64 binary
-# On Linux x86_64: native build; On macOS/other: uses cross
+# Build and package Linux x86_64 binary (uses make build output)
 package-linux-x86:
 	@mkdir -p dist
-	@if [ "$(shell uname -s)" = "Linux" ] && [ "$(shell uname -m)" = "x86_64" ]; then \
-		echo "=== Native Linux x86_64 build ==="; \
-		if command -v apt-get > /dev/null 2>&1; then \
-			sudo -n apt-get update > /dev/null 2>&1 && sudo -n apt-get install -y --no-install-recommends build-essential pkg-config libglib2.0-dev libssl-dev || echo "⚠️ Cannot install deps (need sudo), continuing anyway..."; \
-		fi; \
-		cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli; \
-		tar czf dist/nuwax-cli-linux-amd64.tar.gz -C target/x86_64-unknown-linux-gnu/release nuwax-cli; \
-	else \
-		echo "=== Cross-compile for Linux x86_64 (macOS/non-x86_64 Linux) ==="; \
-		command -v cross > /dev/null 2>&1 || { echo "Installing cross..."; cargo install cross --git https://github.com/cross-rs/cross; }; \
-		cross build --release --target x86_64-unknown-linux-gnu -p nuwax-cli; \
-		tar czf dist/nuwax-cli-linux-amd64.tar.gz -C target/x86_64-unknown-linux-gnu/release nuwax-cli; \
-	fi
-	@echo "✅ Packaged dist/nuwax-cli-linux-amd64.tar.gz"
+	@echo "=== Building Linux x86_64 ==="
+	cargo build --release -p nuwax-cli
+	@rm -f target/release/nuwax-cli-linux-amd64.tar.gz
+	@tar czf dist/nuwax-cli-linux-amd64.tar.gz -C target/release nuwax-cli
+	@cp dist/nuwax-cli-linux-amd64.tar.gz target/release/
+	@echo "✅ dist/nuwax-cli-linux-amd64.tar.gz"
 
-# Build and package Linux ARM64 binary (always uses cross)
+# Build and package Linux ARM64 binary (cross-compile)
 package-linux-arm64:
 	@mkdir -p dist
-	@command -v cross > /dev/null 2>&1 || { echo "Installing cross..."; cargo install cross --git https://github.com/cross-rs/cross; }
-	@cross build --release --target aarch64-unknown-linux-gnu -p nuwax-cli
+	@echo "=== Building Linux ARM64 (cross-compile) ==="
+	cargo build --release --target aarch64-unknown-linux-gnu -p nuwax-cli
 	@tar czf dist/nuwax-cli-linux-arm64.tar.gz -C target/aarch64-unknown-linux-gnu/release nuwax-cli
-	@echo "✅ Packaged dist/nuwax-cli-linux-arm64.tar.gz"
+	@echo "✅ dist/nuwax-cli-linux-arm64.tar.gz"
+
+# Build Linux x86_64 binary using Docker (via buildx for cross-platform)
+package-docker:
+	@mkdir -p dist
+	@echo "=== Building Linux x86_64 via Docker (buildx) ==="
+	docker buildx build --platform linux/amd64 -t nuwax-cli-builder . --load
+	@echo "=== Extracting binary from Docker image ==="
+	docker cp $$(docker create nuwax-cli-builder):/workspace/target/x86_64-unknown-linux-gnu/release/nuwax-cli dist/
+	@rm -f dist/nuwax-cli-linux-amd64.tar.gz
+	@tar czf dist/nuwax-cli-linux-amd64.tar.gz -C dist nuwax-cli
+	@rm -f dist/nuwax-cli
+	@cp dist/nuwax-cli-linux-amd64.tar.gz target/release/
+	@echo "✅ dist/nuwax-cli-linux-amd64.tar.gz (built via Docker)"
 
 # Build and package Linux (x86_64 + arm64)
+# Note: builds sequentially to avoid cargo build lock contention
 package-linux:
 	@mkdir -p dist
-	@echo "Building x86_64..."
-	@$(MAKE) package-linux-x86 &
-	@echo "Building arm64..."
-	@$(MAKE) package-linux-arm64 &
-	@wait
-	@echo "✅ All Linux packages built:"
+	@echo "=== Building Linux x86_64 (native) ==="
+	cargo build --release -p nuwax-cli
+	@rm -f target/release/nuwax-cli-linux-amd64.tar.gz
+	@tar czf dist/nuwax-cli-linux-amd64.tar.gz -C target/release nuwax-cli
+	@cp dist/nuwax-cli-linux-amd64.tar.gz target/release/
+	@echo "✅ dist/nuwax-cli-linux-amd64.tar.gz"
+	$(MAKE) package-linux-arm64
+	@echo ""
+	@echo "=== All Linux packages built ==="
 	@ls -la dist/nuwax-cli-linux-*.tar.gz

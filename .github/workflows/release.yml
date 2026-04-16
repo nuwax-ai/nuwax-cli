@@ -69,61 +69,43 @@ jobs:
             echo "is_new_version=true" >> $GITHUB_OUTPUT
           fi
 
-  # Linux x86_64 使用标准 CI 构建 (ubuntu-24)
+  # Linux x86_64 使用 Docker 构建 (Ubuntu 20.04)
   build-linux-x86_64:
-    name: Build Linux-x86_64
-    runs-on: ubuntu-24.04
+    name: Build Linux-x86_64 (Docker)
+    runs-on: ubuntu-22.04
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Linux x86_64 binary via Docker
+        uses: docker/build-push-action@v5
         with:
-          targets: x86_64-unknown-linux-gnu
+          context: .
+          platforms: linux/amd64
+          tags: nuwax-cli-builder:latest
+          load: true
+          pull: true
+          no-cache: true
 
-      - name: Install Linux dependencies
+      - name: Extract binary from Docker image
         run: |
-          echo "=== Linux 依赖安装 ==="
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            curl \
-            wget \
-            file \
-            build-essential \
-            libc6-dev \
-            m4 \
-            pkg-config \
-            libglib2.0-dev \
-            libglib2.0-0 \
-            libglib2.0-data \
-            libglib2.0-bin \
-            glib-networking \
-            glib-networking-common \
-            glib-networking-services
-          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
-          echo "✅ Linux 依赖安装完成"
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-x86_64-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build binary
-        run: |
-          cargo build --release --target x86_64-unknown-linux-gnu -p nuwax-cli
-
-      - name: Package binary
-        run: |
-          cd target/x86_64-unknown-linux-gnu/release
-          tar czf ../../../nuwax-cli-linux-amd64.tar.gz nuwax-cli
-          cd -
+          # Clean up any existing nuwax-cli file or directory
+          rm -rf ./nuwax-cli
+          # Run a temp container to extract the binary
+          docker run --rm -v $(pwd):/output-dir nuwax-cli-builder:latest \
+            sh -c "cp /output/nuwax-cli /output-dir/"
+          ls -la
+          file nuwax-cli
+          # Package as file
+          tar czf nuwax-cli-linux-amd64.tar.gz nuwax-cli
+          rm nuwax-cli
+          ls -la nuwax-cli-linux-amd64.tar.gz
+          file nuwax-cli-linux-amd64.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -131,7 +113,47 @@ jobs:
           name: nuwax-cli-linux-amd64
           path: nuwax-cli-linux-amd64.tar.gz
 
-  # 其他平台使用标准 CI (Linux ARM64, Windows, macOS)
+  # Linux ARM64 使用 Docker 构建 (Ubuntu 20.04 on ubuntu-24.04-arm)
+  build-linux-aarch64:
+    name: Build Linux-aarch64 (Docker)
+    runs-on: ubuntu-24.04-arm
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Linux ARM64 binary via Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/arm64
+          tags: nuwax-cli-builder:latest
+          load: true
+          pull: true
+          no-cache: true
+
+      - name: Extract binary from Docker image
+        run: |
+          rm -rf ./nuwax-cli
+          docker run --rm -v $(pwd):/output-dir nuwax-cli-builder:latest \
+            sh -c "cp /output/nuwax-cli /output-dir/"
+          ls -la
+          file nuwax-cli
+          tar czf nuwax-cli-linux-arm64.tar.gz nuwax-cli
+          rm nuwax-cli
+          ls -la nuwax-cli-linux-arm64.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuwax-cli-linux-arm64
+          path: nuwax-cli-linux-arm64.tar.gz
+
+  # Windows 和 macOS 使用标准 CI
   build:
     name: Build for ${{ matrix.platform.name }}
     runs-on: ${{ matrix.platform.os }}
@@ -141,28 +163,18 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          # Linux-aarch64 使用 cross 工具
-          - name: Linux-aarch64
-            os: ubuntu-22.04
-            target: aarch64-unknown-linux-gnu
-            bin: nuwax-cli
-            archive_name: nuwax-cli-linux-arm64
-            cross: true
-
           # Windows builds
           - name: Windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             bin: nuwax-cli.exe
             archive_name: nuwax-cli-windows-amd64
-            cross: false
 
           - name: Windows-aarch64
             os: windows-latest
             target: aarch64-pc-windows-msvc
             bin: nuwax-cli.exe
             archive_name: nuwax-cli-windows-arm64
-            cross: false
 
           # macOS builds (单独架构，稍后合并)
           - name: macOS-x86_64
@@ -170,14 +182,12 @@ jobs:
             target: x86_64-apple-darwin
             bin: nuwax-cli
             archive_name: nuwax-cli-macos-amd64
-            cross: false
 
           - name: macOS-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
             bin: nuwax-cli
             archive_name: nuwax-cli-macos-arm64
-            cross: false
 
     steps:
       - name: Checkout
@@ -187,35 +197,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform.target }}
-
-      - name: Install Linux dependencies
-        if: startsWith(matrix.platform.os, 'ubuntu')
-        run: |
-          echo "=== Linux 依赖安装 ==="
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            curl \
-            wget \
-            file \
-            build-essential \
-            libc6-dev \
-            m4 \
-            pkg-config \
-            libglib2.0-dev \
-            libglib2.0-0 \
-            libglib2.0-data \
-            libglib2.0-bin \
-            glib-networking \
-            glib-networking-common \
-            glib-networking-services
-          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
-          echo "✅ Linux 依赖安装完成"
-
-      - name: Install cross
-        if: matrix.platform.cross
-        run: |
-          echo "=== 安装 cross 工具 ==="
-          cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -230,13 +211,8 @@ jobs:
 
       - name: Build binary
         run: |
-          if [ "${{ matrix.platform.cross }}" = "true" ]; then
-            echo "=== 使用 cross 工具进行交叉编译 ==="
-            cross build --release --target ${{ matrix.platform.target }} -p nuwax-cli
-          else
-            echo "=== 本地编译 for ${{ matrix.platform.target }} ==="
-            cargo build --release --target ${{ matrix.platform.target }} -p nuwax-cli
-          fi
+          echo "=== 本地编译 for ${{ matrix.platform.target }} ==="
+          cargo build --release --target ${{ matrix.platform.target }} -p nuwax-cli
         shell: bash
 
       - name: Package binary (Unix)
@@ -356,7 +332,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [check-version, build, build-linux-x86_64, build-macos-universal]
+    needs: [check-version, build, build-linux-x86_64, build-linux-aarch64, build-macos-universal]
     if: needs.check-version.outputs.should_release == 'true'
     steps:
       - name: Checkout

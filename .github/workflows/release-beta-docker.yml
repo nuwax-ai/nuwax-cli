@@ -1,10 +1,10 @@
 ---
-name: Release Beta
+name: Release Beta (Docker)
 
 on:
   push:
     tags:
-      - 'dev*'  # 通过 dev* 标签触发测试构建，例如 dev1.0.80
+      - 'docker*'  # 通过 docker* 标签触发 Docker 构建测试，例如 docker1.0.80
   workflow_dispatch:
 
 # 添加必要的权限配置
@@ -63,7 +63,7 @@ jobs:
             echo "is_new_version=true" >> $GITHUB_OUTPUT
           fi
 
-  # Linux x86_64 使用 Docker 构建 (Ubuntu 20.04)
+  # Linux x86_64 使用 Docker 构建 (Ubuntu 22.04)
   build-linux-x86_64:
     name: Build Linux-x86_64 (Docker)
     runs-on: ubuntu-22.04
@@ -88,6 +88,9 @@ jobs:
 
       - name: Extract binary from Docker image
         run: |
+          # Check what's in the Docker image at /output
+          docker run --rm nuwax-cli-builder:latest ls -la /output/
+          docker run --rm nuwax-cli-builder:latest file /output/nuwax-cli
           # Clean up any existing nuwax-cli file or directory
           rm -rf ./nuwax-cli
           # Run a temp container to extract the binary
@@ -95,7 +98,7 @@ jobs:
             sh -c "cp /output/nuwax-cli /output-dir/"
           ls -la
           file nuwax-cli
-          # Package as file
+          # Package as file (we confirmed it's a file)
           tar czf nuwax-cli-linux-amd64.tar.gz nuwax-cli
           rm nuwax-cli
           ls -la nuwax-cli-linux-amd64.tar.gz
@@ -132,6 +135,8 @@ jobs:
 
       - name: Extract binary from Docker image
         run: |
+          docker run --rm nuwax-cli-builder:latest ls -la /output/
+          docker run --rm nuwax-cli-builder:latest file /output/nuwax-cli
           rm -rf ./nuwax-cli
           docker run --rm -v $(pwd):/output-dir nuwax-cli-builder:latest \
             sh -c "cp /output/nuwax-cli /output-dir/"
@@ -147,7 +152,7 @@ jobs:
           name: nuwax-cli-linux-arm64
           path: nuwax-cli-linux-arm64.tar.gz
 
-  # Windows 和 macOS 使用标准 CI
+  # Windows 和 macOS 构建使用标准 CI
   build:
     name: Build for ${{ matrix.platform.name }}
     runs-on: ${{ matrix.platform.os }}
