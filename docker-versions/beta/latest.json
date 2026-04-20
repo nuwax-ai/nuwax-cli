@@ -1,10 +1,10 @@
 {
-  "version": "0.0.71",
+  "version": "0.0.72",
   "release_notes": "测试版本beta",
-  "release_date": "2026-04-17T07:51:53Z",
+  "release_date": "2026-04-20T07:51:53Z",
   "packages": {
     "full": {
-      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20260416163925/docker-x86_64.zip",
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20260420085639/docker-x86_64.zip",
       "hash": "external",
       "signature": "",
       "size": 0
@@ -13,11 +13,11 @@
   "platforms": {
     "aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNsaSBzZWNyZXQga2V5CkNMSS1XSU5ET1dTLVg2NC12MS4xLjA=",
-      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20260416163925/docker-aarch64.zip"
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20260420085639/docker-aarch64.zip"
     },
     "x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNsaSBzZWNyZXQga2V5CkNMSS1MSU5VWC1YNjQtdjEuMS4w",
-      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20260416163925/docker-x86_64.zip"
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20260420085639/docker-x86_64.zip"
     }
   },
   "patch": null
