@@ -1,6 +1,6 @@
 [package]
 name = "nuwax-cli"
-version = "1.0.115"
+version = "1.0.116"
 edition = "2024"
 description = "Docker service management and upgrade CLI"
 authors = ["soddygo"]
@@ -26,7 +26,7 @@ path = "src/main.rs"
 
 [dependencies]
 # 核心库
-client-core = { path = "../client-core", version = "0.1.1", features = ["indicatif"] }
+client-core = { path = "../client-core", version = "0.1.2", features = ["indicatif"] }
 
 # 命令行参数解析
 clap = { workspace = true, features = ["derive"] }
