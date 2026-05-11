@@ -4337,7 +4337,7 @@ dependencies = [
 
 [[package]]
 name = "nuwax-cli"
-version = "1.0.116"
+version = "1.0.117"
 dependencies = [
  "anyhow",
  "bollard",
