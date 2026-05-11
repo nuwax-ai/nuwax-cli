@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{debug, error, info, warn};
 
+/// 递归查找脚本文件的最大深度限制
+const MAX_SCRIPT_SCAN_DEPTH: usize = 5;
+
 /// 脚本权限管理器
 pub struct ScriptPermissionManager {
     work_dir: PathBuf,
@@ -118,14 +121,14 @@ impl ScriptPermissionManager {
     fn find_docker_scripts(&self) -> DockerServiceResult<Vec<PathBuf>> {
         let mut script_paths = Vec::new();
 
-        // 递归查找工作目录下的所有 .sh 文件
-        Self::find_shell_scripts_recursive(&self.work_dir, &mut script_paths)?;
+        // 递归查找工作目录下的所有 .sh 文件（限制最大深度）
+        Self::find_shell_scripts_recursive(&self.work_dir, &mut script_paths, MAX_SCRIPT_SCAN_DEPTH)?;
 
         // 去重
         script_paths.sort();
         script_paths.dedup();
 
-        info!("🔍 Dynamically scanned {count} script files", count = script_paths.len());
+        info!("🔍 Dynamically scanned {count} script files (max depth: {depth})", count = script_paths.len(), depth = MAX_SCRIPT_SCAN_DEPTH);
         for script in &script_paths {
 debug!("Script found: {path}", path = script.display());
         }
@@ -133,12 +136,13 @@ debug!("Script found: {path}", path = script.display());
         Ok(script_paths)
     }
 
-    /// 递归查找shell脚本文件
+    /// 递归查找shell脚本文件（带深度限制）
     fn find_shell_scripts_recursive(
         dir: &Path,
         script_paths: &mut Vec<PathBuf>,
+        max_depth: usize,
     ) -> DockerServiceResult<()> {
-        if !dir.is_dir() {
+        if !dir.is_dir() || max_depth == 0 {
             return Ok(());
         }
 
@@ -163,8 +167,18 @@ debug!("Script found: {path}", path = script.display());
             let path = entry.path();
 
             if path.is_dir() {
-                // 递归搜索子目录
-                Self::find_shell_scripts_recursive(&path, script_paths)?;
+                let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+
+                // 跳过不需要遍历的目录（数据目录、上传目录等）
+                if client_core::constants::docker::EXCLUDE_DIRS
+                    .contains(&dir_name.as_ref())
+                {
+                    debug!("Skipping protected directory: {path}", path = path.display());
+                    continue;
+                }
+
+                // 递归搜索子目录（深度减1）
+                Self::find_shell_scripts_recursive(&path, script_paths, max_depth - 1)?;
             } else if path.extension().and_then(|s| s.to_str()) == Some("sh") {
                 script_paths.push(path);
             }
