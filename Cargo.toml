@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["client-core", "nuwax-cli", "cli-ui/src-tauri"]
+members = ["client-core", "nuwax-cli"]
 
 
 [workspace.dependencies]

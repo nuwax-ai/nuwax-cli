@@ -49,9 +49,6 @@ nuwax-cli/
 │   │   ├── container/     # Docker Operations
 │   │   └── sql_diff/      # SQL Diff Comparison
 │   └── Cargo.toml
-├── 🖥️ cli-ui/            # Tauri GUI Application (In Development)
-│   ├── src-tauri/        # Tauri Backend
-│   └── src/              # Frontend Interface
 ├── 📚 docs/              # Technical Documentation
 ├── 📋 spec/              # Design Specifications
 ├── 🗄️ data/              # Data Directory
