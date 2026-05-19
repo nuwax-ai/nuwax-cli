@@ -90,6 +90,16 @@ pub async fn handle_auto_upgrade_deploy_command(
             info!("Show auto-upgrade deployment status");
             show_status(app).await
         }
+        AutoUpgradeDeployCommand::OfflineDeploy {
+            archive,
+            version,
+            port,
+            config,
+            project,
+        } => {
+            info!("📦 Starting offline deployment...");
+            run_offline_deploy(app, archive, version, port, config, project).await
+        }
     }
 }
 
@@ -1017,6 +1027,132 @@ pub async fn check_and_install_nuwax_cli_update_early() -> Result<()> {
         }
     } else {
         info!("✅ nuwax-cli is already up to date");
+    }
+
+    Ok(())
+}
+
+/// 离线部署入口函数
+pub async fn run_offline_deploy(
+    app: &mut CliApp,
+    archive_path: PathBuf,
+    version: String,
+    frontend_port: Option<u16>,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+) -> Result<()> {
+    info!("📦 Starting offline deployment from: {path}", path = archive_path.display());
+
+    // 1. 验证文件存在
+    if !archive_path.exists() {
+        return Err(anyhow::anyhow!(
+            "Archive file not found: {}. Please check the file path.",
+            archive_path.display()
+        ));
+    }
+
+    // 2. 解析版本号
+    let version: client_core::version::Version = version
+        .parse()
+        .context("Invalid version format")?;
+
+    info!("   Target version: {version}", version = version.to_string());
+
+    // 3. 检测是否首次部署
+    let is_first_deployment = is_first_deployment().await;
+
+    if is_first_deployment {
+        info!("🆕 First deployment detected, using fresh initialization");
+    } else {
+        info!("🔄 Upgrade deployment detected, services will be stopped first");
+
+        // 停止服务并等待
+        docker_service::stop_docker_services_and_wait(
+            app,
+            config_file.clone(),
+            project_name.clone(),
+        )
+        .await?;
+    }
+
+    // 4. 创建 DockerManager
+    let docker_manager = create_docker_manager(&config_file, &project_name)?;
+
+    // 5. 环境检测（Podman Desktop 需要预先创建挂载目录）
+    let runtime_env = docker_manager.get_runtime_environment();
+    if runtime_env.needs_special_handling() {
+        info!("⚠️ Windows Podman Desktop detected, pre-creating mount directories");
+        if let Err(e) = docker_manager.ensure_host_volumes_exist().await {
+            warn!("⚠️ Mount directory check/creation failed: {error}", error = e.to_string());
+        }
+    }
+
+    // 6. 解压（全量升级方式）
+    info!("📦 Extracting Docker service package...");
+
+    let upgrade_strategy = UpgradeStrategy::FullUpgrade {
+        url: String::new(),
+        hash: String::new(),
+        signature: String::new(),
+        target_version: version.clone(),
+        download_type: client_core::upgrade_strategy::DownloadType::Full,
+    };
+
+    // 直接解压本地文件
+    let docker_dir = std::path::Path::new("docker");
+    if docker_dir.exists() {
+        // 全量升级需要清理目录
+        info!("🧹 Cleaning existing docker directory...");
+        match safe_remove_docker_directory(docker_dir).await {
+            Ok(_) => info!("✅ Docker directory cleanup completed"),
+            Err(e) => {
+                warn!("⚠️ Failed to clean docker directory: {error}", error = e.to_string());
+                return Err(anyhow::anyhow!(
+                    t!("auto_upgrade_deploy.clean_docker_dir_error", error = e.to_string())
+                ));
+            }
+        }
+    }
+
+    // 解压
+    crate::utils::extract_docker_service(&archive_path, &upgrade_strategy).await?;
+    info!("✅ Docker service package extracted");
+
+    // 7. 修复脚本权限
+    fix_script_permissions().await?;
+
+    // 8. 更新配置版本
+    update_config_version(&mut app.config, &version.to_string())?;
+
+    // 9. 部署服务
+    info!("🔄 Deploying Docker services...");
+    docker_service::deploy_docker_services(
+        app,
+        frontend_port,
+        config_file.clone(),
+        project_name.clone(),
+    )
+    .await?;
+
+    // 10. 启动服务
+    info!("▶️ Starting Docker services...");
+    docker_service::start_docker_services(app, config_file.clone(), project_name.clone()).await?;
+
+    // 11. 等待服务就绪
+    let compose_path = get_compose_file_path(&config_file);
+    if is_first_deployment {
+        info!("⏳ Waiting for all services to fully start...");
+    } else {
+        info!("⏳ Waiting for all services to fully start...");
+    }
+
+    if docker_utils::wait_for_compose_services_started(&compose_path, sql::OTHER_SERVICES_TIMEOUT)
+        .await?
+    {
+        info!("✅ Offline deployment completed successfully!");
+        info!("🎉 All services started successfully");
+    } else {
+        warn!("⚠️ Timed out waiting for services to start; please check status manually");
     }
 
     Ok(())

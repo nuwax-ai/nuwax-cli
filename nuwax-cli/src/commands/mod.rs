@@ -16,7 +16,7 @@ pub use status::{run_api_info, run_status, run_status_details, show_client_versi
 pub use backup::run_list_backups;
 
 // Update commands
-pub use update::run_upgrade;
+pub use update::{run_upgrade, run_download};
 
 // Docker service commands
 pub use docker_service::run_docker_service_command;

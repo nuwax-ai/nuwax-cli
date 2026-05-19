@@ -6,8 +6,8 @@ use clap::Parser;
 use client_core::container::{detect_compose_command_type, set_compose_command_type};
 use client_core::{DuckError, environment::Environment};
 use nuwax_cli::{
-    Cli, CliApp, Commands, check_and_install_nuwax_cli_update_early, run_diff_sql, run_init,
-    setup_logging,
+    AutoUpgradeDeployCommand, Cli, CliApp, Commands, UpgradeSubcommand,
+    check_and_install_nuwax_cli_update_early, run_diff_sql, run_init, setup_logging,
 };
 use rust_i18n::set_locale;
 use tracing::{error, info, warn};
@@ -30,8 +30,8 @@ async fn main() {
     let environment = Environment::from_env();
     if environment.is_testing() {
         warn!("⚠️  RUNNING IN TESTING MODE");
-warn!("   Environment: {env}", env = environment.display_name());
-warn!("   API Endpoint: {url}", url = client_core::constants::api::get_base_url());
+        warn!("   Environment: {env}", env = environment.display_name());
+        warn!("   API Endpoint: {url}", url = client_core::constants::api::get_base_url());
         warn!("   Configuration: config-test.toml (if exists)");
         warn!("   Use Ctrl+C to cancel if this is not intended");
         warn!("   Waiting 2 seconds...");
@@ -48,7 +48,7 @@ warn!("   API Endpoint: {url}", url = client_core::constants::api::get_base_url(
     // `init` 命令是特例，它不需要预先加载配置
     if let Commands::Init { force } = cli.command {
         if let Err(e) = run_init(force).await {
-error!("❌ Initialization failed: {error}", error = e.to_string());
+            error!("❌ Initialization failed: {error}", error = e.to_string());
             std::process::exit(1);
         }
         return;
@@ -64,12 +64,12 @@ error!("❌ Initialization failed: {error}", error = e.to_string());
             Ok(app) => {
                 // 应用初始化成功，显示完整状态信息
                 if let Err(e) = nuwax_cli::run_status_details(&app).await {
-error!("❌ Failed to get detailed status: {error}", error = e.to_string());
+                    error!("❌ Failed to get detailed status: {error}", error = e.to_string());
                 }
             }
             Err(e) => {
                 // 应用初始化失败，显示友好提示
-error!("⚠️  Unable to get full status info: {error}", error = e.to_string());
+                error!("⚠️  Unable to get full status info: {error}", error = e.to_string());
                 info!("");
                 info!("💡 Possible reasons:");
                 info!("   - Current directory is not Nuwax Cli ent working directory");
@@ -95,17 +95,23 @@ error!("⚠️  Unable to get full status info: {error}", error = e.to_string())
     } = cli.command
     {
         if let Err(e) = run_diff_sql(old_sql, new_sql, old_version, new_version, output).await {
-error!("❌ SQL diff comparison failed: {error}", error = e.to_string());
+            error!("❌ SQL diff comparison failed: {error}", error = e.to_string());
             std::process::exit(1);
         }
         return;
     }
 
     // 🚀 特殊处理：AutoUpgradeDeploy 命令需要优先检查CLI版本更新（在任何数据库初始化之前）
-    if let Commands::AutoUpgradeDeploy(_) = cli.command {
+    // 但 offline-deploy 是离线命令，跳过 CLI 版本检查
+    if let Commands::AutoUpgradeDeploy(
+        AutoUpgradeDeployCommand::OfflineDeploy { .. },
+    ) = cli.command
+    {
+        info!("🔍 Offline-deploy command detected, skipping CLI version check (offline mode)...");
+    } else if let Commands::AutoUpgradeDeploy(_) = cli.command {
         info!("🔍 AutoUpgradeDeploy command detected, prioritizing CLI version check...");
         if let Err(e) = check_and_install_nuwax_cli_update_early().await {
-error!("❌ CLI version check failed: {error}", error = e.to_string());
+            error!("❌ CLI version check failed: {error}", error = e.to_string());
             std::process::exit(1);
         }
         // 如果有更新，上面的函数会直接退出进程，不会继续执行到这里
@@ -114,6 +120,17 @@ error!("❌ CLI version check failed: {error}", error = e.to_string());
         // 🔍 检测 Docker Compose 命令类型（仅在此处检测一次，后续直接使用）
         let compose_type = detect_compose_command_type().await;
         set_compose_command_type(compose_type);
+    }
+
+    // 🚀 特殊处理：upgrade download 命令不需要数据库初始化
+    if let Commands::Upgrade { subcommand: UpgradeSubcommand::Download { .. } } = &cli.command {
+        match nuwax_cli::run_download().await {
+            Ok(_) => return,
+            Err(e) => {
+                error!("❌ Download failed: {error}", error = e.to_string());
+                std::process::exit(1);
+            }
+        }
     }
 
     // 对于其他所有命令，我们需要加载配置并初始化App
@@ -134,10 +151,10 @@ error!("❌ CLI version check failed: {error}", error = e.to_string());
             }
 
             if is_config_not_found {
-error!("❌ Configuration file '{file}' not found.", file = cli.config.display());
+                error!("❌ Configuration file '{file}' not found.", file = cli.config.display());
                 error!("👉 Please run 'nuwax-cli init' first to create configuration file.");
             } else {
-error!("❌ Application initialization failed: {error}", error = e.to_string());
+                error!("❌ Application initialization failed: {error}", error = e.to_string());
             }
             std::process::exit(1);
         }
@@ -145,7 +162,7 @@ error!("❌ Application initialization failed: {error}", error = e.to_string());
 
     // 运行命令
     if let Err(e) = app.run_command(cli.command).await {
-error!("❌ Operation failed: {error}", error = e.to_string());
+        error!("❌ Operation failed: {error}", error = e.to_string());
         std::process::exit(1);
     }
 }

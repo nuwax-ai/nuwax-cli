@@ -114,10 +114,20 @@ impl CliApp {
                     .await
                     .map_err(|e| anyhow::anyhow!(t!("app.check_update_failed", error = e.to_string()).to_string()))
             }
-            Commands::Upgrade { args } => {
-                commands::run_upgrade(self, args)
-                    .await
-                    .map_err(|e| client_core::DuckError::custom(t!("app.upgrade_failed", error = e.to_string()).to_string()))?;
+            Commands::Upgrade { subcommand } => {
+                match subcommand {
+                    crate::cli::UpgradeSubcommand::Download { full: _ } => {
+                        commands::run_download()
+                            .await
+                            .map_err(|e| client_core::DuckError::custom(t!("app.upgrade_failed", error = e.to_string()).to_string()))?;
+                    }
+                    crate::cli::UpgradeSubcommand::Check { force } => {
+                        let args = crate::cli::UpgradeArgs { force, check: true };
+                        commands::run_upgrade(self, args)
+                            .await
+                            .map_err(|e| client_core::DuckError::custom(t!("app.upgrade_failed", error = e.to_string()).to_string()))?;
+                    }
+                }
                 Ok(())
             }
             Commands::ListBackups => commands::run_list_backups(self).await,

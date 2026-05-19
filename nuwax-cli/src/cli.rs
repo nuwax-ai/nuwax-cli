@@ -14,6 +14,23 @@ pub struct UpgradeArgs {
     pub check: bool,
 }
 
+/// Upgrade subcommands
+#[derive(Subcommand, Debug)]
+pub enum UpgradeSubcommand {
+    /// Download latest Docker service package to local cache
+    Download {
+        /// Download full package (required for offline deployment)
+        #[arg(long, default_value = "true")]
+        full: bool,
+    },
+    /// Check available upgrades (existing behavior)
+    Check {
+        /// Force re-download (for corrupted files)
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 /// Auto backup related commands
 #[derive(Subcommand, Debug)]
 pub enum AutoBackupCommand {
@@ -50,6 +67,24 @@ pub enum AutoUpgradeDeployCommand {
     },
     /// Show current auto upgrade configuration
     Status,
+    /// Offline deployment from local archive (全量升级模式)
+    OfflineDeploy {
+        /// Local archive file path
+        #[arg(long, help = "Path to local archive file")]
+        archive: PathBuf,
+        /// Target version for deployment
+        #[arg(long, help = "Target version for deployment")]
+        version: String,
+        /// Specify frontend service port
+        #[arg(long)]
+        port: Option<u16>,
+        /// Specify custom docker-compose config file path
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Specify docker-compose project name
+        #[arg(short = 'p', long)]
+        project: Option<String>,
+    },
 }
 
 /// Client update related commands
@@ -183,8 +218,8 @@ pub enum Commands {
     ApiInfo,
     /// Download Docker service files
     Upgrade {
-        #[command(flatten)]
-        args: UpgradeArgs,
+        #[command(subcommand)]
+        subcommand: UpgradeSubcommand,
     },
     /// List all backups
     ListBackups,
