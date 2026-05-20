@@ -30,7 +30,7 @@ impl ConfigType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "STRING" => Some(ConfigType::String),
             "NUMBER" => Some(ConfigType::Number),
@@ -199,7 +199,7 @@ impl ConfigManager {
                             None
                         };
 
-                        let config_type = ConfigType::from_str(&type_str).ok_or_else(|| {
+                        let config_type = ConfigType::parse(&type_str).ok_or_else(|| {
                             duckdb::Error::InvalidParameterName(format!(
                                 "Invalid config type: {type_str}"
                             ))
@@ -430,13 +430,12 @@ impl ConfigManager {
             cache.get(key).map(|config| config.config_type.clone())
         };
 
-        if let Some(expected_type) = expected_type {
-            if !self.validate_value_type(&value, &expected_type) {
+        if let Some(expected_type) = expected_type
+            && !self.validate_value_type(&value, &expected_type) {
                 return Err(anyhow::anyhow!(
                     "Config item {key} has mismatched value type: expected {expected_type:?}, actual {value:?}"
                 ));
             }
-        }
 
         // 更新数据库
         let value_json = serde_json::to_string(&value)?;
@@ -778,14 +777,14 @@ task.target_version.as_deref().unwrap_or(""),
 
     /// 验证值类型
     fn validate_value_type(&self, value: &Value, expected_type: &ConfigType) -> bool {
-        match (value, expected_type) {
-            (Value::String(_), ConfigType::String) => true,
-            (Value::Number(_), ConfigType::Number) => true,
-            (Value::Bool(_), ConfigType::Boolean) => true,
-            (Value::Object(_), ConfigType::Object) => true,
-            (Value::Array(_), ConfigType::Array) => true,
-            _ => false,
-        }
+        matches!(
+            (value, expected_type),
+            (Value::String(_), ConfigType::String)
+                | (Value::Number(_), ConfigType::Number)
+                | (Value::Bool(_), ConfigType::Boolean)
+                | (Value::Object(_), ConfigType::Object)
+                | (Value::Array(_), ConfigType::Array)
+        )
     }
 }
 

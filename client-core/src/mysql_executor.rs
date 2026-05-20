@@ -1,5 +1,5 @@
 use crate::container::DockerManager;
-use crate::sql_diff::{TableColumn, TableDefinition, TableIndex};
+use crate::sql_diff::TableDefinition;
 use anyhow::{Context, Result, anyhow};
 use docker_compose_types as dct;
 use mysql_async::prelude::*;
@@ -81,7 +81,6 @@ impl MySqlConfig {
                     }
                 })
                 .ok_or_else(|| anyhow!("No mapping to container port 3306 found in 'mysql' service"))?,
-            _ => return Err(anyhow!("Unsupported ports format or undefined ports in 'mysql' service")),
         };
 
         Ok(MySqlConfig {

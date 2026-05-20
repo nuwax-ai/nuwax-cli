@@ -127,11 +127,7 @@ impl PatchProcessor {
         debug!("Verifying file hash: {:?}", file_path);
 
         // 解析期望的哈希值（格式：sha256:hash_value）
-        let expected_hash = if expected_hash.starts_with("sha256:") {
-            &expected_hash[7..]
-        } else {
-            expected_hash
-        };
+        let expected_hash = expected_hash.strip_prefix("sha256:").unwrap_or(expected_hash);
 
         // 计算文件的SHA256哈希
         let file_content = fs::read(file_path).await?;
@@ -266,11 +262,10 @@ impl PatchProcessor {
 
         while let Some(entry) = read_dir.next_entry().await? {
             let path = entry.path();
-            if path.is_file() {
-                if let Ok(relative_path) = path.strip_prefix(&extract_dir) {
+            if path.is_file()
+                && let Ok(relative_path) = path.strip_prefix(&extract_dir) {
                     files.push(relative_path.to_owned());
                 }
-            }
         }
 
         Ok(files)

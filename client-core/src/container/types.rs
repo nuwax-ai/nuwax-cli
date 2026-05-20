@@ -1,5 +1,4 @@
-use crate::container::environment::{RuntimeEnvironment, detect_runtime_environment};
-use docker_compose_types;
+use crate::container::environment::RuntimeEnvironment;
 use std::path::{Path, PathBuf};
 
 /// Docker 服务状态
@@ -45,7 +44,6 @@ pub struct ServiceConfig {
 pub struct DockerManager {
     pub(crate) compose_file: PathBuf,
     pub(crate) env_file: PathBuf,
-    pub(crate) compose_config: Option<docker_compose_types::Compose>,
     pub(crate) project_name: Option<String>,
     /// 运行时环境信息（新增）
     pub(crate) runtime_env: RuntimeEnvironment,

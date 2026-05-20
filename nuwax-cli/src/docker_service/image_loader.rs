@@ -25,10 +25,6 @@ pub struct ImageInfo {
     /// 镜像类型
     #[allow(dead_code)]
     pub image_type: ImageType,
-    /// 原始标签（带架构后缀）
-    pub original_tag: String,
-    /// 目标标签（去除架构后缀）
-    pub target_tag: String,
     /// 镜像架构
     #[allow(dead_code)]
     pub architecture: Architecture,
@@ -60,20 +56,6 @@ impl ImageInfo {
             ImageType::Business
         };
 
-        // 提取原始标签和目标标签
-        let arch_suffix = format!("-{}", architecture.as_str());
-        let (original_tag, target_tag) =
-            if let Some(name_without_ext) = file_name.strip_suffix(".tar") {
-                if name_without_ext.ends_with(&arch_suffix) {
-                    let target = &name_without_ext[..name_without_ext.len() - arch_suffix.len()];
-                    (name_without_ext.to_string(), target.to_string())
-                } else {
-                    (name_without_ext.to_string(), name_without_ext.to_string())
-                }
-            } else {
-                (file_name.to_string(), file_name.to_string())
-            };
-
         // 获取文件大小
         let file_size = std::fs::metadata(&file_path)
             .map_err(|e| DockerServiceError::FileSystem(e.to_string()))?
@@ -82,8 +64,6 @@ impl ImageInfo {
         Ok(Self {
             file_path,
             image_type,
-            original_tag,
-            target_tag,
             architecture,
             file_size,
         })
@@ -235,9 +215,9 @@ impl ImageLoader {
             let entry = entry.map_err(|e| DockerServiceError::ImageLoading(e.to_string()))?;
             let path = entry.path();
 
-            if path.is_file() {
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    if file_name.ends_with(&arch_suffix) {
+            if path.is_file()
+                && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+                    && file_name.ends_with(&arch_suffix) {
                         match ImageInfo::from_file_path(path.clone(), self.architecture) {
                             Ok(image_info) => {
                                 info!("Image file found: {name} ({size})", name = file_name, size = format_file_size(image_info.file_size));
@@ -248,8 +228,6 @@ impl ImageLoader {
                             }
                         }
                     }
-                }
-            }
         }
 
         if images.is_empty() {
@@ -606,8 +584,5 @@ mod tests {
 
         assert_eq!(image_info.image_type, ImageType::Business);
         assert_eq!(image_info.architecture, Architecture::Amd64);
-        assert!(image_info.original_tag.contains("agent-platform-front"));
-        assert!(image_info.original_tag.contains("amd64"));
-        assert!(!image_info.target_tag.contains("amd64"));
     }
 }

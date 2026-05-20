@@ -180,7 +180,7 @@ impl UpgradeStrategyManager {
     pub fn select_full_upgrade_strategy(&self) -> Result<UpgradeStrategy> {
         debug!("Selecting full upgrade strategy");
 
-        if let Some(_) = &self.manifest.platforms {
+        if self.manifest.platforms.is_some() {
             //使用分架构的全量包
             let platform_info = self.get_platform_package()?;
 
@@ -225,7 +225,7 @@ impl UpgradeStrategyManager {
     }
 
     /// 获取指定架构的平台包信息
-    fn get_platform_package<'a>(&self) -> Result<crate::api_types::PlatformPackageInfo> {
+    fn get_platform_package(&self) -> Result<crate::api_types::PlatformPackageInfo> {
         if let Some(platforms) = self.manifest.platforms.as_ref() {
             match self.architecture {
                 Architecture::X86_64 => platforms

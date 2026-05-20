@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use crate::{app::CliApp, docker_service::health_check::HealthChecker};
 use anyhow::Result;
-use client_core::container::{DockerManager, ServiceStatus};
-use rust_i18n::t;
+use client_core::container::DockerManager;
 use tracing::{error, info, warn};
 
 /// 显示客户端版本信息（标题和基本信息）

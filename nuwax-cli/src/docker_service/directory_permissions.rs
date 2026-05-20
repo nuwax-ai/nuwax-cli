@@ -1,6 +1,6 @@
 use crate::docker_service::error::{DockerServiceError, DockerServiceResult};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
 /// 目录权限管理器 - 配合 Docker init 容器处理权限
@@ -99,82 +99,6 @@ impl DirectoryPermissionManager {
                 fs::set_permissions(&mysql_cnf, permissions).ok();
             }
             info!("🔒 Windows: MySQL config file permission has been set");
-        }
-
-        Ok(())
-    }
-
-    /// MySQL 容器启动失败时的权限修复
-    ///
-    /// 只在 MySQL 启动失败时调用，尝试修复权限问题
-    /// 注意：目录应该已经由 ensure_host_volumes_exist() 创建
-    pub fn fix_mysql_permissions_on_failure(&self) -> DockerServiceResult<()> {
-        warn!("🔧 MySQL startup failed, attempting permission repair...");
-
-        let mysql_data_dir = self.work_dir.join("data/mysql");
-        let mysql_logs_dir = self.work_dir.join("logs/mysql");
-
-        // 检查目录是否存在
-        if !mysql_data_dir.exists() {
-            warn!("⚠️  MySQL data directory does not exist: {}", mysql_data_dir.display());
-            warn!(
-                "   This should not happen; ensure_host_volumes_exist() should have created it"
-            );
-            return Err(DockerServiceError::FileSystem(
-                "MySQL data directory does not exist, please check docker-compose.yml configuration"
-                    .to_string(),
-            ));
-        }
-
-        if !mysql_logs_dir.exists() {
-            warn!("⚠️  MySQL log directory does not exist: {}", mysql_logs_dir.display());
-            warn!(
-                "   This should not happen; ensure_host_volumes_exist() should have created it"
-            );
-            return Err(DockerServiceError::FileSystem(
-                "MySQL log directory does not exist, please check docker-compose.yml configuration"
-                    .to_string(),
-            ));
-        }
-
-        // 尝试设置宽松权限（尽力而为）
-        #[cfg(unix)]
-        {
-            self.try_set_permissions(&mysql_data_dir, 0o777)?;
-            self.try_set_permissions(&mysql_logs_dir, 0o777)?;
-            info!("🔑 MySQL directory permissions set to 777 (most permissive)");
-        }
-
-        // 确保配置文件权限正确
-        self.ensure_mysql_config_permissions()?;
-
-        info!("✅ Permission repair completed");
-        info!("💡 If it still fails, please check:");
-        info!("   1. Whether the Docker init container is running correctly");
-        info!("   2. Whether there is enough disk space");
-        info!("   3. Whether SELinux/AppArmor is blocking access");
-
-        Ok(())
-    }
-
-    /// 尝试设置权限（失败只记录警告）
-    #[cfg(unix)]
-    fn try_set_permissions(&self, path: &Path, mode: u32) -> DockerServiceResult<()> {
-        use std::os::unix::fs::PermissionsExt;
-
-        if let Ok(metadata) = fs::metadata(path) {
-            let mut permissions = metadata.permissions();
-            permissions.set_mode(mode);
-
-            match fs::set_permissions(path, permissions) {
-                Ok(_) => debug!("Permission set successfully: {} → {:o}", path.display(), mode),
-                Err(e) => warn!(
-                    "Failed to set permissions: {} → {:o}, error: {} (usually non-fatal)",
-                    path.display(),
-                    mode,
-                    e
-                ),
-            }
         }
 
         Ok(())

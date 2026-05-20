@@ -19,8 +19,8 @@ fn demo_real_world_diff_sql() {
     println!("{}", "=".repeat(60));
 
     // 读取测试文件
-    let old_sql = read_fixture_file("old_init_mysql.sql");
-    let new_sql = read_fixture_file("new_init_mysql.sql");
+    let old_sql = read_fixture_file("init_mysql_old.sql");
+    let new_sql = read_fixture_file("init_mysql_new.sql");
 
     println!("📊 文件统计信息:");
     println!("旧文件行数: {}", old_sql.lines().count());
@@ -69,8 +69,8 @@ fn analyze_structural_changes() {
     println!("🏗️  详细结构变化分析");
     println!("{}", "=".repeat(60));
 
-    let old_sql = read_fixture_file("old_init_mysql.sql");
-    let new_sql = read_fixture_file("new_init_mysql.sql");
+    let old_sql = read_fixture_file("init_mysql_old.sql");
+    let new_sql = read_fixture_file("init_mysql_new.sql");
 
     let (diff_sql, _) = generate_schema_diff(Some(&old_sql), &new_sql, Some("old"), "new").unwrap();
 
@@ -122,8 +122,8 @@ fn detect_specific_changes() {
     println!("🎯 特定变化检测");
     println!("{}", "=".repeat(60));
 
-    let old_sql = read_fixture_file("old_init_mysql.sql");
-    let new_sql = read_fixture_file("new_init_mysql.sql");
+    let old_sql = read_fixture_file("init_mysql_old.sql");
+    let new_sql = read_fixture_file("init_mysql_new.sql");
 
     let (diff_sql, _) =
         generate_schema_diff(Some(&old_sql), &new_sql, Some("baseline"), "target").unwrap();
@@ -200,8 +200,8 @@ fn test_fixtures_direct_output() {
 
     println!("🗂 Fixtures路径: {fixtures_path:?}");
 
-    let old_sql_path = fixtures_path.join("old_init_mysql.sql");
-    let new_sql_path = fixtures_path.join("new_init_mysql.sql");
+    let old_sql_path = fixtures_path.join("init_mysql_old.sql");
+    let new_sql_path = fixtures_path.join("init_mysql_new.sql");
 
     let old_sql = fs::read_to_string(&old_sql_path).unwrap_or_else(|_| {
         panic!(
@@ -263,8 +263,8 @@ pub fn pretty_print_diff() {
     println!("\n🚀 real world diff sql analysis");
     println!("{}", "╔".repeat(80));
 
-    let old_sql = read_fixture_file("old_init_mysql.sql");
-    let new_sql = read_fixture_file("new_init_mysql.sql");
+    let old_sql = read_fixture_file("init_mysql_old.sql");
+    let new_sql = read_fixture_file("init_mysql_new.sql");
 
     let (diff_sql, description) = generate_schema_diff(
         Some(&old_sql),

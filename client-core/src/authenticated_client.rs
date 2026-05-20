@@ -108,11 +108,10 @@ impl AuthenticatedClient {
         url: &str,
     ) -> RequestBuilder {
         // 只对我们的服务器且非注册接口添加认证头
-        if self.is_our_server(url) && !self.is_register_endpoint(url) {
-            if let Some(client_id) = self.get_client_id().await {
+        if self.is_our_server(url) && !self.is_register_endpoint(url)
+            && let Some(client_id) = self.get_client_id().await {
                 request_builder = request_builder.header("X-Client-ID", client_id);
             }
-        }
         request_builder
     }
 

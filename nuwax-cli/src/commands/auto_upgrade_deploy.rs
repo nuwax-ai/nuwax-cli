@@ -634,46 +634,42 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
     // 递归遍历并删除文件
     match std::fs::read_dir(path) {
         Ok(entries) => {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let entry_path = entry.path();
-                    let file_name = entry.file_name();
-                    let file_name_str = file_name.to_string_lossy();
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                let file_name = entry.file_name();
+                let file_name_str = file_name.to_string_lossy();
 
-                    // 排除指定目录，不进行删除
-                    if client_core::constants::docker::EXCLUDE_DIRS
-                        .contains(&file_name_str.as_ref())
-                        && entry_path.is_dir()
-                    {
-                        info!(path = %entry_path.display(), "📁 Skip protected directory");
-                        skipped_count += 1;
-                        continue;
+                // 排除指定目录，不进行删除
+                if client_core::constants::docker::EXCLUDE_DIRS
+                    .contains(&file_name_str.as_ref())
+                    && entry_path.is_dir()
+                {
+                    info!(path = %entry_path.display(), "📁 Skip protected directory");
+                    skipped_count += 1;
+                    continue;
+                }
+
+                if entry_path.is_dir() {
+                    // 递归删除子目录
+                    if let Err(e) = Box::pin(force_cleanup_directory(&entry_path)).await {
+                        warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete subdirectory");
+                        failed_items.push((entry_path.clone(), e.to_string()));
                     }
 
-                    if entry_path.is_dir() {
-                        // 递归删除子目录
-                        if let Err(e) = Box::pin(force_cleanup_directory(&entry_path)).await {
-                            warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete subdirectory");
-                            failed_items.push((entry_path.clone(), e.to_string()));
-                        }
-
-                        // 尝试删除空目录
-                        if let Err(e) = std::fs::remove_dir(&entry_path) {
-                            if e.kind() != std::io::ErrorKind::NotFound {
-                                warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete empty directory");
-                                failed_items.push((entry_path, e.to_string()));
-                            }
-                        } else {
-                            deleted_count += 1;
+                    // 尝试删除空目录
+                    if let Err(e) = std::fs::remove_dir(&entry_path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete empty directory");
+                            failed_items.push((entry_path, e.to_string()));
                         }
                     } else {
-                        if let Err(e) = std::fs::remove_file(&entry_path) {
-                            warn!(path = %entry_path.display(), error = %e, "📄 Failed to delete file");
-                            failed_items.push((entry_path, e.to_string()));
-                        } else {
-                            deleted_count += 1;
-                        }
+                        deleted_count += 1;
                     }
+                } else if let Err(e) = std::fs::remove_file(&entry_path) {
+                    warn!(path = %entry_path.display(), error = %e, "📄 Failed to delete file");
+                    failed_items.push((entry_path, e.to_string()));
+                } else {
+                    deleted_count += 1;
                 }
             }
         }
@@ -752,14 +748,14 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         let archive_path = history_dir.join(&archive_name);
 
         // 移动 temp_sql 目录到 history_sql（带降级处理）
-        match fs::rename(&temp_sql_dir, &archive_path) {
+        match fs::rename(temp_sql_dir, &archive_path) {
             Ok(_) => {
                 info!("📦 Archived old temp_sql directory to: {path}", path = archive_path.display());
             }
             Err(e) => {
                 warn!("⚠️ Failed to archive temp_sql directory: {error}, try to clean it directly", error = e.to_string());
                 // 降级：直接删除旧目录
-                if let Err(e2) = fs::remove_dir_all(&temp_sql_dir) {
+                if let Err(e2) = fs::remove_dir_all(temp_sql_dir) {
                     warn!("⚠️ Failed to clean temp_sql directory: {error}, continue execution", error = e2.to_string());
                 } else {
                     info!("✅ The old temp_sql directory has been cleaned");
@@ -812,7 +808,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     // 会自动处理 USE 语句的查找和提取，无需手动处理
 
     // 从App配置中动态获取MySQL端口并建立连接
-    let compose_file = get_compose_file_path(&config_file);
+    let compose_file = get_compose_file_path(config_file);
     let env_file = client_core::constants::docker::get_env_file_path();
     let compose_file_str = compose_file
         .to_str()

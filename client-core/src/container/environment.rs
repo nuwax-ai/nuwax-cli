@@ -58,8 +58,8 @@ pub async fn detect_compose_command_type() -> ComposeCommandType {
         .output()
         .await;
 
-    if let Ok(output) = output {
-        if output.status.success() {
+    if let Ok(output) = output
+        && output.status.success() {
             let version_info = String::from_utf8_lossy(&output.stdout);
             info!(
                 "   ✅ Using standalone docker-compose command: {}",
@@ -67,7 +67,6 @@ pub async fn detect_compose_command_type() -> ComposeCommandType {
             );
             return ComposeCommandType::DockerComposeStandalone;
         }
-    }
 
     warn!("   ⚠️ No available Docker Compose command detected");
     ComposeCommandType::Unknown
@@ -239,12 +238,11 @@ fn detect_host_os() -> HostOs {
 /// 检测是否在 WSL2 中运行
 fn is_running_in_wsl() -> bool {
     // 方法 1: 检查 /proc/version
-    if let Ok(version) = std::fs::read_to_string("/proc/version") {
-        if version.to_lowercase().contains("microsoft") {
+    if let Ok(version) = std::fs::read_to_string("/proc/version")
+        && version.to_lowercase().contains("microsoft") {
             debug!("Detected WSL marker in /proc/version");
             return true;
         }
-    }
 
     // 方法 2: 检查 WSL 环境变量
     if env::var("WSL_DISTRO_NAME").is_ok() {

@@ -98,14 +98,13 @@ pub fn check_architecture_images_exist(
     if let Ok(entries) = std::fs::read_dir(images_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+            if path.is_file()
+                && let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                     // 检查文件名是否匹配架构模式
                     if file_name.ends_with(&format!("-{}.tar", arch.as_str())) {
                         found_images.push(path);
                     }
                 }
-            }
         }
     }
 

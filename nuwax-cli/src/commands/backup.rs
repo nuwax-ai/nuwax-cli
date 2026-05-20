@@ -7,7 +7,6 @@ use client_core::database::BackupType;
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tracing::{error, info, warn};
 
 /// JSON 格式的备份信息（用于 GUI 集成）
@@ -371,54 +370,6 @@ pub async fn run_rollback(
     Ok(())
 }
 
-/// 只回滚 data 目录，保留 app 目录和配置文件
-pub async fn run_rollback_data_only(
-    app: &CliApp,
-    backup_id: Option<i64>,
-    force: bool,
-    auto_start_service: bool,
-    config_file: Option<&std::path::PathBuf>,
-) -> Result<()> {
-    // 如果没有提供backup_id，启动交互式选择
-    let selected_backup_id = if let Some(id) = backup_id {
-        id
-    } else {
-        match interactive_backup_selection(app).await? {
-            Some(id) => id,
-            None => {
-                info!("Operation cancelled");
-                return Ok(());
-            }
-        }
-    };
-
-    if !force {
-        warn!("⚠️  Warning: This operation will overwrite current data directory!");
-        warn!("⚠️  Note: This operation only restores data directory, app directory and config files will remain unchanged");
-
-        use std::io::{self, Write};
-        print!("{}", t!("backup_cmd.confirm_restore_data", id = selected_backup_id));
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-
-        if input.trim().to_lowercase() != "y" {
-            warn!("Operation cancelled");
-            return Ok(());
-        }
-    }
-
-    info!("Starting data directory rollback operation...");
-
-    // 🔧 只回滚 data 目录：只恢复 data 目录，保留 app 目录和配置文件
-    run_data_directory_only_rollback(app, selected_backup_id, auto_start_service, config_file)
-        .await?;
-
-    info!("✅ Data directory rollback complete");
-    Ok(())
-}
-
 /// 交互式备份选择
 async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
     info!("🗂️  Backup Selection");
@@ -666,91 +617,6 @@ async fn run_rollback_with_exculde(
         }
         Err(e) => {
             error!("❌ Data restore failed: {error}", error = e.to_string());
-            warn!("💡 Suggestions:");
-            warn!("   1. Check if backup file exists and is complete");
-            warn!("   2. Ensure sufficient disk space");
-            warn!("   3. Manually start services: nuwax-cli docker-service start");
-            return Err(e);
-        }
-    }
-
-    Ok(())
-}
-
-/// 只恢复 data 目录，保留 app 目录和配置文件
-async fn run_data_directory_only_rollback(
-    app: &CliApp,
-    backup_id: i64,
-    auto_start_service: bool,
-    config_file: Option<&std::path::PathBuf>,
-) -> Result<()> {
-    info!("🛡️ Using smart data directory rollback mode");
-    info!("   📁 Will restore: data/ directory");
-    info!("   🔧 Will keep: app/ directory, docker-compose.yml, .env and other config files");
-
-    // 使用 BackupManager 的智能数据恢复功能
-    let docker_dir = std::path::Path::new("./docker");
-
-    // 如果有自定义配置文件，创建新的 DockerManager
-    let backup_manager = if let Some(config_path) = config_file {
-        info!("📄 Using custom config file for restore: {path}", path = config_path.display());
-
-        // 获取对应的 .env 文件路径
-        let env_file = config_path.with_file_name(".env");
-        let custom_docker_manager = Arc::new(
-            client_core::container::DockerManager::with_project(
-                config_path.clone(),
-                env_file.clone(),
-                None,
-            )
-            .map_err(|e| anyhow::anyhow!("{}", t!("backup_cmd.create_docker_manager_failed", error = e.to_string())))?,
-        );
-        Arc::new(client_core::backup::BackupManager::new(
-            app.config.get_backup_dir(),
-            app.database.clone(),
-            custom_docker_manager,
-        )?)
-    } else {
-        app.backup_manager.clone()
-    };
-
-    //只恢复 data 目录,其他的数据不恢复
-    let dir_to_restore = vec!["data"];
-    match backup_manager
-        .restore_data_directory_only(backup_id, docker_dir, auto_start_service, &dir_to_restore)
-        .await
-    {
-        Ok(_) => {
-            info!("✅ Smart data directory restore complete");
-
-            // 设置正确的权限
-            let mysql_data_dir = docker_dir.join("data/mysql");
-            if mysql_data_dir.exists() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let permissions = std::fs::Permissions::from_mode(0o775);
-                    if let Err(e) = std::fs::set_permissions(&mysql_data_dir, permissions) {
-                        warn!("⚠️ Failed to set MySQL permission: {error}", error = e.to_string());
-                    } else {
-                        info!("🔒 MySQL data directory permission set to 775");
-                    }
-                }
-            }
-
-            info!("💡 Data restore info:");
-            info!("   ✅ All database data restored");
-            info!("   ✅ app directory kept unchanged");
-            info!("   ✅ Config files kept at latest version");
-
-            if auto_start_service {
-                info!("   ✅ Docker services auto-started");
-            } else {
-                info!("   📝 Docker service start skipped (controlled by parent process)");
-            }
-        }
-        Err(e) => {
-            error!("❌ data directory restore failed: {error}", error = e.to_string());
             warn!("💡 Suggestions:");
             warn!("   1. Check if backup file exists and is complete");
             warn!("   2. Ensure sufficient disk space");

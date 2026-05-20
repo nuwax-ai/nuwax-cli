@@ -27,14 +27,13 @@ impl ScriptPermissionManager {
             info!("🪟 Windows environment detected, running cross-platform compatibility checks");
 
             // 执行Windows兼容性检查
-            if let Ok(suggestions) = self.windows_compatibility_check().await {
-                if !suggestions.is_empty() {
+            if let Ok(suggestions) = self.windows_compatibility_check().await
+                && !suggestions.is_empty() {
                     warn!("🪟 Windows suggestions:");
                     for suggestion in suggestions {
                         warn!("  • {item}", item = suggestion);
                     }
                 }
-            }
         }
 
         let script_paths = self.find_docker_scripts()?;
@@ -312,12 +311,10 @@ debug!("Script found: {path}", path = script.display());
                 .arg("-c")
                 .arg(format!("test -x \"{}\"", script_path.display()))
                 .output()
-            {
-                if output.status.success() {
+                && output.status.success() {
                     debug!("Git Bash verify: script is executable");
                     return Ok(true);
                 }
-            }
         }
 
         Ok(false)
@@ -405,42 +402,37 @@ debug!("Script found: {path}", path = script.display());
         }
 
         // 检查文件扩展名
-        if let Some(extension) = script_path.extension() {
-            if extension != "sh" && extension != "bash" {
+        if let Some(extension) = script_path.extension()
+            && extension != "sh" && extension != "bash" {
                 debug!("Skip non-shell script: {path}", path = script_path.display());
                 return Ok(());
             }
-        }
 
         let mut success_methods: Vec<String> = Vec::new();
 
         // 方法1: 尝试使用Git Bash的chmod
-        if let Ok(result) = self.try_git_bash_chmod(script_path).await {
-            if result {
+        if let Ok(result) = self.try_git_bash_chmod(script_path).await
+            && result {
                 success_methods.push("Git Bash".to_string());
             }
-        }
 
         // 方法2: 尝试使用WSL的chmod
-        if let Ok(result) = self.try_wsl_chmod(script_path).await {
-            if result {
+        if let Ok(result) = self.try_wsl_chmod(script_path).await
+            && result {
                 success_methods.push("WSL".to_string());
             }
-        }
 
         // 方法3: 尝试直接chmod（如果可用）
-        if let Ok(result) = self.try_direct_chmod(script_path).await {
-            if result {
+        if let Ok(result) = self.try_direct_chmod(script_path).await
+            && result {
                 success_methods.push(t!("script_permissions.method_direct_chmod").to_string());
             }
-        }
 
         // 方法4: 尝试修复行尾符
-        if let Ok(result) = self.fix_line_endings(script_path).await {
-            if result {
+        if let Ok(result) = self.fix_line_endings(script_path).await
+            && result {
                 success_methods.push(t!("script_permissions.method_line_endings_fix").to_string());
             }
-        }
 
         if !success_methods.is_empty() {
             info!("✅ Script permission set successfully, methods: {methods}", methods = success_methods.join(", "));
@@ -489,12 +481,10 @@ debug!("Script found: {path}", path = script.display());
                 .arg("-c")
                 .arg(format!("chmod +x \"{}\"", script_path.display()))
                 .output()
-            {
-                if output.status.success() {
+                && output.status.success() {
                     debug!("Git Bash chmod succeeded: {path}", path = bash_path);
                     return Ok(true);
                 }
-            }
         }
 
         debug!("Git Bash chmod is unavailable");
@@ -532,12 +522,11 @@ debug!("Script found: {path}", path = script.display());
 
     /// 尝试直接chmod
     async fn try_direct_chmod(&self, script_path: &Path) -> DockerServiceResult<bool> {
-        if let Ok(output) = Command::new("chmod").arg("+x").arg(script_path).output() {
-            if output.status.success() {
+        if let Ok(output) = Command::new("chmod").arg("+x").arg(script_path).output()
+            && output.status.success() {
                 debug!("Direct chmod succeeded");
                 return Ok(true);
             }
-        }
 
         debug!("Direct chmod is unavailable");
         Ok(false)
@@ -561,6 +550,7 @@ debug!("Script found: {path}", path = script.display());
     }
 
     /// 手动修复特定脚本权限
+    #[allow(dead_code)]
     pub async fn fix_specific_script(&self, script_name: &str) -> DockerServiceResult<()> {
         let script_path = self.work_dir.join("config").join(script_name);
 
@@ -577,6 +567,7 @@ debug!("Script found: {path}", path = script.display());
     }
 
     /// 预检查常见问题脚本
+    #[allow(dead_code)]
     pub async fn precheck_common_script_issues(&self) -> DockerServiceResult<Vec<String>> {
         let mut issues = Vec::new();
 
@@ -696,6 +687,7 @@ debug!("Backup file created: {path}", path = backup_path.display());
     }
 
     /// 检查脚本编码问题
+    #[allow(dead_code)]
     pub async fn check_script_encoding(&self, script_path: &Path) -> DockerServiceResult<bool> {
         if !script_path.exists() {
             return Ok(false);
@@ -858,6 +850,7 @@ debug!("Backup file created: {path}", path = backup_path.display());
     }
 
     /// 为Windows用户提供一键修复脚本权限的方法
+    #[allow(dead_code)]
     pub async fn fix_windows_script_permissions(&self) -> DockerServiceResult<()> {
         if !cfg!(target_os = "windows") {
             return Ok(());

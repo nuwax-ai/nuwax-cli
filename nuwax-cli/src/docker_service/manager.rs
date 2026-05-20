@@ -734,7 +734,7 @@ error!("     {line}", line = line.trim());
 
         match self
             .port_manager
-            .smart_check_compose_port_conflicts(&compose_file, &env_file)
+            .smart_check_compose_port_conflicts(compose_file, env_file)
             .await
         {
             Ok(report) => {
@@ -762,79 +762,5 @@ warn!("Port check failed: {error}, continuing startup", error = e.to_string());
         }
 
         Ok(())
-    }
-
-    /// 检查并修复MySQL容器启动失败的权限问题
-    async fn check_and_fix_mysql_if_failed(
-        &self,
-        report: &HealthReport,
-    ) -> DockerServiceResult<()> {
-        // 检查是否有MySQL相关的容器启动失败
-        let mysql_containers: Vec<_> = report
-            .containers
-            .iter()
-            .filter(|container| {
-                // 检查容器名是否包含mysql相关关键词
-                let name = container.name.to_lowercase();
-                name.contains("mysql")
-                    || name.contains("db")
-                    || (container.image.to_lowercase().contains("mysql"))
-            })
-            .collect();
-
-        if mysql_containers.is_empty() {
-            return Ok(()); // 没有MySQL容器，无需处理
-        }
-
-        info!("🔍 Found {count} MySQL-related containers", count = mysql_containers.len());
-        for container in &mysql_containers {
-            info!(
-                "   - {name} (status: {status}, image: {image})",
-                name = container.name,
-                status = container.status.display_name(),
-                image = container.image
-            );
-        }
-
-        // 检查MySQL容器是否有启动失败的或处于重启状态
-        let problematic_mysql = mysql_containers
-            .iter()
-            .filter(|container| {
-                // 不健康的容器或者处于转换状态(如重启)的容器都需要修复
-                !container.status.is_healthy() || container.status.is_transitioning()
-            })
-            .collect::<Vec<_>>();
-
-        if !problematic_mysql.is_empty() {
-            warn!("🔧 MySQL container issue detected, attempting permission fix...");
-
-            for container in &problematic_mysql {
-                warn!(
-                    "   Problem container: {name} (status: {status})",
-                    name = container.name,
-                    status = container.status.display_name()
-                );
-            }
-
-            // 调用权限修复
-            if let Err(e) = self
-                .directory_permission_manager
-                .fix_mysql_permissions_on_failure()
-            {
-error!("MySQL permission fix failed: {error}", error = e.to_string());
-                return Err(e);
-            }
-
-            info!("✅ MySQL permission fix completed");
-            info!("💡 Fix actions:");
-            info!("   - Clean potentially corrupted MySQL data files");
-            info!("   - Set MySQL directory permission to 777 (recursive)");
-            info!("   - Recreate required directory structure");
-            info!("🔄 Wait for auto-restart or restart manually: nuwax-cli docker-service restart mysql");
-
-            Ok(())
-        } else {
-            Ok(()) // MySQL容器正常，无需修复
-        }
     }
 }

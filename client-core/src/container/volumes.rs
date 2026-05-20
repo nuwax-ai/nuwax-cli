@@ -31,11 +31,10 @@ impl DockerManager {
         info!("📁 Found {} mount directories to verify", mount_directories.len());
 
         for mount_info in mount_directories {
-            if let Some(host_path) = &mount_info.host_path {
-                if mount_info.is_bind_mount {
+            if let Some(host_path) = &mount_info.host_path
+                && mount_info.is_bind_mount {
                     self.create_host_directory_if_not_exists(host_path)?;
                 }
-            }
         }
 
         info!("✅ Host mount directory verification completed");

@@ -1,4 +1,3 @@
-use crate::architecture::Architecture;
 use crate::constants::{backup, config, docker, updates, version};
 use crate::version::Version; // 新增：导入Version类型
 use anyhow::Result;

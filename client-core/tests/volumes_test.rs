@@ -38,7 +38,7 @@ volumes:
 
     fs::write(&compose_path, compose_content).unwrap();
 
-    let manager = DockerManager::new(compose_path.clone(), temp_dir.path().join(".env")).unwrap();
+    let manager = DockerManager::with_project(compose_path.clone(), temp_dir.path().join(".env"), None).unwrap();
     let compose_config = manager.load_compose_config().unwrap();
     let mount_dirs = manager.extract_mount_directories(&compose_config).unwrap();
 
@@ -98,15 +98,13 @@ volumes:
 #[tokio::test]
 async fn test_parse_complex_actual_compose() {
     let temp_dir = tempdir().unwrap();
-    let fixtures_path = Path::new(
-        "/Volumes/soddy/git_workspace/duck_client/client-core/fixtures/docker-compose.yml",
-    );
+    let fixtures_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("docker-compose.yml");
 
     // 复制fixtures文件到临时目录
     let compose_path = temp_dir.path().join("docker-compose.yml");
     fs::copy(fixtures_path, &compose_path).unwrap();
 
-    let manager = DockerManager::new(compose_path.clone(), temp_dir.path().join(".env")).unwrap();
+    let manager = DockerManager::with_project(compose_path.clone(), temp_dir.path().join(".env"), None).unwrap();
     let compose_config = manager.load_compose_config().unwrap();
     let mount_dirs = manager.extract_mount_directories(&compose_config).unwrap();
 
@@ -215,7 +213,7 @@ volumes:
 
     fs::write(&compose_path, compose_content).unwrap();
 
-    let manager = DockerManager::new(compose_path.clone(), temp_dir.path().join(".env")).unwrap();
+    let manager = DockerManager::with_project(compose_path.clone(), temp_dir.path().join(".env"), None).unwrap();
     let compose_config = manager.load_compose_config().unwrap();
     let mount_dirs = manager.extract_mount_directories(&compose_config).unwrap();
 

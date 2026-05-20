@@ -529,7 +529,7 @@ info!("Loaded env var list: {vars}", vars = format!("{:?}", self.env_vars));
         // 自动加载.env文件
         if env_file_path.exists() {
             info!(".env found, loading env vars: {path}", path = env_file_path.display());
-            match self.load_env_file(&env_file_path) {
+            match self.load_env_file(env_file_path) {
                 Ok(_) => info!("✅ .env loaded successfully"),
                 Err(e) => {
                     error!("❌ Failed to load .env: {error}", error = e.to_string());

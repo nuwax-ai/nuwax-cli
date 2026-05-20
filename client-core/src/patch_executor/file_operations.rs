@@ -104,8 +104,8 @@ impl FileOperationExecutor {
         let source_path = self.get_patch_source_path(file_path)?;
 
         // 创建备份
-        if let Some(backup_dir) = &self.backup_dir {
-            if target_path.exists() {
+        if let Some(backup_dir) = &self.backup_dir
+            && target_path.exists() {
                 let backup_path = backup_dir.path().join(file_path);
                 if let Some(parent) = backup_path.parent() {
                     fs::create_dir_all(parent).await?;
@@ -113,7 +113,6 @@ impl FileOperationExecutor {
                 fs::copy(&target_path, &backup_path).await?;
                 debug!("Backed up file: {} -> {:?}", file_path, backup_path);
             }
-        }
 
         // 原子性替换
         self.atomic_file_replace(&source_path, &target_path).await?;
@@ -130,13 +129,12 @@ impl FileOperationExecutor {
         let source_path = self.get_patch_source_path(dir_path)?;
 
         // 创建备份
-        if let Some(backup_dir) = &self.backup_dir {
-            if target_path.exists() {
+        if let Some(backup_dir) = &self.backup_dir
+            && target_path.exists() {
                 let backup_path = backup_dir.path().join(dir_path);
                 self.backup_directory(&target_path, &backup_path).await?;
                 debug!("Backed up directory: {} -> {:?}", dir_path, backup_path);
             }
-        }
 
         // 删除目标目录
         if target_path.exists() {

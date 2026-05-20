@@ -39,12 +39,11 @@ impl DockerManager {
         }
 
         for line in stdout.lines() {
-            if line.starts_with("Loaded image:") {
-                if let Some(image_name) = line.strip_prefix("Loaded image:").map(|s| s.trim()) {
+            if line.starts_with("Loaded image:")
+                && let Some(image_name) = line.strip_prefix("Loaded image:").map(|s| s.trim()) {
                     info!("Parsed loaded image name successfully: {}", image_name);
                     return Ok(image_name.to_string());
                 }
-            }
         }
 
         // 如果没有找到"Loaded image:"，但命令成功了，返回一个默认值

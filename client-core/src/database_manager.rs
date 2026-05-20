@@ -306,17 +306,14 @@ impl DatabaseManager {
                         }
                     }
                 }
-                ';' => {
-                    if !in_string && !in_json {
+                ';'
+                    if !in_string && !in_json => {
                         // 这是一个真正的语句结束符
                         if !current_statement.trim().is_empty() {
                             statements.push(current_statement.trim().to_string());
                         }
                         current_statement.clear();
-                    } else {
-                        current_statement.push(ch);
                     }
-                }
                 _ => {
                     current_statement.push(ch);
                 }

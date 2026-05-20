@@ -352,26 +352,23 @@ impl BackupManager {
                 Box::pin(self.force_remove_directory(&entry_path)).await?;
 
                 // 尝试删除空目录（忽略"不存在"的错误）
-                if let Err(e) = tokio::fs::remove_dir(&entry_path).await {
-                    if e.kind() != std::io::ErrorKind::NotFound {
+                if let Err(e) = tokio::fs::remove_dir(&entry_path).await
+                    && e.kind() != std::io::ErrorKind::NotFound {
                         warn!("Failed to remove empty directory: {} - {}", entry_path.display(), e);
                     }
-                }
             } else {
-                if let Err(e) = tokio::fs::remove_file(&entry_path).await {
-                    if e.kind() != std::io::ErrorKind::NotFound {
+                if let Err(e) = tokio::fs::remove_file(&entry_path).await
+                    && e.kind() != std::io::ErrorKind::NotFound {
                         warn!("Failed to remove file: {} - {}", entry_path.display(), e);
                     }
-                }
             }
         }
 
         // 尝试删除根目录（忽略"不存在"的错误）
-        if let Err(e) = tokio::fs::remove_dir(path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
+        if let Err(e) = tokio::fs::remove_dir(path).await
+            && e.kind() != std::io::ErrorKind::NotFound {
                 warn!("Failed to remove root directory: {} - {}", path.display(), e);
             }
-        }
 
         Ok(())
     }
@@ -614,11 +611,10 @@ impl BackupManager {
             let mut total = 0u64;
 
             for entry in WalkDir::new(&source_dir).into_iter().flatten() {
-                if entry.path().is_file() {
-                    if let Ok(metadata) = entry.metadata() {
+                if entry.path().is_file()
+                    && let Ok(metadata) = entry.metadata() {
                         total += metadata.len();
                     }
-                }
             }
 
             total
@@ -664,8 +660,8 @@ fn add_file_to_archive(
         };
 
         // 移除路径开头可能的 "./" 前缀
-        if path_str.starts_with("./") {
-            path_str[2..].to_string()
+        if let Some(stripped) = path_str.strip_prefix("./") {
+            stripped.to_string()
         } else {
             path_str
         }

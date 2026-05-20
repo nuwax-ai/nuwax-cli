@@ -118,6 +118,7 @@ pub async fn check_services_running(filter: &ServiceFilter) -> Result<bool> {
 /// 等待指定的Docker服务完全停止
 ///
 /// 注意：推荐使用 health_check.rs 中的 wait_for_services_ready 方法
+#[allow(dead_code)]
 pub async fn wait_for_services_stopped(filter: &ServiceFilter, timeout_secs: u64) -> Result<bool> {
     let start_time = tokio::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
@@ -187,15 +188,14 @@ pub async fn parse_service_names_from_compose(compose_file_path: &Path) -> Resul
             Ok(yaml) => {
                 let mut service_names = Vec::new();
 
-                if let Some(services) = yaml.get("services") {
-                    if let Some(services_map) = services.as_mapping() {
+                if let Some(services) = yaml.get("services")
+                    && let Some(services_map) = services.as_mapping() {
                         for (key, _value) in services_map {
                             if let Some(service_name) = key.as_str() {
                                 service_names.push(service_name.to_string());
                             }
                         }
                     }
-                }
 
                 info!("Parsed {count} services from {path}:", path = compose_file_path.display(), count = service_names.len());
                 for name in &service_names {
@@ -234,6 +234,7 @@ pub async fn create_compose_filter(compose_file_path: &Path) -> Result<ServiceFi
 /// 推荐使用 HealthChecker 来获得更准确的状态判断。
 ///
 /// 此函数保留用于向后兼容，但建议迁移到 HealthChecker。
+#[allow(dead_code)]
 pub async fn wait_for_compose_services_stopped(
     compose_file_path: &Path,
     timeout_secs: u64,

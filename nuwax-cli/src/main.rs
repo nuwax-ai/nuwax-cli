@@ -141,12 +141,11 @@ async fn main() {
             let mut source = e.source();
             let mut is_config_not_found = false;
             while let Some(err) = source {
-                if err.downcast_ref::<DuckError>().is_some() {
-                    if let Some(DuckError::ConfigNotFound) = err.downcast_ref::<DuckError>() {
+                if err.downcast_ref::<DuckError>().is_some()
+                    && let Some(DuckError::ConfigNotFound) = err.downcast_ref::<DuckError>() {
                         is_config_not_found = true;
                         break;
                     }
-                }
                 source = err.source();
             }
 

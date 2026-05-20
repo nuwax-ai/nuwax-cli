@@ -1,6 +1,6 @@
 [package]
 name = "client-core"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "Duck Client 核心库"
 authors = ["Duck Team"]

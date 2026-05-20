@@ -45,6 +45,7 @@ pub struct Version {
 /// # 示例
 /// ```
 /// use client_core::version::Version;
+/// use std::str::FromStr;
 ///
 /// let v1 = Version::from_str("0.0.13.5").unwrap();
 /// assert_eq!(v1.major, 0);
@@ -120,6 +121,7 @@ impl Version {
     /// # 示例
     /// ```
     /// use client_core::version::Version;
+    /// use std::str::FromStr;
     ///
     /// let v = Version::from_str("0.0.13.5").unwrap();
     /// let base = v.base_version();
@@ -136,6 +138,7 @@ impl Version {
     /// # 示例
     /// ```
     /// use client_core::version::Version;
+    /// use std::str::FromStr;
     ///
     /// let current = Version::from_str("0.0.13.2").unwrap();
     /// let patch_target = Version::from_str("0.0.13.0").unwrap();
@@ -225,6 +228,7 @@ impl Version {
     /// # 示例
     /// ```
     /// use client_core::version::{Version, VersionComparison};
+    /// use std::str::FromStr;
     ///
     /// let current = Version::from_str("0.0.13.2").unwrap();
     /// let target = Version::from_str("0.0.13.5").unwrap();

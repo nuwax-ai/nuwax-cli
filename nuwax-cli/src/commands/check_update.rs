@@ -15,13 +15,12 @@ fn parse_github_repo() -> (&'static str, &'static str) {
     const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
     // 解析 GitHub URL，支持格式: https://github.com/owner/repo
-    if let Some(path) = REPOSITORY.strip_prefix("https://github.com/") {
-        if let Some((owner, repo)) = path.split_once('/') {
+    if let Some(path) = REPOSITORY.strip_prefix("https://github.com/")
+        && let Some((owner, repo)) = path.split_once('/') {
             // 移除可能的 .git 后缀
             let repo = repo.trim_end_matches(".git");
             return (owner, repo);
         }
-    }
 
     // 如果解析失败，抛出编译错误
     panic!(
@@ -81,7 +80,6 @@ pub struct TauriUpdaterResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct TauriPlatformInfo {
-    pub signature: String,
     pub url: String,
 }
 
@@ -801,11 +799,10 @@ fn find_executable_in_dir(dir: &PathBuf) -> Result<PathBuf> {
         }
 
         // 递归查找子目录
-        if path.is_dir() {
-            if let Ok(found) = find_executable_in_dir(&path) {
+        if path.is_dir()
+            && let Ok(found) = find_executable_in_dir(&path) {
                 return Ok(found);
             }
-        }
     }
 
     Err(anyhow::anyhow!("{}", t!("check_update.no_executable_in_archive")))

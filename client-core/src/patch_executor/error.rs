@@ -176,15 +176,15 @@ impl PatchExecutorError {
 
     /// 检查是否需要回滚
     pub fn requires_rollback(&self) -> bool {
-        match self {
-            Self::VerificationFailed { .. } => false,
-            Self::HashMismatch { .. } => false,
-            Self::SignatureVerificationFailed { .. } => false,
-            Self::DownloadFailed { .. } => false,
-            Self::BackupNotEnabled => false,
-            Self::PatchSourceNotSet => false,
-            _ => true,
-        }
+        !matches!(
+            self,
+            Self::VerificationFailed { .. }
+                | Self::HashMismatch { .. }
+                | Self::SignatureVerificationFailed { .. }
+                | Self::DownloadFailed { .. }
+                | Self::BackupNotEnabled
+                | Self::PatchSourceNotSet
+        )
     }
 }
 

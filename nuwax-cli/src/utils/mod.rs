@@ -136,17 +136,13 @@ pub fn copy_with_progress<R: Read, W: Write>(
         // 显示大文件的复制进度（每10%或每100MB显示一次）
         if total_size > 100 * 1024 * 1024 {
             // 只对大于100MB的文件显示详细进度
-            let percent = if total_size > 0 {
-                (copied * 100) / total_size
-            } else {
-                0
-            };
+            let percent = (copied * 100).checked_div(total_size).unwrap_or(0);
             let mb_copied = copied as f64 / 1024.0 / 1024.0;
             let mb_total = total_size as f64 / 1024.0 / 1024.0;
 
             // 每10%或每100MB更新一次进度
-            if (percent != last_percent && percent % 10 == 0)
-                || (copied % (100 * 1024 * 1024) == 0 && copied > 0)
+            if (percent != last_percent && percent.is_multiple_of(10))
+                || (copied.is_multiple_of(100 * 1024 * 1024) && copied > 0)
             {
                 info!(
                     "     ⏳ {} copy progress: {:.1}% ({:.1}/{:.1} MB)",
@@ -177,11 +173,10 @@ fn force_extract_file(
     }
 
     // 确保父目录存在
-    if let Some(parent) = target_path.parent() {
-        if !parent.exists() {
+    if let Some(parent) = target_path.parent()
+        && !parent.exists() {
             std::fs::create_dir_all(parent)?;
         }
-    }
 
     // 创建新文件/目录
     if entry.is_dir() {
@@ -217,11 +212,10 @@ fn handle_extraction(
 
 /// 确保父目录存在
 fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
+    if let Some(parent) = path.parent()
+        && !parent.exists() {
             std::fs::create_dir_all(parent)?;
         }
-    }
     Ok(())
 }
 
@@ -659,11 +653,10 @@ fn extract_tar_gz_blocking(
                 }
 
                 // 确保父目录存在
-                if let Some(parent) = target_path.parent() {
-                    if !parent.exists() {
+                if let Some(parent) = target_path.parent()
+                    && !parent.exists() {
                         std::fs::create_dir_all(parent)?;
                     }
-                }
 
                 // 解压文件
                 entry.unpack(&target_path)?;

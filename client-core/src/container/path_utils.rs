@@ -86,13 +86,7 @@ impl PathProcessor {
 
         // 相对路径（包含路径分隔符）
         if path.contains('/') || path.contains('\\') {
-            // 排除仅包含文件名的情况
-            return !Path::new(path).file_name().map_or(false, |f| {
-                !Path::new(f).extension().map_or(false, |ext| {
-                    // 排除带扩展名的文件
-                    ext.len() > 0
-                })
-            });
+            return true;
         }
 
         false
@@ -114,7 +108,8 @@ impl PathProcessor {
 
     /// 清理路径（移除多余的 ./ 和 //）
     fn clean_path(&self, path: &str) -> String {
-        let mut components = Vec::new();
+        let mut components: Vec<std::path::Component> = Vec::new();
+        let mut has_root = false;
 
         for component in Path::new(path).components() {
             match component {
@@ -122,13 +117,16 @@ impl PathProcessor {
                     // 跳过当前目录 .
                     continue;
                 }
+                std::path::Component::RootDir => {
+                    // 记录存在根目录，但不立即添加
+                    has_root = true;
+                }
                 std::path::Component::ParentDir => {
                     // 处理父目录 ..
-                    if let Some(last) = components.last() {
-                        if last != &std::path::Component::RootDir {
+                    if let Some(last) = components.last()
+                        && *last != std::path::Component::RootDir {
                             components.pop();
                         }
-                    }
                 }
                 _ => {
                     components.push(component);
@@ -136,11 +134,25 @@ impl PathProcessor {
             }
         }
 
-        let cleaned = components
-            .iter()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(std::path::MAIN_SEPARATOR_STR);
+        let separator = std::path::MAIN_SEPARATOR_STR;
+        let cleaned = if has_root {
+            let prefix = if separator == "/" { "/" } else { "" };
+            format!(
+                "{}{}",
+                prefix,
+                components
+                    .iter()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(separator)
+            )
+        } else {
+            components
+                .iter()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(separator)
+        };
 
         // 确保空路径返回 "."
         if cleaned.is_empty() {
@@ -167,7 +179,8 @@ impl PathProcessor {
                 .to_lowercase()
                 .next()
                 .unwrap_or_default();
-            let rest = &path[3..];
+            // path[2] is the separator '/', so path[2..] gives "/Users/test/data"
+            let rest = &path[2..];
             return format!("/mnt/{}{}", drive_letter, rest);
         }
 
@@ -182,33 +195,34 @@ impl PathProcessor {
 
     /// 转换为 Windows 格式
     fn to_windows_format(&self, path: &str) -> String {
-        let path = path.replace('/', "\\");
-
-        // WSL2 路径转换为 Windows 路径
-        if path.starts_with("/mnt/") {
-            let rest = &path[5..]; // 移除 /mnt/
-            if !rest.is_empty() {
-                let drive_letter = rest
-                    .chars()
-                    .next()
-                    .unwrap_or_default()
-                    .to_uppercase()
-                    .next()
-                    .unwrap_or_default();
-                let rest = &rest[1..];
-                return format!("{}:\\{}", drive_letter, rest);
-            }
+        // WSL2 路径转换为 Windows 路径（需要在替换斜杠之前处理）
+        if let Some(rest) = path.strip_prefix("/mnt/").or_else(|| path.strip_prefix("\\mnt\\"))
+            && !rest.is_empty()
+        {
+            let drive_letter = rest
+                .chars()
+                .next()
+                .unwrap_or_default()
+                .to_uppercase()
+                .next()
+                .unwrap_or_default();
+            // 跳过驱动器字母后的分隔符（如 / 或 \），然后转换剩余路径的分隔符
+            let rest = rest[1..].trim_start_matches(['/', '\\']).replace('/', "\\");
+            return format!("{}:\\{}", drive_letter, rest);
         }
 
-        if path.starts_with("/c/") {
-            return format!("C:\\{}", &path[3..]);
+        if let Some(rest) = path.strip_prefix("/c/").or_else(|| path.strip_prefix("\\c\\")) {
+            let rest = rest.trim_start_matches(['/', '\\']).replace('/', "\\");
+            return format!("C:\\{}", rest);
         }
 
-        if path.starts_with("/d/") {
-            return format!("D:\\{}", &path[3..]);
+        if let Some(rest) = path.strip_prefix("/d/").or_else(|| path.strip_prefix("\\d\\")) {
+            let rest = rest.trim_start_matches(['/', '\\']).replace('/', "\\");
+            return format!("D:\\{}", rest);
         }
 
-        path
+        // 其他情况：替换斜杠为反斜杠
+        path.replace('/', "\\")
     }
 
     /// 转换为 POSIX 格式
@@ -333,16 +347,17 @@ mod tests {
 
     #[test]
     fn test_convert_separators() {
+        // convert_separators just converts slashes, doesn't do path format conversion
         let processor_wsl2 = PathProcessor::new(HostOs::WindowsWsl2, PathFormat::Wsl2);
         assert_eq!(
             processor_wsl2.convert_separators(r"C:\Users\test"),
-            "/mnt/c/Users/test"
+            "C:/Users/test"
         );
 
         let processor_windows = PathProcessor::new(HostOs::WindowsNative, PathFormat::Windows);
         assert_eq!(
             processor_windows.convert_separators("/mnt/c/Users/test"),
-            r"\mnt\c\Users\test"
+            "\\mnt\\c\\Users\\test"
         );
     }
 
@@ -353,7 +368,8 @@ mod tests {
         assert_eq!(processor.clean_path("./data"), "data");
         assert_eq!(processor.clean_path("data/./test"), "data/test");
         assert_eq!(processor.clean_path("data/../test"), "test");
-        assert_eq!(processor.clean_path("./"), "");
+        // 空路径返回 "."
+        assert_eq!(processor.clean_path("./"), ".");
     }
 
     #[test]

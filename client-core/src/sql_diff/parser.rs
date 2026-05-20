@@ -232,11 +232,10 @@ fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError>
             sqlparser::ast::ColumnOption::Comment(c) => {
                 comment = Some(c.clone());
             }
-            sqlparser::ast::ColumnOption::Unique { is_primary, .. } => {
-                if *is_primary {
+            sqlparser::ast::ColumnOption::Unique { is_primary, .. }
+                if *is_primary => {
                     nullable = false; // 主键不能为空
                 }
-            }
             sqlparser::ast::ColumnOption::DialectSpecific(tokens) => {
                 // 检查是否是AUTO_INCREMENT
                 let token_str = tokens
@@ -416,10 +415,10 @@ fn format_data_type(data_type: &DataType) -> String {
             // 正确处理 ENUM 变体
             let enum_values: Vec<String> = variants
                 .iter()
-                .filter_map(|variant| match variant {
-                    sqlparser::ast::EnumMember::Name(name) => Some(format!("'{}'", name)),
+                .map(|variant| match variant {
+                    sqlparser::ast::EnumMember::Name(name) => format!("'{}'", name),
                     sqlparser::ast::EnumMember::NamedValue(name, _expr) => {
-                        Some(format!("'{}'", name))
+                        format!("'{}'", name)
                     }
                 })
                 .collect();
@@ -437,11 +436,10 @@ fn format_data_type(data_type: &DataType) -> String {
 /// 检查列是否是列级别的主键
 fn is_column_primary_key(column: &ColumnDef) -> bool {
     for option in &column.options {
-        if let sqlparser::ast::ColumnOption::Unique { is_primary, .. } = &option.option {
-            if *is_primary {
+        if let sqlparser::ast::ColumnOption::Unique { is_primary, .. } = &option.option
+            && *is_primary {
                 return true;
             }
-        }
     }
     false
 }

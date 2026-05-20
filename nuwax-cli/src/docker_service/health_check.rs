@@ -6,6 +6,7 @@ use client_core::constants::timeout;
 use client_core::container::DockerManager;
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::time::Duration;
 use std::{collections::HashSet, sync::Arc};
 use tracing::{debug, error, info, warn};
@@ -25,9 +26,30 @@ pub enum RestartPolicy {
     OnFailureWithRetries(u32),
 }
 
+impl FromStr for RestartPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        RestartPolicy::parse(s).ok_or_else(|| anyhow::anyhow!("Invalid restart policy: {}", s))
+    }
+}
+
+impl std::fmt::Display for RestartPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::No => "no",
+            Self::Always => "always",
+            Self::UnlessStopped => "unless-stopped",
+            Self::OnFailure => "on-failure",
+            Self::OnFailureWithRetries(retries) => return write!(f, "on-failure:{retries}"),
+        };
+        write!(f, "{}", s)
+    }
+}
+
 impl RestartPolicy {
     /// 从字符串解析重启策略
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "no" | "false" => Some(Self::No),
             "always" => Some(Self::Always),
@@ -45,7 +67,7 @@ impl RestartPolicy {
     }
 
     /// 转换为字符串
-    pub fn to_string(&self) -> String {
+    pub fn as_str(&self) -> String {
         match self {
             Self::No => "no".to_string(),
             Self::Always => "always".to_string(),
@@ -219,7 +241,7 @@ impl ContainerInfo {
     /// 获取restart策略的显示字符串
     pub fn get_restart_display(&self) -> String {
         match &self.restart {
-            Some(policy) => policy.to_string(),
+            Some(policy) => policy.as_str(),
             None => t!("restart_policy.unknown").to_string(),
         }
     }
@@ -296,7 +318,8 @@ impl HealthReport {
         let one_shot_count = self.get_one_shot_count();
         let running_count = self.get_running_count();
 
-        let overall_status = if total_count == 0 {
+        
+        if total_count == 0 {
             ServiceStatus::NoContainer
         } else if (healthy_count + one_shot_count) == total_count {
             ServiceStatus::AllRunning
@@ -310,8 +333,7 @@ impl HealthReport {
             } else {
                 ServiceStatus::PartiallyRunning
             }
-        };
-        overall_status
+        }
     }
 
     /// 获取运行中的容器列表
@@ -464,11 +486,10 @@ impl HealthChecker {
 
     /// 获取服务的restart策略
     async fn get_restart_policy(&self, service_name: &str) -> Option<RestartPolicy> {
-        if let Ok(service_config) = self.docker_manager.parse_service_config(service_name).await {
-            if let Some(restart_str) = service_config.restart {
-                return RestartPolicy::from_str(&restart_str);
+        if let Ok(service_config) = self.docker_manager.parse_service_config(service_name).await
+            && let Some(restart_str) = service_config.restart {
+                return RestartPolicy::parse(&restart_str);
             }
-        }
         None
     }
 
@@ -677,8 +698,8 @@ impl HealthChecker {
     /// 检查服务是否为一次性任务 - 增强版
     async fn is_oneshot_service(&self, service_name: &str) -> bool {
         // 1. 尝试从docker-compose.yml文件解析restart策略
-        if let Ok(service_config) = self.docker_manager.parse_service_config(service_name).await {
-            if let Some(restart_policy) = service_config.restart {
+        if let Ok(service_config) = self.docker_manager.parse_service_config(service_name).await
+            && let Some(restart_policy) = service_config.restart {
                 // restart: "no" 表示不自动重启，通常是一次性任务
                 if restart_policy == "no" || restart_policy == "false" {
                     info!("Service {service} restart policy: {policy} (oneshot)", service = service_name, policy = restart_policy);
@@ -693,7 +714,6 @@ impl HealthChecker {
                     return false;
                 }
             }
-        }
 
         false
     }
@@ -858,7 +878,7 @@ warn!("Bollard failed to connect to Docker: {error}", error = e.to_string());
                 {
                     Ok(container_info) => container_info
                         .state
-                        .and_then(|state| state.health.map(|health| health.status).flatten()),
+                        .and_then(|state| state.health.and_then(|health| health.status)),
                     Err(e) => {
 warn!("Cannot get health status for container {container}: {error}", container = container_name, error = e.to_string());
                         None

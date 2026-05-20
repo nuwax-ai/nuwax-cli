@@ -2,7 +2,6 @@ use anyhow::Result;
 use client_core::{
     ClientRegisterRequest, api::ApiClient, config::AppConfig, constants::config, database::Database,
 };
-use rust_i18n::t;
 use tracing::{info, warn};
 
 /// 运行独立的初始化流程

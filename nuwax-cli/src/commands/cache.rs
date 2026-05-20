@@ -1,7 +1,6 @@
 use crate::app::CliApp;
 use crate::cli::CacheCommand;
 use anyhow::Result;
-use rust_i18n::t;
 use std::fs;
 use std::path::Path;
 use tracing::{info, warn};
@@ -107,20 +106,18 @@ async fn show_cache_status(app: &CliApp) -> Result<()> {
 
         if let Ok(entries) = fs::read_dir(download_dir) {
             let mut version_count = 0;
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        version_count += 1;
-                        let version_name = path.file_name().unwrap().to_string_lossy();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    version_count += 1;
+                    let version_name = path.file_name().unwrap().to_string_lossy();
 
-                        match calculate_directory_size(&path) {
-                            Ok(size) => {
-                                info!("   Version {version}: {size} MB", version = version_name, size = format!("{:.2}", size as f64 / 1024.0 / 1024.0));
-                            }
-                            Err(_) => {
-                                info!("   Version {version}: (failed to calculate size)", version = version_name);
-                            }
+                    match calculate_directory_size(&path) {
+                        Ok(size) => {
+                            info!("   Version {version}: {size} MB", version = version_name, size = format!("{:.2}", size as f64 / 1024.0 / 1024.0));
+                        }
+                        Err(_) => {
+                            info!("   Version {version}: (failed to calculate size)", version = version_name);
                         }
                     }
                 }
@@ -153,25 +150,22 @@ async fn clean_downloads(app: &CliApp, keep: u32) -> Result<()> {
     let mut versions = Vec::new();
 
     if let Ok(entries) = fs::read_dir(download_dir) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.is_dir() {
-                    let version_name = path.file_name().unwrap().to_string_lossy().to_string();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let version_name = path.file_name().unwrap().to_string_lossy().to_string();
 
-                    // 获取目录修改时间作为排序依据
-                    if let Ok(metadata) = path.metadata() {
-                        if let Ok(modified) = metadata.modified() {
-                            versions.push((version_name, path, modified));
-                        }
+                // 获取目录修改时间作为排序依据
+                if let Ok(metadata) = path.metadata()
+                    && let Ok(modified) = metadata.modified() {
+                        versions.push((version_name, path, modified));
                     }
-                }
             }
         }
     }
 
     // 按修改时间降序排序（最新的在前）
-    versions.sort_by(|a, b| b.2.cmp(&a.2));
+    versions.sort_by_key(|b| std::cmp::Reverse(b.2));
 
     info!("Found {count} version caches", count = versions.len());
 
@@ -214,11 +208,10 @@ fn calculate_directory_size(dir: &Path) -> Result<u64> {
     for entry in WalkDir::new(dir) {
         match entry {
             Ok(entry) => {
-                if entry.file_type().is_file() {
-                    if let Ok(metadata) = entry.metadata() {
+                if entry.file_type().is_file()
+                    && let Ok(metadata) = entry.metadata() {
                         total_size += metadata.len();
                     }
-                }
             }
             Err(e) => {
                 warn!("Error walking directory: {error}", error = e.to_string());

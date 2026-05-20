@@ -202,15 +202,18 @@ impl ApiClient {
         info!("Starting to download Docker service update package: {}", url);
 
         // 根据是否需要认证决定使用哪种客户端
-        let response = if use_auth && self.authenticated_client.is_some() {
-            // 使用认证客户端（API下载）
-            let auth_client = self.authenticated_client.as_ref().unwrap();
-            match auth_client.get(url).await {
-                Ok(request_builder) => auth_client.send(request_builder, url).await?,
-                Err(e) => {
-                    warn!("AuthenticatedClient failed, falling back to regular request: {}", e);
-                    self.build_request(url).send().await?
+        let response = if use_auth {
+            if let Some(auth_client) = self.authenticated_client.as_ref() {
+                match auth_client.get(url).await {
+                    Ok(request_builder) => auth_client.send(request_builder, url).await?,
+                    Err(e) => {
+                        warn!("AuthenticatedClient failed, falling back to regular request: {}", e);
+                        self.build_request(url).send().await?
+                    }
                 }
+            } else {
+                info!("Using regular HTTP client for download (no auth client available)");
+                self.build_request(url).send().await?
             }
         } else {
             // 使用普通客户端（直接URL下载）
@@ -256,7 +259,7 @@ impl ApiClient {
             let time_since_last = now.duration_since(last_progress_time);
 
             // 减少频率：每50MB或每30秒显示一次
-            let should_show_progress = downloaded % (50 * 1024 * 1024) == 0 && downloaded > 0 ||  // 每50MB显示一次
+            let should_show_progress = downloaded.is_multiple_of(50 * 1024 * 1024) && downloaded > 0 ||  // 每50MB显示一次
                 time_since_last >= std::time::Duration::from_secs(30) ||  // 每30秒显示一次
                 (total_size.is_some_and(|size| downloaded >= size)); // 下载完成时显示
 
@@ -763,11 +766,10 @@ impl ApiClient {
         }
 
         // 6. 确保下载目录存在
-        if let Some(parent) = download_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
+        if let Some(parent) = download_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent) {
                 return Err(anyhow::anyhow!("Failed to create download directory: {e}"));
             }
-        }
 
         info!("Starting to download service update package...");
         info!("   Final download URL: {}", download_url);

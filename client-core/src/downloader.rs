@@ -113,6 +113,30 @@ impl DownloadMetadata {
     }
 }
 
+/// 断点续传下载参数
+struct ResumeDownloadParams<'a, F> {
+    url: &'a str,
+    download_path: &'a Path,
+    progress_callback: Option<F>,
+    existing_size: Option<u64>,
+    total_size: u64,
+    task_id: &'a str,
+    metadata: &'a mut DownloadMetadata,
+}
+
+/// 流式下载参数
+struct StreamDownloadParams<'a, F> {
+    response: reqwest::Response,
+    file: &'a mut File,
+    download_path: &'a Path,
+    progress_callback: Option<F>,
+    task_id: &'a str,
+    start_byte: u64,
+    total_size: u64,
+    is_resume: bool,
+    metadata: &'a mut DownloadMetadata,
+}
+
 /// 下载器类型
 #[derive(Debug, Clone)]
 pub enum DownloaderType {
@@ -194,7 +218,7 @@ impl FileDownloader {
     }
 
     /// 创建默认配置的下载器
-    pub fn default() -> Self {
+    pub fn with_default_config() -> Self {
         Self::new(DownloaderConfig::default())
     }
 
@@ -407,28 +431,6 @@ impl FileDownloader {
             info!("Saved download metadata: {}", metadata_path.display());
         }
         Ok(())
-    }
-
-    /// 加载下载元数据 ⭐
-    async fn load_metadata(&self, download_path: &Path) -> Result<Option<DownloadMetadata>> {
-        if !self.config.enable_metadata {
-            return Ok(None);
-        }
-
-        let metadata_path = self.get_metadata_path(download_path);
-        if !metadata_path.exists() {
-            return Ok(None);
-        }
-
-        let content = tokio::fs::read_to_string(&metadata_path)
-            .await
-            .map_err(|e| DuckError::custom(format!("Failed to read metadata: {e}")))?;
-
-        let metadata: DownloadMetadata = serde_json::from_str(&content)
-            .map_err(|e| DuckError::custom(format!("Failed to parse metadata: {e}")))?;
-
-        info!("Loaded download metadata: {}", metadata_path.display());
-        Ok(Some(metadata))
     }
 
     /// 清理下载元数据 ⭐
@@ -692,15 +694,15 @@ impl FileDownloader {
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
         info!("Using regular HTTP download");
-        self.download_with_resume_internal(
+        self.download_with_resume_internal(ResumeDownloadParams {
             url,
             download_path,
             progress_callback,
             existing_size,
             total_size,
-            "http_download",
+            task_id: "http_download",
             metadata,
-        )
+        })
         .await
     }
 
@@ -727,37 +729,28 @@ impl FileDownloader {
             info!("Using extended timeout HTTP download");
         }
 
-        self.download_with_resume_internal(
+        self.download_with_resume_internal(ResumeDownloadParams {
             url,
             download_path,
             progress_callback,
             existing_size,
             total_size,
-            "extended_http_download",
+            task_id: "extended_http_download",
             metadata,
-        )
+        })
         .await
     }
 
     /// 内部断点续传下载实现 ⭐
-    async fn download_with_resume_internal<F>(
-        &self,
-        url: &str,
-        download_path: &Path,
-        progress_callback: Option<F>,
-        existing_size: Option<u64>,
-        total_size: u64,
-        task_id: &str,
-        metadata: &mut DownloadMetadata,
-    ) -> Result<()>
+    async fn download_with_resume_internal<F>(&self, params: ResumeDownloadParams<'_, F>) -> Result<()>
     where
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
-        let start_byte = existing_size.unwrap_or(0);
-        let is_resume = existing_size.is_some();
+        let start_byte = params.existing_size.unwrap_or(0);
+        let is_resume = params.existing_size.is_some();
 
         // 构建请求
-        let mut request = self.get_http_client().get(url);
+        let mut request = self.get_http_client().get(params.url);
 
         if is_resume {
             info!("Resume download: starting from byte {}", start_byte);
@@ -784,21 +777,21 @@ impl FileDownloader {
                 warn!("Server may not support Range request, falling back to full download");
 
                 // 删除已有文件，重新开始下载
-                if download_path.exists() {
+                if params.download_path.exists() {
                     info!("Deleting partially downloaded file, preparing to re-download");
-                    tokio::fs::remove_file(download_path)
+                    tokio::fs::remove_file(params.download_path)
                         .await
                         .map_err(|e| anyhow::anyhow!("Failed to delete partial file: {e}"))?;
                 }
 
                 // 清理元数据
-                let _ = self.cleanup_metadata(download_path).await;
+                let _ = self.cleanup_metadata(params.download_path).await;
 
                 // 重新发起不带Range头的请求
                 info!("Restarting full download request");
                 let new_response = self
                     .get_http_client()
-                    .get(url)
+                    .get(params.url)
                     .send()
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to start re-download request: {e}"))?;
@@ -811,26 +804,26 @@ impl FileDownloader {
                 }
 
                 // 创建新文件并从头开始下载
-                let mut file = File::create(download_path)
+                let mut file = File::create(params.download_path)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to create file: {e}"))?;
 
                 // 重置元数据
-                metadata.downloaded_bytes = 0;
-                metadata.start_time = chrono::Utc::now().to_rfc3339();
+                params.metadata.downloaded_bytes = 0;
+                params.metadata.start_time = chrono::Utc::now().to_rfc3339();
 
                 return self
-                    .download_stream_with_resume(
-                        new_response,
-                        &mut file,
-                        download_path,
-                        progress_callback,
-                        task_id,
-                        0, // 从头开始
-                        total_size,
-                        false, // 不是续传
-                        metadata,
-                    )
+                    .download_stream_with_resume(StreamDownloadParams {
+                        response: new_response,
+                        file: &mut file,
+                        download_path: params.download_path,
+                        progress_callback: params.progress_callback,
+                        task_id: params.task_id,
+                        start_byte: 0,
+                        total_size: params.total_size,
+                        is_resume: false,
+                        metadata: params.metadata,
+                    })
                     .await;
             } else {
                 return Err(anyhow::anyhow!(
@@ -853,74 +846,63 @@ impl FileDownloader {
             OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(download_path)
+                .open(params.download_path)
                 .await
                 .map_err(|e| DuckError::custom(format!("Failed to open file: {e}")))?
         } else {
             info!("Creating new file");
-            File::create(download_path)
+            File::create(params.download_path)
                 .await
                 .map_err(|e| DuckError::custom(format!("Failed to create file: {e}")))?
         };
 
         // 执行下载
-        self.download_stream_with_resume(
+        self.download_stream_with_resume(StreamDownloadParams {
             response,
-            &mut file,
-            download_path,
-            progress_callback,
-            task_id,
+            file: &mut file,
+            download_path: params.download_path,
+            progress_callback: params.progress_callback,
+            task_id: params.task_id,
             start_byte,
-            total_size,
+            total_size: params.total_size,
             is_resume,
-            metadata,
-        )
+            metadata: params.metadata,
+        })
         .await
     }
 
     /// 通用的流式下载处理（支持断点续传）⭐
-    async fn download_stream_with_resume<F>(
-        &self,
-        response: reqwest::Response,
-        file: &mut File,
-        download_path: &Path,
-        progress_callback: Option<F>,
-        task_id: &str,
-        start_byte: u64,
-        total_size: u64,
-        is_resume: bool,
-        metadata: &mut DownloadMetadata,
-    ) -> Result<()>
+    async fn download_stream_with_resume<F>(&self, params: StreamDownloadParams<'_, F>) -> Result<()>
     where
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
-        let mut downloaded = start_byte; // 从已下载的字节开始计算
-        let mut stream = response.bytes_stream();
+        let mut downloaded = params.start_byte;
+        let mut stream = params.response.bytes_stream();
         let mut last_progress_time = std::time::Instant::now();
         let mut last_progress_bytes = downloaded;
         let progress_interval =
             std::time::Duration::from_secs(self.config.progress_interval_seconds);
 
         // 首次进度回调
-        if let Some(callback) = progress_callback.as_ref() {
-            let status = if is_resume {
+        if let Some(callback) = params.progress_callback.as_ref() {
+            let status = if params.is_resume {
                 DownloadStatus::Resuming
             } else {
                 DownloadStatus::Starting
             };
             callback(DownloadProgress {
-                task_id: task_id.to_string(),
-                file_name: download_path
+                task_id: params.task_id.to_string(),
+                file_name: params.download_path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string(),
                 downloaded_bytes: downloaded,
-                total_bytes: total_size,
+                total_bytes: params.total_size,
                 download_speed: 0.0,
                 eta_seconds: 0,
-                percentage: if total_size > 0 {
-                    downloaded as f64 / total_size as f64 * 100.0
+                percentage: if params.total_size > 0 {
+                    downloaded as f64 / params.total_size as f64 * 100.0
                 } else {
                     0.0
                 },
@@ -931,29 +913,29 @@ impl FileDownloader {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| DuckError::custom(format!("Failed to download data: {e}")))?;
 
-            file.write_all(&chunk)
+            params.file.write_all(&chunk)
                 .await
                 .map_err(|e| DuckError::custom(format!("Failed to write file: {e}")))?;
 
             downloaded += chunk.len() as u64;
 
             // 调用进度回调
-            if let Some(callback) = progress_callback.as_ref() {
-                let progress = if total_size > 0 {
-                    downloaded as f64 / total_size as f64 * 100.0
+            if let Some(callback) = params.progress_callback.as_ref() {
+                let progress = if params.total_size > 0 {
+                    downloaded as f64 / params.total_size as f64 * 100.0
                 } else {
                     0.0
                 };
 
                 callback(DownloadProgress {
-                    task_id: task_id.to_string(),
-                    file_name: download_path
+                    task_id: params.task_id.to_string(),
+                    file_name: params.download_path
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string(),
                     downloaded_bytes: downloaded,
-                    total_bytes: total_size,
+                    total_bytes: params.total_size,
                     download_speed: 0.0,
                     eta_seconds: 0,
                     percentage: progress,
@@ -967,21 +949,20 @@ impl FileDownloader {
                 let bytes_since_last = downloaded - last_progress_bytes;
                 let time_since_last = now.duration_since(last_progress_time);
 
-                let should_show_progress = bytes_since_last >= self.config.progress_bytes_interval ||  // 根据配置的字节间隔显示
-                    time_since_last >= progress_interval ||  // 根据配置的时间间隔显示
-                    (total_size > 0 && downloaded >= total_size); // 下载完成时显示
+                let should_show_progress = bytes_since_last >= self.config.progress_bytes_interval ||
+                    time_since_last >= progress_interval ||
+                    (params.total_size > 0 && downloaded >= params.total_size);
 
                 if should_show_progress {
-                    if total_size > 0 {
-                        let percentage = (downloaded as f64 / total_size as f64 * 100.0) as u32;
+                    if params.total_size > 0 {
+                        let percentage = (downloaded as f64 / params.total_size as f64 * 100.0) as u32;
                         let status_icon =
-                            if is_resume && downloaded <= start_byte + 50 * 1024 * 1024 {
-                                "🔄" // 断点续传图标
+                            if params.is_resume && downloaded <= params.start_byte + 50 * 1024 * 1024 {
+                                "🔄"
                             } else {
-                                "📥" // 普通下载图标
+                                "📥"
                             };
 
-                        // 计算下载速度（仅用于显示）
                         let speed_mbps = if time_since_last.as_secs_f64() > 0.0 {
                             (bytes_since_last as f64 / 1024.0 / 1024.0)
                                 / time_since_last.as_secs_f64()
@@ -994,7 +975,7 @@ impl FileDownloader {
                             status_icon,
                             percentage,
                             downloaded as f64 / 1024.0 / 1024.0,
-                            total_size as f64 / 1024.0 / 1024.0,
+                            params.total_size as f64 / 1024.0 / 1024.0,
                             speed_mbps
                         );
                     } else {
@@ -1004,17 +985,14 @@ impl FileDownloader {
                     last_progress_time = now;
                     last_progress_bytes = downloaded;
 
-                    // 更新元数据（减少保存频率，避免重复日志）⭐
                     if self.config.enable_metadata {
-                        metadata.update_progress(downloaded);
-                        // 只在特定条件下保存元数据：每500MB或每5分钟
-                        let should_save_metadata = bytes_since_last >= 500 * 1024 * 1024 ||  // 每500MB保存一次
-                            time_since_last >= std::time::Duration::from_secs(300); // 每5分钟保存一次
+                        params.metadata.update_progress(downloaded);
+                        let should_save_metadata = bytes_since_last >= 500 * 1024 * 1024 ||
+                            time_since_last >= std::time::Duration::from_secs(300);
 
                         if should_save_metadata {
-                            // 静默保存，不输出日志（避免重复日志）
                             let _ = self
-                                .save_metadata_with_logging(download_path, metadata, false)
+                                .save_metadata_with_logging(params.download_path, params.metadata, false)
                                 .await;
                         }
                     }
@@ -1022,28 +1000,23 @@ impl FileDownloader {
             }
         }
 
-        // 确保文件已刷新到磁盘
-        file.flush()
+        params.file.flush()
             .await
             .map_err(|e| DuckError::custom(format!("Failed to flush file buffer: {e}")))?;
 
-        let download_type = if is_resume {
-            "Resume download"
-        } else {
-            "Download"
-        };
+        let download_type = if params.is_resume { "Resume download" } else { "Download" };
         info!("{} completed", download_type);
-        info!("   File path: {}", download_path.display());
+        info!("   File path: {}", params.download_path.display());
         info!(
             "   Final size: {} bytes ({:.2} MB)",
             downloaded,
             downloaded as f64 / 1024.0 / 1024.0
         );
-        if is_resume {
+        if params.is_resume {
             info!(
                 "   Resumed size: {} bytes ({:.2} MB)",
-                downloaded - start_byte,
-                (downloaded - start_byte) as f64 / 1024.0 / 1024.0
+                downloaded - params.start_byte,
+                (downloaded - params.start_byte) as f64 / 1024.0 / 1024.0
             );
         }
 
@@ -1104,7 +1077,7 @@ impl FileDownloader {
 
 /// 简化的下载功能，用于向后兼容
 pub async fn download_file_simple(url: &str, download_path: &Path) -> Result<()> {
-    let downloader = FileDownloader::default();
+    let downloader = FileDownloader::with_default_config();
     downloader
         .download_file::<fn(DownloadProgress)>(url, download_path, None)
         .await
@@ -1119,7 +1092,7 @@ pub async fn download_file_with_progress<F>(
 where
     F: Fn(DownloadProgress) + Send + Sync + 'static,
 {
-    let downloader = FileDownloader::default();
+    let downloader = FileDownloader::with_default_config();
     downloader
         .download_file(url, download_path, progress_callback)
         .await
@@ -1136,7 +1109,7 @@ mod tests {
 
     #[test]
     fn test_aliyun_oss_url_detection() {
-        let downloader = FileDownloader::default();
+        let downloader = FileDownloader::with_default_config();
 
         // 测试您提供的真实阿里云 OSS URL
         let real_oss_url = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-client-releases/docker/20250705082538/docker.zip";
@@ -1175,7 +1148,7 @@ mod tests {
 
     #[test]
     fn test_downloader_type_detection() {
-        let downloader = FileDownloader::default();
+        let downloader = FileDownloader::with_default_config();
 
         // 测试您的真实 OSS URL（公网访问）
         let real_oss_url = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-client-releases/docker/20250705082538/docker.zip";
@@ -1214,7 +1187,7 @@ mod tests {
     /// 测试OSS URL检测和Range支持检测 ⭐
     #[tokio::test]
     async fn test_oss_url_detection_and_range_support() {
-        let downloader = FileDownloader::default();
+        let downloader = FileDownloader::with_default_config();
 
         // 测试用户提供的OSS URL
         let oss_url = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20250712133533/docker.zip";

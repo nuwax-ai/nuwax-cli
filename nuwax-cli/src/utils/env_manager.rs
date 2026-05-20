@@ -190,7 +190,7 @@ impl EnvManager {
 
     fn get_original_line_str(&self, index: usize) -> &str {
         match &self.lines.get(index) {
-            Some(LineType::Variable(var)) => {
+            Some(LineType::Variable(_var)) => {
                 // This is tricky as we don't store the original string.
                 // We need to reconstruct it or find a way to access it.
                 // For now, let's assume we can get it from somewhere.
@@ -204,6 +204,7 @@ impl EnvManager {
     }
 
     /// 获取一个变量
+    #[allow(dead_code)]
     pub fn get_variable(&self, key: &str) -> Option<&Variable> {
         self.variables.get(key)
     }
@@ -222,6 +223,7 @@ impl EnvManager {
     }
 
     /// 获取所有变量的不可变引用
+    #[allow(dead_code)]
     pub fn get_all_variables(&self) -> &HashMap<String, Variable> {
         &self.variables
     }
@@ -259,6 +261,7 @@ pub fn update_frontend_port(env_path: &Path, new_port: u16) -> Result<()> {
 /// # Returns
 ///
 /// 返回一个包含所有环境变量的 HashMap
+#[allow(dead_code)]
 pub fn load_env_variables(env_path: &Path) -> Result<HashMap<String, String>> {
     let mut env_manager = EnvManager::new();
     env_manager.load(env_path)?;

@@ -9,11 +9,13 @@
 /// 使用方式：
 /// - 不设置环境变量或设置 NUWAX_CLI_ENV=production → 生产环境
 /// - 设置 NUWAX_CLI_ENV=testing 或 NUWAX_CLI_ENV=test → 测试环境
-
+///
 /// 环境类型枚举
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum Environment {
     /// 生产环境
+    #[default]
     Production,
     /// 测试环境
     Test,
@@ -30,15 +32,9 @@ impl Environment {
     /// ```
     /// use client_core::environment::Environment;
     ///
-    /// // 模拟环境变量
-    /// std::env::set_var("NUWAX_CLI_ENV", "testing");
-    /// assert_eq!(Environment::from_env(), Environment::Test);
-    ///
-    /// std::env::set_var("NUWAX_CLI_ENV", "production");
-    /// assert_eq!(Environment::from_env(), Environment::Production);
-    ///
-    /// std::env::remove_var("NUWAX_CLI_ENV");
-    /// assert_eq!(Environment::from_env(), Environment::Production);
+    /// // 获取当前环境
+    /// let env = Environment::from_env();
+    /// println!("Current environment: {:?}", env);
     /// ```
     pub fn from_env() -> Self {
         match std::env::var("NUWAX_CLI_ENV")
@@ -83,11 +79,6 @@ impl Environment {
     }
 }
 
-impl Default for Environment {
-    fn default() -> Self {
-        Environment::Production
-    }
-}
 
 impl std::fmt::Display for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

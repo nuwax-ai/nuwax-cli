@@ -85,10 +85,9 @@ pub async fn run_auto_backup(app: &mut CliApp) -> Result<()> {
 
         // 等待服务启动完成
         info!("Waiting for Docker services to fully start");
-        let compose_path =
-            compose_file.unwrap_or_else(|| PathBuf::from(&app.config.docker.compose_file));
+        let compose_path = compose_file.as_ref().unwrap().as_path();
         if docker_utils::wait_for_compose_services_started(
-            &compose_path,
+            compose_path,
             timeout::SERVICE_START_TIMEOUT,
         )
         .await?

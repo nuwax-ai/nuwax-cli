@@ -133,11 +133,10 @@ impl DuckDbManager {
         const CLIENT_UUID_KEY: &str = "client_uuid";
 
         // 尝试从数据库获取现有的UUID
-        if let Some(uuid_str) = self.get_config(CLIENT_UUID_KEY).await? {
-            if let Ok(uuid) = Uuid::parse_str(&uuid_str) {
+        if let Some(uuid_str) = self.get_config(CLIENT_UUID_KEY).await?
+            && let Ok(uuid) = Uuid::parse_str(&uuid_str) {
                 return Ok(uuid);
             }
-        }
 
         // 生成新的UUID并保存
         let new_uuid = Uuid::new_v4();
