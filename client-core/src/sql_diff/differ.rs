@@ -87,7 +87,9 @@ pub fn generate_mysql_diff(
     }
 
     if !stats.has_executable_operations() && stats.has_dangerous_operations() {
-        info!("Schema differences detected but only includes delete operation warnings, no executable SQL");
+        info!(
+            "Schema differences detected but only includes delete operation warnings, no executable SQL"
+        );
     }
 
     Ok((result, stats))
@@ -172,14 +174,15 @@ fn generate_column_diffs(
     // 检查修改的列
     for (col_name, new_col) in &new_columns {
         if let Some(old_col) = old_columns.get(col_name)
-            && old_col != new_col {
-                diffs.push(format!(
-                    "ALTER TABLE `{}` MODIFY COLUMN {};",
-                    table_name,
-                    generate_column_sql(new_col)
-                ));
-                stats.columns_modified += 1;
-            }
+            && old_col != new_col
+        {
+            diffs.push(format!(
+                "ALTER TABLE `{}` MODIFY COLUMN {};",
+                table_name,
+                generate_column_sql(new_col)
+            ));
+            stats.columns_modified += 1;
+        }
     }
 
     (diffs, stats)
@@ -340,70 +343,71 @@ fn generate_index_diffs(
     // 检查修改的索引（先警告删除，再添加新的）
     for (idx_name, new_idx) in &new_indexes {
         if let Some(old_idx) = old_indexes.get(idx_name)
-            && old_idx != new_idx {
-                // 警告需要删除旧索引（不生成删除SQL）
-                if old_idx.is_primary {
-                    tracing::warn!(
-                        "⚠️  Primary key definition changed in table `{}`. Old primary key must be dropped first; no automatic drop SQL is generated for data safety",
-                        table_name
-                    );
-                    diffs.push("-- ⚠️  Warning: primary key definition changed; manually drop old primary key first".to_string());
-                    diffs.push(format!(
-                        "-- Please run manually: ALTER TABLE `{table_name}` DROP PRIMARY KEY;"
-                    ));
-                } else {
-                    tracing::warn!(
-                        "⚠️  Index definition for `{}` in table `{}` changed. Old index must be dropped first; no automatic drop SQL is generated for data safety",
-                        idx_name,
-                        table_name,
-                    );
-                    diffs.push(format!(
+            && old_idx != new_idx
+        {
+            // 警告需要删除旧索引（不生成删除SQL）
+            if old_idx.is_primary {
+                tracing::warn!(
+                    "⚠️  Primary key definition changed in table `{}`. Old primary key must be dropped first; no automatic drop SQL is generated for data safety",
+                    table_name
+                );
+                diffs.push("-- ⚠️  Warning: primary key definition changed; manually drop old primary key first".to_string());
+                diffs.push(format!(
+                    "-- Please run manually: ALTER TABLE `{table_name}` DROP PRIMARY KEY;"
+                ));
+            } else {
+                tracing::warn!(
+                    "⚠️  Index definition for `{}` in table `{}` changed. Old index must be dropped first; no automatic drop SQL is generated for data safety",
+                    idx_name,
+                    table_name,
+                );
+                diffs.push(format!(
                         "-- ⚠️  Warning: index `{idx_name}` definition changed; manually drop old index first"
                     ));
-                    diffs.push(format!(
-                        "-- Please run manually: ALTER TABLE `{table_name}` DROP KEY `{idx_name}`;"
-                    ));
-                }
-                stats.indexes_modified += 1;
-
-                // 再添加新索引
-                if new_idx.is_primary {
-                    diffs.push(format!(
-                        "ALTER TABLE `{}` ADD PRIMARY KEY ({});",
-                        table_name,
-                        new_idx
-                            .columns
-                            .iter()
-                            .map(|c| format!("`{c}`"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                } else if new_idx.is_unique {
-                    diffs.push(format!(
-                        "ALTER TABLE `{}` ADD UNIQUE KEY `{}` ({});",
-                        table_name,
-                        idx_name,
-                        new_idx
-                            .columns
-                            .iter()
-                            .map(|c| format!("`{c}`"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                } else {
-                    diffs.push(format!(
-                        "ALTER TABLE `{}` ADD KEY `{}` ({});",
-                        table_name,
-                        idx_name,
-                        new_idx
-                            .columns
-                            .iter()
-                            .map(|c| format!("`{c}`"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
+                diffs.push(format!(
+                    "-- Please run manually: ALTER TABLE `{table_name}` DROP KEY `{idx_name}`;"
+                ));
             }
+            stats.indexes_modified += 1;
+
+            // 再添加新索引
+            if new_idx.is_primary {
+                diffs.push(format!(
+                    "ALTER TABLE `{}` ADD PRIMARY KEY ({});",
+                    table_name,
+                    new_idx
+                        .columns
+                        .iter()
+                        .map(|c| format!("`{c}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            } else if new_idx.is_unique {
+                diffs.push(format!(
+                    "ALTER TABLE `{}` ADD UNIQUE KEY `{}` ({});",
+                    table_name,
+                    idx_name,
+                    new_idx
+                        .columns
+                        .iter()
+                        .map(|c| format!("`{c}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            } else {
+                diffs.push(format!(
+                    "ALTER TABLE `{}` ADD KEY `{}` ({});",
+                    table_name,
+                    idx_name,
+                    new_idx
+                        .columns
+                        .iter()
+                        .map(|c| format!("`{c}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
     }
 
     (diffs, stats)

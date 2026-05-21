@@ -7,10 +7,7 @@ mod tests {
     #[test]
     fn test_restart_policy_parsing() {
         assert_eq!(RestartPolicy::parse("no"), Some(RestartPolicy::No));
-        assert_eq!(
-            RestartPolicy::parse("always"),
-            Some(RestartPolicy::Always)
-        );
+        assert_eq!(RestartPolicy::parse("always"), Some(RestartPolicy::Always));
         assert_eq!(
             RestartPolicy::parse("unless-stopped"),
             Some(RestartPolicy::UnlessStopped)

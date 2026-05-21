@@ -146,7 +146,9 @@ impl UpgradeStrategyManager {
         let work_dir = get_docker_work_dir();
         let compose_file_path = get_compose_file_path();
         if !work_dir.exists() || !compose_file_path.exists() {
-            info!("No docker directory or compose file found in working directory, selecting full upgrade strategy");
+            info!(
+                "No docker directory or compose file found in working directory, selecting full upgrade strategy"
+            );
             return self.select_full_upgrade_strategy();
         }
 
@@ -161,7 +163,9 @@ impl UpgradeStrategyManager {
             crate::version::VersionComparison::PatchUpgradeable => {
                 // 可以进行增量升级
                 if !self.has_patch_for_architecture() {
-                    info!("No incremental upgrade package for current architecture, selecting full upgrade strategy");
+                    info!(
+                        "No incremental upgrade package for current architecture, selecting full upgrade strategy"
+                    );
                     self.select_full_upgrade_strategy()
                 } else {
                     info!("Selecting incremental upgrade strategy");
@@ -184,7 +188,10 @@ impl UpgradeStrategyManager {
             //使用分架构的全量包
             let platform_info = self.get_platform_package()?;
 
-            debug!("Using architecture-specific full package: {}", &platform_info.url);
+            debug!(
+                "Using architecture-specific full package: {}",
+                &platform_info.url
+            );
             Ok(UpgradeStrategy::FullUpgrade {
                 url: platform_info.url.clone(),
                 hash: "external".to_string(), // 平台包通常没有预设哈希
@@ -205,7 +212,9 @@ impl UpgradeStrategyManager {
                 })
             } else {
                 //未找到对应架构的全量升级包，这里主动报错
-                Err(anyhow::anyhow!("Full upgrade package for corresponding architecture not found"))
+                Err(anyhow::anyhow!(
+                    "Full upgrade package for corresponding architecture not found"
+                ))
             }
         }
     }
@@ -216,7 +225,10 @@ impl UpgradeStrategyManager {
 
         let patch_info = self.get_patch_package()?;
 
-        debug!("Using architecture-specific patch package: {}", &patch_info.url);
+        debug!(
+            "Using architecture-specific patch package: {}",
+            &patch_info.url
+        );
         Ok(UpgradeStrategy::PatchUpgrade {
             patch_info: patch_info.clone(),
             target_version: self.manifest.version.clone(),
@@ -228,15 +240,15 @@ impl UpgradeStrategyManager {
     fn get_platform_package(&self) -> Result<crate::api_types::PlatformPackageInfo> {
         if let Some(platforms) = self.manifest.platforms.as_ref() {
             match self.architecture {
-                Architecture::X86_64 => platforms
-                    .x86_64
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("Full upgrade package for x86_64 architecture not found")),
-                Architecture::Aarch64 => platforms
-                    .aarch64
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("Full upgrade package for aarch64 architecture not found")),
-                Architecture::Unsupported(_) => Err(anyhow::anyhow!("Full upgrade package for this architecture not found")),
+                Architecture::X86_64 => platforms.x86_64.clone().ok_or_else(|| {
+                    anyhow::anyhow!("Full upgrade package for x86_64 architecture not found")
+                }),
+                Architecture::Aarch64 => platforms.aarch64.clone().ok_or_else(|| {
+                    anyhow::anyhow!("Full upgrade package for aarch64 architecture not found")
+                }),
+                Architecture::Unsupported(_) => Err(anyhow::anyhow!(
+                    "Full upgrade package for this architecture not found"
+                )),
             }
         } else {
             //未找到对应架构的全量升级包，这里主动报错
@@ -254,14 +266,12 @@ impl UpgradeStrategyManager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Server does not support incremental upgrade"))?;
         match self.architecture {
-            Architecture::X86_64 => patch_info
-                .x86_64
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Patch package for x86_64 architecture not available")),
-            Architecture::Aarch64 => patch_info
-                .aarch64
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Patch package for aarch64 architecture not available")),
+            Architecture::X86_64 => patch_info.x86_64.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Patch package for x86_64 architecture not available")
+            }),
+            Architecture::Aarch64 => patch_info.aarch64.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Patch package for aarch64 architecture not available")
+            }),
             Architecture::Unsupported(_) => Err(anyhow::anyhow!("Unsupported architecture")),
         }
     }

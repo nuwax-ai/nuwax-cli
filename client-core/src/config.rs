@@ -83,7 +83,11 @@ impl VersionConfig {
         self.last_full_upgrade = Some(chrono::Utc::now());
         self.applied_patches.clear(); // 清空补丁历史
 
-        tracing::info!("Full version updated: {} -> {}", self.docker_service, new_version);
+        tracing::info!(
+            "Full version updated: {} -> {}",
+            self.docker_service,
+            new_version
+        );
     }
 
     /// 应用补丁
@@ -395,7 +399,10 @@ impl AppConfig {
 
         // 验证文件存在
         if !path.exists() {
-            return Err(anyhow::anyhow!("Archive file does not exist: {}", path.display()));
+            return Err(anyhow::anyhow!(
+                "Archive file does not exist: {}",
+                path.display()
+            ));
         }
 
         Ok(path)
@@ -416,6 +423,37 @@ impl AppConfig {
     pub fn get_backup_dir(&self) -> PathBuf {
         PathBuf::from(&self.backup.storage_dir)
     }
+}
+
+/// 在指定目录中查找归档文件（.zip 或 .tar.gz）
+///
+/// 查找规则：
+/// 1. 文件名以 `docker-` 开头
+/// 2. 扩展名为 `.zip` 或 `.tar.gz`
+/// 3. 返回第一个匹配的文件
+fn find_archive_file(dir: &Path) -> Option<String> {
+    let entries = fs::read_dir(dir).ok()?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let file_name = path.file_name()?.to_str()?;
+
+        // 检查文件名是否以 docker- 开头
+        if !file_name.starts_with("docker-") {
+            continue;
+        }
+
+        // 检查扩展名
+        if file_name.ends_with(".zip") || file_name.ends_with(".tar.gz") {
+            return Some(file_name.to_string());
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -721,35 +759,4 @@ mod tests {
         let result = find_archive_file(dir);
         assert_eq!(result, Some("docker-aarch64.tar.gz".to_string()));
     }
-}
-
-/// 在指定目录中查找归档文件（.zip 或 .tar.gz）
-///
-/// 查找规则：
-/// 1. 文件名以 `docker-` 开头
-/// 2. 扩展名为 `.zip` 或 `.tar.gz`
-/// 3. 返回第一个匹配的文件
-fn find_archive_file(dir: &Path) -> Option<String> {
-    let entries = fs::read_dir(dir).ok()?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-
-        let file_name = path.file_name()?.to_str()?;
-
-        // 检查文件名是否以 docker- 开头
-        if !file_name.starts_with("docker-") {
-            continue;
-        }
-
-        // 检查扩展名
-        if file_name.ends_with(".zip") || file_name.ends_with(".tar.gz") {
-            return Some(file_name.to_string());
-        }
-    }
-
-    None
 }

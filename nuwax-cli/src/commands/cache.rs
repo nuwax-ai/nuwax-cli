@@ -22,7 +22,10 @@ async fn clear_cache(app: &CliApp) -> Result<()> {
     let cache_dir = Path::new(&app.config.cache.cache_dir);
 
     if !cache_dir.exists() {
-        info!("Cache directory does not exist: {path}", path = cache_dir.display());
+        info!(
+            "Cache directory does not exist: {path}",
+            path = cache_dir.display()
+        );
         return Ok(());
     }
 
@@ -39,14 +42,22 @@ async fn clear_cache(app: &CliApp) -> Result<()> {
                 Ok(size) => {
                     total_size_freed += size;
                     if let Err(e) = fs::remove_dir_all(&path) {
-                        warn!("Failed to delete directory {path}: {error}", path = path.display(), error = e.to_string());
+                        warn!(
+                            "Failed to delete directory {path}: {error}",
+                            path = path.display(),
+                            error = e.to_string()
+                        );
                     } else {
                         total_deleted += 1;
                         info!("Deleted: {path}", path = path.display());
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to calculate directory size {path}: {error}", path = path.display(), error = e.to_string());
+                    warn!(
+                        "Failed to calculate directory size {path}: {error}",
+                        path = path.display(),
+                        error = e.to_string()
+                    );
                 }
             }
         } else if path.is_file() {
@@ -54,14 +65,22 @@ async fn clear_cache(app: &CliApp) -> Result<()> {
                 Ok(metadata) => {
                     total_size_freed += metadata.len();
                     if let Err(e) = fs::remove_file(&path) {
-                        warn!("Failed to delete file {path}: {error}", path = path.display(), error = e.to_string());
+                        warn!(
+                            "Failed to delete file {path}: {error}",
+                            path = path.display(),
+                            error = e.to_string()
+                        );
                     } else {
                         total_deleted += 1;
                         info!("Deleted: {path}", path = path.display());
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to get file metadata {path}: {error}", path = path.display(), error = e.to_string());
+                    warn!(
+                        "Failed to get file metadata {path}: {error}",
+                        path = path.display(),
+                        error = e.to_string()
+                    );
                 }
             }
         }
@@ -69,7 +88,10 @@ async fn clear_cache(app: &CliApp) -> Result<()> {
 
     info!("🎉 Cache cleanup completed!");
     info!("   Deleted items: {count}", count = total_deleted);
-    info!("   Freed space: {size} MB", size = format!("{:.2}", total_size_freed as f64 / 1024.0 / 1024.0));
+    info!(
+        "   Freed space: {size} MB",
+        size = format!("{:.2}", total_size_freed as f64 / 1024.0 / 1024.0)
+    );
 
     Ok(())
 }
@@ -83,7 +105,10 @@ async fn show_cache_status(app: &CliApp) -> Result<()> {
     let download_dir = Path::new(&app.config.cache.download_dir);
 
     if !cache_dir.exists() {
-        info!("Cache directory does not exist: {path}", path = cache_dir.display());
+        info!(
+            "Cache directory does not exist: {path}",
+            path = cache_dir.display()
+        );
         return Ok(());
     }
 
@@ -92,17 +117,25 @@ async fn show_cache_status(app: &CliApp) -> Result<()> {
     // 计算总大小
     match calculate_directory_size(cache_dir) {
         Ok(total_size) => {
-            info!("Total size: {size} MB", size = format!("{:.2}", total_size as f64 / 1024.0 / 1024.0));
+            info!(
+                "Total size: {size} MB",
+                size = format!("{:.2}", total_size as f64 / 1024.0 / 1024.0)
+            );
         }
         Err(e) => {
-            warn!("Failed to calculate total cache size: {error}", error = e.to_string());
+            warn!(
+                "Failed to calculate total cache size: {error}",
+                error = e.to_string()
+            );
         }
     }
 
     // 显示下载目录详情
     if download_dir.exists() {
-        info!("
-📥 Download cache details:");
+        info!(
+            "
+📥 Download cache details:"
+        );
 
         if let Ok(entries) = fs::read_dir(download_dir) {
             let mut version_count = 0;
@@ -114,10 +147,17 @@ async fn show_cache_status(app: &CliApp) -> Result<()> {
 
                     match calculate_directory_size(&path) {
                         Ok(size) => {
-                            info!("   Version {version}: {size} MB", version = version_name, size = format!("{:.2}", size as f64 / 1024.0 / 1024.0));
+                            info!(
+                                "   Version {version}: {size} MB",
+                                version = version_name,
+                                size = format!("{:.2}", size as f64 / 1024.0 / 1024.0)
+                            );
                         }
                         Err(_) => {
-                            info!("   Version {version}: (failed to calculate size)", version = version_name);
+                            info!(
+                                "   Version {version}: (failed to calculate size)",
+                                version = version_name
+                            );
                         }
                     }
                 }
@@ -128,8 +168,10 @@ async fn show_cache_status(app: &CliApp) -> Result<()> {
             }
         }
     } else {
-        info!("
-📥 Download cache: does not exist");
+        info!(
+            "
+📥 Download cache: does not exist"
+        );
     }
 
     Ok(())
@@ -137,12 +179,18 @@ async fn show_cache_status(app: &CliApp) -> Result<()> {
 
 /// 清理下载缓存（保留最新的指定数量版本）
 async fn clean_downloads(app: &CliApp, keep: u32) -> Result<()> {
-    info!("🧹 Cleaning download cache (keeping latest {keep} versions)...", keep = keep);
+    info!(
+        "🧹 Cleaning download cache (keeping latest {keep} versions)...",
+        keep = keep
+    );
 
     let download_dir = Path::new(&app.config.cache.download_dir);
 
     if !download_dir.exists() {
-        info!("Download cache directory does not exist: {path}", path = download_dir.display());
+        info!(
+            "Download cache directory does not exist: {path}",
+            path = download_dir.display()
+        );
         return Ok(());
     }
 
@@ -157,9 +205,10 @@ async fn clean_downloads(app: &CliApp, keep: u32) -> Result<()> {
 
                 // 获取目录修改时间作为排序依据
                 if let Ok(metadata) = path.metadata()
-                    && let Ok(modified) = metadata.modified() {
-                        versions.push((version_name, path, modified));
-                    }
+                    && let Ok(modified) = metadata.modified()
+                {
+                    versions.push((version_name, path, modified));
+                }
             }
         }
     }
@@ -179,14 +228,22 @@ async fn clean_downloads(app: &CliApp, keep: u32) -> Result<()> {
                 Ok(size) => {
                     freed_space += size;
                     if let Err(e) = fs::remove_dir_all(path) {
-                        warn!("Failed to delete version cache {version}: {error}", version = version_name, error = e.to_string());
+                        warn!(
+                            "Failed to delete version cache {version}: {error}",
+                            version = version_name,
+                            error = e.to_string()
+                        );
                     } else {
                         info!("Deleted version cache: {version}", version = version_name);
                         deleted_count += 1;
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to calculate version cache size {version}: {error}", version = version_name, error = e.to_string());
+                    warn!(
+                        "Failed to calculate version cache size {version}: {error}",
+                        version = version_name,
+                        error = e.to_string()
+                    );
                 }
             }
         } else {
@@ -196,7 +253,10 @@ async fn clean_downloads(app: &CliApp, keep: u32) -> Result<()> {
 
     info!("🎉 Download cache cleanup completed!");
     info!("   Deleted versions: {count}", count = deleted_count);
-    info!("   Freed space: {size} MB", size = format!("{:.2}", freed_space as f64 / 1024.0 / 1024.0));
+    info!(
+        "   Freed space: {size} MB",
+        size = format!("{:.2}", freed_space as f64 / 1024.0 / 1024.0)
+    );
 
     Ok(())
 }
@@ -209,9 +269,10 @@ fn calculate_directory_size(dir: &Path) -> Result<u64> {
         match entry {
             Ok(entry) => {
                 if entry.file_type().is_file()
-                    && let Ok(metadata) = entry.metadata() {
-                        total_size += metadata.len();
-                    }
+                    && let Ok(metadata) = entry.metadata()
+                {
+                    total_size += metadata.len();
+                }
             }
             Err(e) => {
                 warn!("Error walking directory: {error}", error = e.to_string());

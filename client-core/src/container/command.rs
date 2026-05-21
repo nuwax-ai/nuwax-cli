@@ -112,7 +112,10 @@ impl DockerManager {
         cmd_args.extend(&["-f", &compose_path]);
         cmd_args.extend(args);
 
-        debug!("Executing standalone docker-compose command: {:?}", cmd_args);
+        debug!(
+            "Executing standalone docker-compose command: {:?}",
+            cmd_args
+        );
         let output = Command::new("docker-compose")
             .args(&cmd_args)
             .stdout(Stdio::piped())

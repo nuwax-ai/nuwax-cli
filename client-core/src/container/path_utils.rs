@@ -35,7 +35,9 @@ impl PathProcessor {
         let path = input_path.trim();
 
         if path.is_empty() {
-            return Err(PathUtilsError::InvalidPath("Path cannot be empty".to_string()));
+            return Err(PathUtilsError::InvalidPath(
+                "Path cannot be empty".to_string(),
+            ));
         }
 
         debug!(
@@ -124,9 +126,10 @@ impl PathProcessor {
                 std::path::Component::ParentDir => {
                     // 处理父目录 ..
                     if let Some(last) = components.last()
-                        && *last != std::path::Component::RootDir {
-                            components.pop();
-                        }
+                        && *last != std::path::Component::RootDir
+                    {
+                        components.pop();
+                    }
                 }
                 _ => {
                     components.push(component);
@@ -196,7 +199,9 @@ impl PathProcessor {
     /// 转换为 Windows 格式
     fn to_windows_format(&self, path: &str) -> String {
         // WSL2 路径转换为 Windows 路径（需要在替换斜杠之前处理）
-        if let Some(rest) = path.strip_prefix("/mnt/").or_else(|| path.strip_prefix("\\mnt\\"))
+        if let Some(rest) = path
+            .strip_prefix("/mnt/")
+            .or_else(|| path.strip_prefix("\\mnt\\"))
             && !rest.is_empty()
         {
             let drive_letter = rest
@@ -211,12 +216,18 @@ impl PathProcessor {
             return format!("{}:\\{}", drive_letter, rest);
         }
 
-        if let Some(rest) = path.strip_prefix("/c/").or_else(|| path.strip_prefix("\\c\\")) {
+        if let Some(rest) = path
+            .strip_prefix("/c/")
+            .or_else(|| path.strip_prefix("\\c\\"))
+        {
             let rest = rest.trim_start_matches(['/', '\\']).replace('/', "\\");
             return format!("C:\\{}", rest);
         }
 
-        if let Some(rest) = path.strip_prefix("/d/").or_else(|| path.strip_prefix("\\d\\")) {
+        if let Some(rest) = path
+            .strip_prefix("/d/")
+            .or_else(|| path.strip_prefix("\\d\\"))
+        {
             let rest = rest.trim_start_matches(['/', '\\']).replace('/', "\\");
             return format!("D:\\{}", rest);
         }

@@ -16,11 +16,12 @@ fn parse_github_repo() -> (&'static str, &'static str) {
 
     // 解析 GitHub URL，支持格式: https://github.com/owner/repo
     if let Some(path) = REPOSITORY.strip_prefix("https://github.com/")
-        && let Some((owner, repo)) = path.split_once('/') {
-            // 移除可能的 .git 后缀
-            let repo = repo.trim_end_matches(".git");
-            return (owner, repo);
-        }
+        && let Some((owner, repo)) = path.split_once('/')
+    {
+        // 移除可能的 .git 后缀
+        let repo = repo.trim_end_matches(".git");
+        return (owner, repo);
+    }
 
     // 如果解析失败，抛出编译错误
     panic!(
@@ -30,7 +31,8 @@ fn parse_github_repo() -> (&'static str, &'static str) {
 }
 
 //cli 命令工具请求的地址 (阿里云 OSS)
-pub const CLI_API_URL: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-cli/latest/latest.json";
+pub const CLI_API_URL: &str =
+    "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-cli/latest/latest.json";
 
 /// 获取完整的 CLI API URL
 pub fn get_cli_api_url() -> String {
@@ -187,7 +189,10 @@ impl UpdateSourceManager {
                             return Ok(release);
                         }
                         Err(e) => {
-                            warn!("⚠️ Version check server API failed: {error}", error = e.to_string());
+                            warn!(
+                                "⚠️ Version check server API failed: {error}",
+                                error = e.to_string()
+                            );
                             last_error = Some(e);
                         }
                     }
@@ -208,7 +213,8 @@ impl UpdateSourceManager {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("{}", t!("check_update.all_sources_failed"))))
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("{}", t!("check_update.all_sources_failed"))))
     }
 
     /// 从版本检查服务器获取版本信息
@@ -231,7 +237,11 @@ impl UpdateSourceManager {
             let error_text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "{}",
-                t!("check_update.server_api_failed", status = status.to_string(), error = error_text)
+                t!(
+                    "check_update.server_api_failed",
+                    status = status.to_string(),
+                    error = error_text
+                )
             ));
         }
 
@@ -265,11 +275,18 @@ impl UpdateSourceManager {
             let error_text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "{}",
-                t!("check_update.github_api_failed", status = status.to_string(), error = error_text)
+                t!(
+                    "check_update.github_api_failed",
+                    status = status.to_string(),
+                    error = error_text
+                )
             ));
         }
 
-        let release: GitHubRelease = response.json().await.context(t!("check_update.parse_github_response_failed"))?;
+        let release: GitHubRelease = response
+            .json()
+            .await
+            .context(t!("check_update.parse_github_response_failed"))?;
         Ok(release)
     }
 }
@@ -341,22 +358,41 @@ pub async fn check_for_updates() -> Result<VersionInfo> {
     info!("🔍 Starting nuwax-cli update check...");
 
     let current_version = get_current_version();
-    info!("📋 Current detected version: {version}", version = current_version);
+    info!(
+        "📋 Current detected version: {version}",
+        version = current_version
+    );
     info!("🌐 Fetching latest version info...");
 
     let latest_release = fetch_latest_version_multi_source().await?;
     let latest_version = latest_release.tag_name.clone();
-    info!("📋 Server latest version: {version}", version = latest_version);
+    info!(
+        "📋 Server latest version: {version}",
+        version = latest_version
+    );
 
     // 版本比较
     let comparison = compare_versions(&current_version, &latest_version);
-    info!("📊 Version comparison result: {result} ({current} vs {latest})", result = format!("{:?}", comparison), current = current_version, latest = latest_version);
+    info!(
+        "📊 Version comparison result: {result} ({current} vs {latest})",
+        result = format!("{:?}", comparison),
+        current = current_version,
+        latest = latest_version
+    );
 
     let is_update_available = comparison == std::cmp::Ordering::Less;
     if is_update_available {
-        info!("✅ New version available! Need to upgrade from {current} to {latest}", current = current_version, latest = latest_version);
+        info!(
+            "✅ New version available! Need to upgrade from {current} to {latest}",
+            current = current_version,
+            latest = latest_version
+        );
     } else {
-        info!("✅ Current version is latest: {current} = {latest}", current = current_version, latest = latest_version);
+        info!(
+            "✅ Current version is latest: {current} = {latest}",
+            current = current_version,
+            latest = latest_version
+        );
     }
 
     // 查找适合当前平台的下载链接
@@ -377,7 +413,10 @@ pub async fn check_for_updates() -> Result<VersionInfo> {
         published_at: latest_release.published_at,
     };
 
-    info!("✅ Version check complete, update available: {available}", available = is_update_available);
+    info!(
+        "✅ Version check complete, update available: {available}",
+        available = is_update_available
+    );
     Ok(version_info)
 }
 
@@ -386,7 +425,11 @@ fn find_platform_asset(assets: &[GitHubAsset]) -> Option<String> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
 
-    info!("🖥️ Detected platform: OS={os}, ARCH={arch}", os = os, arch = arch);
+    info!(
+        "🖥️ Detected platform: OS={os}, ARCH={arch}",
+        os = os,
+        arch = arch
+    );
     info!("📦 Available assets: {count}", count = assets.len());
 
     // 构建目标平台键（兼容 Tauri updater 格式）
@@ -400,11 +443,20 @@ fn find_platform_asset(assets: &[GitHubAsset]) -> Option<String> {
         _ => return None,
     };
 
-    info!("🎯 Target platform key: {platform}", platform = target_platform);
+    info!(
+        "🎯 Target platform key: {platform}",
+        platform = target_platform
+    );
 
     // 首先尝试精确匹配平台键
     for (index, asset) in assets.iter().enumerate() {
-        info!("📋 Checking asset[{index}]: name={name}, size={size}, url={url}", index = index, name = asset.name, size = asset.size, url = asset.browser_download_url);
+        info!(
+            "📋 Checking asset[{index}]: name={name}, size={size}, url={url}",
+            index = index,
+            name = asset.name,
+            size = asset.size,
+            url = asset.browser_download_url
+        );
 
         // 检查是否包含平台键
         if asset.name.contains(target_platform) {
@@ -430,14 +482,22 @@ fn find_platform_asset(assets: &[GitHubAsset]) -> Option<String> {
         _ => vec![os, arch],
     };
 
-    info!("🎯 Platform match patterns: {patterns}", patterns = format!("{:?}", platform_patterns));
+    info!(
+        "🎯 Platform match patterns: {patterns}",
+        patterns = format!("{:?}", platform_patterns)
+    );
 
     // 查找匹配的资源
     for (index, asset) in assets.iter().enumerate() {
         let name_lower = asset.name.to_lowercase();
         let url_lower = asset.browser_download_url.to_lowercase();
 
-        info!("🔍 Pattern match check[{index}]: name={name}, url={url}", index = index, name = asset.name, url = asset.browser_download_url);
+        info!(
+            "🔍 Pattern match check[{index}]: name={name}, url={url}",
+            index = index,
+            name = asset.name,
+            url = asset.browser_download_url
+        );
 
         // 检查名称或URL是否包含平台模式
         if platform_patterns
@@ -468,7 +528,12 @@ fn find_platform_asset(assets: &[GitHubAsset]) -> Option<String> {
             || name.ends_with(".msi")
             || name.ends_with(".appimage");
 
-        info!("🔍 Checking executable[{index}]: {name} -> executable: {is_executable}", index = index, name = asset.name, is_executable = is_executable);
+        info!(
+            "🔍 Checking executable[{index}]: {name} -> executable: {is_executable}",
+            index = index,
+            name = asset.name,
+            is_executable = is_executable
+        );
 
         if is_executable {
             info!("✅ Found executable: {name}", name = asset.name);
@@ -483,8 +548,14 @@ fn find_platform_asset(assets: &[GitHubAsset]) -> Option<String> {
 /// 显示版本检查结果
 pub fn display_version_info(version_info: &VersionInfo) {
     info!("🦆 Nuwax CLI Version Info");
-    info!("Current version: {version}", version = version_info.current_version);
-    info!("Latest version: {version}", version = version_info.latest_version);
+    info!(
+        "Current version: {version}",
+        version = version_info.current_version
+    );
+    info!(
+        "Latest version: {version}",
+        version = version_info.latest_version
+    );
 
     if version_info.is_update_available {
         info!("✅ New version available!");
@@ -499,13 +570,19 @@ pub fn display_version_info(version_info: &VersionInfo) {
             } else {
                 version_info.release_notes.clone()
             };
-            info!("Release notes:
-{notes}", notes = notes);
+            info!(
+                "Release notes:
+{notes}",
+                notes = notes
+            );
         }
 
         // 解析并显示发布时间
         if let Ok(published_time) = DateTime::parse_from_rfc3339(&version_info.published_at) {
-            info!("Published at: {time}", time = published_time.format("%Y-%m-%d %H:%M:%S"));
+            info!(
+                "Published at: {time}",
+                time = published_time.format("%Y-%m-%d %H:%M:%S")
+            );
         }
 
         info!("💡 Use the following command to install update:");
@@ -529,9 +606,11 @@ pub async fn should_install(target_version: Option<&str>, force: bool) -> Result
     if !force && compare_versions(&current_version, &target_version) != std::cmp::Ordering::Less {
         return Err(anyhow::anyhow!(
             "{}",
-            t!("check_update.already_latest_or_higher",
+            t!(
+                "check_update.already_latest_or_higher",
                 current = current_version,
-                target = target_version)
+                target = target_version
+            )
         ));
     }
 
@@ -551,7 +630,11 @@ pub async fn install_release(url: &str, version: &str) -> Result<()> {
     let filename = url.split('/').next_back().unwrap_or(&default_filename);
     let download_path = temp_dir.join(filename);
 
-    info!("📥 Downloading version {version}: {url}", version = version, url = url);
+    info!(
+        "📥 Downloading version {version}: {url}",
+        version = version,
+        url = url
+    );
     info!("💾 Temp save to: {path}", path = download_path.display());
 
     // 下载文件
@@ -563,7 +646,13 @@ pub async fn install_release(url: &str, version: &str) -> Result<()> {
         .context(t!("check_update.download_failed"))?;
 
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!("{}", t!("check_update.download_http_failed", status = response.status())));
+        return Err(anyhow::anyhow!(
+            "{}",
+            t!(
+                "check_update.download_http_failed",
+                status = response.status()
+            )
+        ));
     }
 
     let total_size = response.content_length().unwrap_or(0);
@@ -590,7 +679,8 @@ pub async fn install_release(url: &str, version: &str) -> Result<()> {
             let avg_speed_bps = downloaded as f64 / elapsed_secs;
 
             let recent_elapsed_secs = now.duration_since(last_log_at).as_secs_f64().max(0.001);
-            let recent_speed_bps = (downloaded - last_logged_downloaded) as f64 / recent_elapsed_secs;
+            let recent_speed_bps =
+                (downloaded - last_logged_downloaded) as f64 / recent_elapsed_secs;
             let speed_bps = if recent_speed_bps > 0.0 {
                 recent_speed_bps
             } else {
@@ -642,17 +732,26 @@ pub async fn install_release(url: &str, version: &str) -> Result<()> {
     // 获取当前可执行文件路径
     let current_exe = std::env::current_exe().context(t!("check_update.cannot_get_exe_path"))?;
 
-    info!("🔧 Current executable: {path}", path = current_exe.display());
+    info!(
+        "🔧 Current executable: {path}",
+        path = current_exe.display()
+    );
 
     // 处理不同文件类型的安装
     install_downloaded_file(&download_path, &current_exe, version).await?;
 
     // 清理临时文件
     if let Err(e) = std::fs::remove_file(&download_path) {
-        warn!("Failed to cleanup temp file: {error}", error = e.to_string());
+        warn!(
+            "Failed to cleanup temp file: {error}",
+            error = e.to_string()
+        );
     }
 
-    info!("🎉 Installation complete! Nuwax CLI has been updated to version {version}, run 'nuwax-cli --version' to verify", version = version);
+    info!(
+        "🎉 Installation complete! Nuwax CLI has been updated to version {version}, run 'nuwax-cli --version' to verify",
+        version = version
+    );
     info!("💡 Please run 'nuwax-cli auto-upgrade-deploy run' again to complete final deployment");
 
     Ok(())
@@ -676,7 +775,10 @@ async fn install_downloaded_file(
         // 直接可执行文件
         install_executable(download_path, current_exe).await
     } else {
-        Err(anyhow::anyhow!("{}", t!("check_update.unsupported_format", format = download_name)))
+        Err(anyhow::anyhow!(
+            "{}",
+            t!("check_update.unsupported_format", format = download_name)
+        ))
     }
 }
 
@@ -720,21 +822,35 @@ async fn install_executable(download_path: &PathBuf, current_exe: &PathBuf) -> R
                 match std::fs::copy(&backup_path, current_exe) {
                     Ok(_) => {
                         warn!("✅ Restored from backup");
-                        return Err(anyhow::anyhow!("{}", t!("check_update.replace_failed_restored", error = e.to_string())));
-                    }
-                    Err(restore_err) => {
-                        error!("❌ Backup restore also failed: {error}", error = restore_err.to_string());
                         return Err(anyhow::anyhow!(
                             "{}",
-                            t!("check_update.replace_and_restore_failed",
+                            t!(
+                                "check_update.replace_failed_restored",
+                                error = e.to_string()
+                            )
+                        ));
+                    }
+                    Err(restore_err) => {
+                        error!(
+                            "❌ Backup restore also failed: {error}",
+                            error = restore_err.to_string()
+                        );
+                        return Err(anyhow::anyhow!(
+                            "{}",
+                            t!(
+                                "check_update.replace_and_restore_failed",
                                 error = e.to_string(),
-                                restore_error = restore_err.to_string())
+                                restore_error = restore_err.to_string()
+                            )
                         ));
                     }
                 }
             }
 
-            Err(anyhow::anyhow!("{}", t!("check_update.replace_failed", error = e.to_string())))
+            Err(anyhow::anyhow!(
+                "{}",
+                t!("check_update.replace_failed", error = e.to_string())
+            ))
         }
     }
 }
@@ -766,7 +882,10 @@ async fn install_from_archive(
     if !output.status.success() {
         return Err(anyhow::anyhow!(
             "{}",
-            t!("check_update.extract_failed", error = String::from_utf8_lossy(&output.stderr))
+            t!(
+                "check_update.extract_failed",
+                error = String::from_utf8_lossy(&output.stderr)
+            )
         ));
     }
 
@@ -778,7 +897,10 @@ async fn install_from_archive(
 
     // 清理解压目录
     if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
-        warn!("Failed to cleanup extract directory: {error}", error = e.to_string());
+        warn!(
+            "Failed to cleanup extract directory: {error}",
+            error = e.to_string()
+        );
     }
 
     Ok(())
@@ -800,12 +922,16 @@ fn find_executable_in_dir(dir: &PathBuf) -> Result<PathBuf> {
 
         // 递归查找子目录
         if path.is_dir()
-            && let Ok(found) = find_executable_in_dir(&path) {
-                return Ok(found);
-            }
+            && let Ok(found) = find_executable_in_dir(&path)
+        {
+            return Ok(found);
+        }
     }
 
-    Err(anyhow::anyhow!("{}", t!("check_update.no_executable_in_archive")))
+    Err(anyhow::anyhow!(
+        "{}",
+        t!("check_update.no_executable_in_archive")
+    ))
 }
 
 /// 处理 check-update 命令
@@ -820,7 +946,10 @@ pub async fn handle_check_update_command(command: CheckUpdateCommand) -> Result<
                 }
                 Err(e) => {
                     warn!("❌ Check update failed: {error}", error = e.to_string());
-                    info!("Current version: {version}", version = get_current_version());
+                    info!(
+                        "Current version: {version}",
+                        version = get_current_version()
+                    );
                     info!("💡 Possible reasons:");
                     info!("   - Network connection issue");
                     info!("   - Version check server temporarily unavailable");
@@ -844,7 +973,10 @@ pub async fn handle_check_update_command(command: CheckUpdateCommand) -> Result<
                             info!("🔧 Continuing installation with --force flag...");
                             // 如果强制安装但没指定版本，返回错误
                             if version.is_none() {
-                                return Err(anyhow::anyhow!("{}", t!("check_update.force_needs_version")));
+                                return Err(anyhow::anyhow!(
+                                    "{}",
+                                    t!("check_update.force_needs_version")
+                                ));
                             }
                             (get_current_version(), version.as_ref().unwrap().clone())
                         } else {
@@ -854,7 +986,11 @@ pub async fn handle_check_update_command(command: CheckUpdateCommand) -> Result<
                     }
                 };
 
-            info!("Preparing to update from {current} to {target}", current = current_version, target = target_version);
+            info!(
+                "Preparing to update from {current} to {target}",
+                current = current_version,
+                target = target_version
+            );
 
             // 获取指定版本的下载链接
             let download_url = if let Some(ref ver) = version {
@@ -863,12 +999,15 @@ pub async fn handle_check_update_command(command: CheckUpdateCommand) -> Result<
             } else {
                 // 没有指定版本，获取最新版本的下载链接
                 let version_info = check_for_updates().await?;
-                version_info
-                    .download_url
-                    .ok_or_else(|| anyhow::anyhow!("{}", t!("check_update.no_platform_download_url")))?
+                version_info.download_url.ok_or_else(|| {
+                    anyhow::anyhow!("{}", t!("check_update.no_platform_download_url"))
+                })?
             };
 
-            info!("📥 Starting download and install version {version}...", version = target_version);
+            info!(
+                "📥 Starting download and install version {version}...",
+                version = target_version
+            );
 
             match install_release(&download_url, &target_version).await {
                 Ok(_) => {
@@ -896,7 +1035,10 @@ async fn get_version_download_url(version: &str) -> Result<String> {
     // 为了简化，我们先使用最新版本，后续可以扩展支持获取指定版本
     let version_info = check_for_updates().await?;
 
-    version_info
-        .download_url
-        .ok_or_else(|| anyhow::anyhow!("{}", t!("check_update.no_version_download_url", version = version)))
+    version_info.download_url.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{}",
+            t!("check_update.no_version_download_url", version = version)
+        )
+    })
 }

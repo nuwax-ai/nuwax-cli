@@ -136,7 +136,10 @@ fn test_generate_mysql_diff_sql() {
 
     // 打印生成的SQL（截取前1000字符避免输出过长）
     let sql_preview: String = if diff_sql.len() > 1000 {
-        format!("{}...(截取前1000字符)", diff_sql.chars().take(1000).collect::<String>())
+        format!(
+            "{}...(截取前1000字符)",
+            diff_sql.chars().take(1000).collect::<String>()
+        )
     } else {
         diff_sql.clone()
     };

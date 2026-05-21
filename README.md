@@ -135,9 +135,12 @@ nuwax-cli ducker                      # Launch Docker TUI
 
 ```bash
 # Upgrade Management
-nuwax-cli upgrade                     # Execute upgrade
-nuwax-cli upgrade --check            # Check updates
-nuwax-cli upgrade --force           # Force reinstall
+nuwax-cli upgrade                     # Download upgrade package (legacy-compatible)
+nuwax-cli upgrade --check             # Check updates (legacy-compatible)
+nuwax-cli upgrade --force             # Force full download
+nuwax-cli upgrade check               # Check updates
+nuwax-cli upgrade download            # Download full package for offline deployment
+nuwax-cli auto-upgrade-deploy offline-deploy --archive ./docker-x86_64.zip --version 1.2.3
 
 # Backup and Recovery
 nuwax-cli backup                     # Create backup
@@ -207,7 +210,6 @@ The project uses Cargo workspace to manage multiple sub-modules:
 
 - **nuwax-cli**: CLI interface layer, depends on client-core
 - **client-core**: Core business logic, independently testable
-- **cli-ui**: Tauri GUI application, independent frontend project
 
 All dependency versions are uniformly managed in the root `Cargo.toml` to ensure consistency.
 

@@ -244,7 +244,10 @@ impl ConfigManager {
         // 标记缓存已初始化
         *self.cache_initialized.write().await = true;
 
-        debug!("Configuration cache initialized, loaded {} config items", cache.len());
+        debug!(
+            "Configuration cache initialized, loaded {} config items",
+            cache.len()
+        );
         Ok(())
     }
 
@@ -266,7 +269,10 @@ impl ConfigManager {
             match &config.value {
                 Value::String(s) => Ok(Some(s.clone())),
                 _ => {
-                    warn!("Config item {} is not a string type: {:?}", key, config.value);
+                    warn!(
+                        "Config item {} is not a string type: {:?}",
+                        key, config.value
+                    );
                     Ok(None)
                 }
             }
@@ -285,7 +291,10 @@ impl ConfigManager {
             match &config.value {
                 Value::Number(n) => Ok(n.as_f64()),
                 _ => {
-                    warn!("Config item {} is not a numeric type: {:?}", key, config.value);
+                    warn!(
+                        "Config item {} is not a numeric type: {:?}",
+                        key, config.value
+                    );
                     Ok(None)
                 }
             }
@@ -304,7 +313,10 @@ impl ConfigManager {
             match &config.value {
                 Value::Number(n) => Ok(n.as_i64()),
                 _ => {
-                    warn!("Config item {} is not a numeric type: {:?}", key, config.value);
+                    warn!(
+                        "Config item {} is not a numeric type: {:?}",
+                        key, config.value
+                    );
                     Ok(None)
                 }
             }
@@ -323,7 +335,10 @@ impl ConfigManager {
             match &config.value {
                 Value::Bool(b) => Ok(Some(*b)),
                 _ => {
-                    warn!("Config item {} is not a boolean type: {:?}", key, config.value);
+                    warn!(
+                        "Config item {} is not a boolean type: {:?}",
+                        key, config.value
+                    );
                     Ok(None)
                 }
             }
@@ -342,7 +357,10 @@ impl ConfigManager {
             match &config.value {
                 Value::Object(_) => Ok(Some(config.value.clone())),
                 _ => {
-                    warn!("Config item {} is not an object type: {:?}", key, config.value);
+                    warn!(
+                        "Config item {} is not an object type: {:?}",
+                        key, config.value
+                    );
                     Ok(None)
                 }
             }
@@ -361,7 +379,10 @@ impl ConfigManager {
             match &config.value {
                 Value::Array(arr) => Ok(Some(arr.clone())),
                 _ => {
-                    warn!("Config item {} is not an array type: {:?}", key, config.value);
+                    warn!(
+                        "Config item {} is not an array type: {:?}",
+                        key, config.value
+                    );
                     Ok(None)
                 }
             }
@@ -431,11 +452,12 @@ impl ConfigManager {
         };
 
         if let Some(expected_type) = expected_type
-            && !self.validate_value_type(&value, &expected_type) {
-                return Err(anyhow::anyhow!(
-                    "Config item {key} has mismatched value type: expected {expected_type:?}, actual {value:?}"
-                ));
-            }
+            && !self.validate_value_type(&value, &expected_type)
+        {
+            return Err(anyhow::anyhow!(
+                "Config item {key} has mismatched value type: expected {expected_type:?}, actual {value:?}"
+            ));
+        }
 
         // 更新数据库
         let value_json = serde_json::to_string(&value)?;
@@ -467,7 +489,10 @@ impl ConfigManager {
             let cache = self.cache.read().await;
             if let Some(config) = cache.get(&update.key) {
                 if !config.is_user_editable {
-                    return Err(anyhow::anyhow!("Config item {} is not editable", update.key));
+                    return Err(anyhow::anyhow!(
+                        "Config item {} is not editable",
+                        update.key
+                    ));
                 }
 
                 // 验证类型
@@ -532,7 +557,9 @@ impl ConfigManager {
         if let Some(default_value) = default_value {
             self.update_config(key, default_value).await
         } else {
-            Err(anyhow::anyhow!("Config item {key} does not have a default value"))
+            Err(anyhow::anyhow!(
+                "Config item {key} does not have a default value"
+            ))
         }
     }
 

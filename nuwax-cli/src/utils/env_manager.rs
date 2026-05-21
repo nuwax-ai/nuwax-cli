@@ -185,7 +185,8 @@ impl EnvManager {
             }
         }
 
-        fs::write(path, output).with_context(|| format!("Failed to write .env file: {}", path.display()))
+        fs::write(path, output)
+            .with_context(|| format!("Failed to write .env file: {}", path.display()))
     }
 
     fn get_original_line_str(&self, index: usize) -> &str {

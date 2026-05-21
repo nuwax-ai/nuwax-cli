@@ -18,8 +18,8 @@ mod utils;
 pub use app::CliApp;
 pub use cli::{AutoUpgradeDeployCommand, Cli, Commands, UpgradeSubcommand};
 pub use commands::{
-    auto_upgrade_deploy::check_and_install_nuwax_cli_update_early, run_diff_sql,
-    run_download, run_status_details, show_client_version,
+    auto_upgrade_deploy::check_and_install_nuwax_cli_update_early, run_diff_sql, run_download,
+    run_download_with_config, run_status_details, show_client_version,
 }; // 导出status相关函数和diff-sql函数
 pub use docker_service::{
     ContainerStatus, DockerService, DockerServiceManager, get_architecture_suffix,

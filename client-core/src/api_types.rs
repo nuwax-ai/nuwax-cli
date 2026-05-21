@@ -465,9 +465,10 @@ impl PatchPackageInfo {
         }
 
         if let Some(hash) = &self.hash
-            && hash.is_empty() {
-                return Err(anyhow::anyhow!("Patch package hash cannot be empty"));
-            }
+            && hash.is_empty()
+        {
+            return Err(anyhow::anyhow!("Patch package hash cannot be empty"));
+        }
 
         self.operations.validate()?;
 

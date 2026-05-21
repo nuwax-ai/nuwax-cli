@@ -161,7 +161,10 @@ impl DatabaseManager {
                             drop(conn); // 释放锁
                             tokio::time::sleep(delay).await;
                         } else {
-                            error!("In-memory database write operation ultimately failed: {}", error_msg);
+                            error!(
+                                "In-memory database write operation ultimately failed: {}",
+                                error_msg
+                            );
                             return Err(anyhow::anyhow!(e.to_string()));
                         }
                     }
@@ -185,7 +188,10 @@ impl DatabaseManager {
                             );
                             tokio::time::sleep(delay).await;
                         } else {
-                            error!("File database write operation ultimately failed: {}", error_msg);
+                            error!(
+                                "File database write operation ultimately failed: {}",
+                                error_msg
+                            );
                             return Err(anyhow::anyhow!(e));
                         }
                     }
@@ -261,7 +267,10 @@ impl DatabaseManager {
                 );
 
                 if let Err(e) = conn.execute(trimmed, []) {
-                    error!("SQL statement execution failed: {}, statement: {}", e, trimmed);
+                    error!(
+                        "SQL statement execution failed: {}, statement: {}",
+                        e, trimmed
+                    );
                     return Err(e);
                 }
             }
@@ -306,14 +315,13 @@ impl DatabaseManager {
                         }
                     }
                 }
-                ';'
-                    if !in_string && !in_json => {
-                        // 这是一个真正的语句结束符
-                        if !current_statement.trim().is_empty() {
-                            statements.push(current_statement.trim().to_string());
-                        }
-                        current_statement.clear();
+                ';' if !in_string && !in_json => {
+                    // 这是一个真正的语句结束符
+                    if !current_statement.trim().is_empty() {
+                        statements.push(current_statement.trim().to_string());
                     }
+                    current_statement.clear();
+                }
                 _ => {
                     current_statement.push(ch);
                 }

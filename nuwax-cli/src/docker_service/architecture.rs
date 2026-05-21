@@ -57,7 +57,10 @@ pub fn detect_architecture() -> Architecture {
         }
     };
 
-    info!("Mapped to supported architecture: {}", detected.display_name());
+    info!(
+        "Mapped to supported architecture: {}",
+        detected.display_name()
+    );
     detected
 }
 
@@ -99,12 +102,13 @@ pub fn check_architecture_images_exist(
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file()
-                && let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    // 检查文件名是否匹配架构模式
-                    if file_name.ends_with(&format!("-{}.tar", arch.as_str())) {
-                        found_images.push(path);
-                    }
+                && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+            {
+                // 检查文件名是否匹配架构模式
+                if file_name.ends_with(&format!("-{}.tar", arch.as_str())) {
+                    found_images.push(path);
                 }
+            }
         }
     }
 

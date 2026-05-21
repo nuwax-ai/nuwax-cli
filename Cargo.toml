@@ -5,11 +5,11 @@ members = ["client-core", "nuwax-cli"]
 
 [workspace.dependencies]
 
-# 集成的 ducker Docker TUI (锁定 v0.5.5 版本以兼容 bollard 0.19 和 ratatui 0.29)
-ducker = { version = "=0.5.5", git = "https://github.com/robertpsoane/ducker.git", tag = "v0.5.5" }
+# 集成的 ducker Docker TUI (锁定 v0.6.5 以兼容 bollard 0.20 和 ratatui 0.30)
+ducker = { version = "0.6.5"}
 
 # 异步运行时
-tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread"] }
+tokio = { version = "1.52", features = ["macros", "net", "rt", "rt-multi-thread"] }
 tokio-util = "0.7"
 futures = "0.3"
 futures-util = "0.3"
@@ -17,7 +17,7 @@ futures-util = "0.3"
 # 日志
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "=0.2.2"
+tracing-appender = "0.2.5"
 log = "0.4"
 
 # 错误处理
@@ -43,7 +43,7 @@ tower-http = { version = "0.6", features = [
     "fs",
     "trace",
 ] }
-axum-extra = { version = "0.10", features = ["typed-header"] }
+axum-extra = { version = "0.12", features = ["typed-header"] }
 
 # API文档
 utoipa = { version = "5.4", features = ["axum_extras", "chrono"] }
@@ -56,13 +56,13 @@ dashmap = "6.1"
 once_cell = "1.21"
 
 # 测试
-criterion = "0.6"
+criterion = "0.8.2"
 
 # 序列化
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "=0.9.33"
-serde_with = "3.15"
+serde_with = "3.20"
 
 # 配置文件
 toml = "0.9"
@@ -71,18 +71,18 @@ toml = "0.9"
 derive_builder = "0.20"
 
 # HTTP客户端
-reqwest = { version = "0.12", features = [
+reqwest = { version = "0.13", features = [
     "json",
-    "rustls-tls",
+    "rustls",
 ], default-features = false }
 
 http = "1.3"
 
 # 命令行工具
-clap = { version = "4.5", features = ["derive", "env"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 
 # UUID
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1.23", features = ["v7"] }
 
 # 数据库
 # sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
@@ -94,11 +94,11 @@ duckdb = { version = "1.3", features = ["bundled", "chrono", "uuid", "json"] }
 which = "8.0"
 
 # 文件系统
-tempfile = "3.23"
+tempfile = "3.27"
 walkdir = "2.5"
 
 # 压缩
-zip = "6.0"
+zip = "8.6"
 zip-extract = "0.4"
 flate2 = "1.1"
 tar = "0.4"
@@ -107,7 +107,7 @@ tar = "0.4"
 infer = "0.19"
 
 # 加密和哈希
-sha2 = "0.10"
+sha2 = "0.11"
 
 # 进度条
 indicatif = "0.18"
@@ -116,7 +116,7 @@ indicatif = "0.18"
 tokio-stream = "0.1"
 
 # SQL解析 依赖的库
-sqlparser = "0.59"
+sqlparser = "0.62"
 regex = "1.12"
 
 # --- OSS Dependencies ---
@@ -125,22 +125,63 @@ aliyun-oss-rust-sdk = "0.2.2"
 url = "2.5"
 
 # 版本号解析
-winnow = "0.7"
+winnow = "1.0"
 
 
-# Docker API 客户端 (与ducker v0.5.5 兼容)
-bollard = "0.19"
+# Docker API 客户端 (与 ducker v0.6.5 兼容, 锁定 bollard 0.20.1, 0.20.2 破坏了 VolumeScopeEnum 可见性)
+bollard = "=0.20.1"
 
 # MySQL Async 客户端,用于连接mysql,执行差异sql,升级库表结构
-mysql_async = "0.36.1"
+mysql_async = "0.36.2"
 
-docker-compose-types = "0.22"
+docker-compose-types = "0.23"
 
 # 解析.env 环境变量文件
 dotenvy = "0.15"
 
 # 国际化支持
-rust-i18n = "3"
+rust-i18n = "4"
+
+# 文件操作扩展
+fs_extra = "1.3"
+remove_dir_all = "1"
+
+# Base64 编码/解码
+base64 = "0.22"
+
+# 系统信息
+num_cpus = "1.16"
+
+# Shell 变量展开
+shellexpand = "3.1.0"
+
+# 缓存库
+quick_cache = "0.6"
+
+# CLI 自更新
+self-replace = "1.5.0"
+
+# 错误处理 (美化输出)
+color-eyre = "0.6"
+
+# TUI 终端界面
+ratatui = "0.30"
+
+# 系统目录路径
+dirs = "6.0"
+
+# 解析器组合子
+nom = "8"
+
+# C FFI 绑定
+libc = "0.2"
+
+# Unix 系统调用
+nix = { version = "0.30", features = ["user"] }
+
+# 测试相关
+tokio-test = "0.4"
+memory-stats = "1.1"
 
 # The profile that 'dist' will build with
 [profile.dist]

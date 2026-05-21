@@ -33,8 +33,8 @@ impl ArchiveFormat {
 
 /// 使用 infer 库通过魔数检测格式
 pub fn detect_format_by_magic(path: &Path) -> Result<ArchiveFormat> {
-    let kind =
-        infer::get_from_path(path)?.ok_or_else(|| anyhow::anyhow!("Unable to detect file format"))?;
+    let kind = infer::get_from_path(path)?
+        .ok_or_else(|| anyhow::anyhow!("Unable to detect file format"))?;
 
     ArchiveFormat::from_infer_kind(&kind)
         .ok_or_else(|| anyhow::anyhow!("Unsupported file format: {}", kind.mime_type()))

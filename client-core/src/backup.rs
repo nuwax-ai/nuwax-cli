@@ -169,7 +169,8 @@ impl BackupManager {
 
                     // 递归处理目录
                     for entry in WalkDir::new(source_path) {
-                        let entry = entry.map_err(|e| anyhow::anyhow!("Failed to traverse directory: {e}"))?;
+                        let entry = entry
+                            .map_err(|e| anyhow::anyhow!("Failed to traverse directory: {e}"))?;
                         let path = entry.path();
 
                         if path.is_file() {
@@ -182,7 +183,10 @@ impl BackupManager {
                     }
                 } else {
                     //可能是新增的文件或者目录,这里无法备份,只打印日志
-                    info!("File or directory does not exist, no need to backup: {}", source_path.display());
+                    info!(
+                        "File or directory does not exist, no need to backup: {}",
+                        source_path.display()
+                    );
                 }
             }
 
@@ -214,10 +218,16 @@ impl BackupManager {
 
         let backup_path = PathBuf::from(&backup_record.file_path);
         if !backup_path.exists() {
-            return Err(anyhow::anyhow!("Backup file does not exist: {}", backup_path.display()));
+            return Err(anyhow::anyhow!(
+                "Backup file does not exist: {}",
+                backup_path.display()
+            ));
         }
 
-        info!("Starting intelligent data restore: {}", backup_path.display());
+        info!(
+            "Starting intelligent data restore: {}",
+            backup_path.display()
+        );
         info!("Target directory: {}", target_dir.display());
 
         // 停止服务，准备恢复
@@ -236,7 +246,10 @@ impl BackupManager {
         if auto_start_service {
             info!("Data restore completed, starting services...");
             self.docker_manager.start_services().await?;
-            info!("Data restored and started successfully: {}", target_dir.display());
+            info!(
+                "Data restored and started successfully: {}",
+                target_dir.display()
+            );
         } else {
             info!("Data restore completed, skipping service start (controlled by parent process)");
             info!("Data restored successfully: {}", target_dir.display());
@@ -262,7 +275,10 @@ impl BackupManager {
 
         let backup_path = PathBuf::from(&backup_record.file_path);
         if !backup_path.exists() {
-            return Err(anyhow::anyhow!("Backup file does not exist: {}", backup_path.display()));
+            return Err(anyhow::anyhow!(
+                "Backup file does not exist: {}",
+                backup_path.display()
+            ));
         }
 
         info!("Starting data directory restore: {}", backup_path.display());
@@ -283,10 +299,18 @@ impl BackupManager {
         if auto_start_service {
             info!("Data directory restore completed, starting services...");
             self.docker_manager.start_services().await?;
-            info!("Data directory restored and started successfully: {}", target_dir.display());
+            info!(
+                "Data directory restored and started successfully: {}",
+                target_dir.display()
+            );
         } else {
-            info!("Data directory restore completed, skipping service start (controlled by parent process)");
-            info!("Data directory restored successfully: {}", target_dir.display());
+            info!(
+                "Data directory restore completed, skipping service start (controlled by parent process)"
+            );
+            info!(
+                "Data directory restored successfully: {}",
+                target_dir.display()
+            );
         }
 
         Ok(())
@@ -335,9 +359,9 @@ impl BackupManager {
             Err(e) => {
                 warn!("Failed to read directory: {} - {}", path.display(), e);
                 // 如果读取失败，尝试直接删除整个目录
-                return tokio::fs::remove_dir_all(path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to delete directory: {} - {}", path.display(), e));
+                return tokio::fs::remove_dir_all(path).await.map_err(|e| {
+                    anyhow::anyhow!("Failed to delete directory: {} - {}", path.display(), e)
+                });
             }
         };
 
@@ -353,22 +377,33 @@ impl BackupManager {
 
                 // 尝试删除空目录（忽略"不存在"的错误）
                 if let Err(e) = tokio::fs::remove_dir(&entry_path).await
-                    && e.kind() != std::io::ErrorKind::NotFound {
-                        warn!("Failed to remove empty directory: {} - {}", entry_path.display(), e);
-                    }
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    warn!(
+                        "Failed to remove empty directory: {} - {}",
+                        entry_path.display(),
+                        e
+                    );
+                }
             } else {
                 if let Err(e) = tokio::fs::remove_file(&entry_path).await
-                    && e.kind() != std::io::ErrorKind::NotFound {
-                        warn!("Failed to remove file: {} - {}", entry_path.display(), e);
-                    }
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    warn!("Failed to remove file: {} - {}", entry_path.display(), e);
+                }
             }
         }
 
         // 尝试删除根目录（忽略"不存在"的错误）
         if let Err(e) = tokio::fs::remove_dir(path).await
-            && e.kind() != std::io::ErrorKind::NotFound {
-                warn!("Failed to remove root directory: {} - {}", path.display(), e);
-            }
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(
+                "Failed to remove root directory: {} - {}",
+                path.display(),
+                e
+            );
+        }
 
         Ok(())
     }
@@ -411,8 +446,8 @@ impl BackupManager {
 
             // 遍历归档中的所有条目
             for entry in archive.entries()? {
-                let mut entry =
-                    entry.map_err(|e| DuckError::Backup(format!("Failed to read archive entry: {e}")))?;
+                let mut entry = entry
+                    .map_err(|e| DuckError::Backup(format!("Failed to read archive entry: {e}")))?;
 
                 // 获取条目路径
                 let entry_path = entry
@@ -436,7 +471,10 @@ impl BackupManager {
 
                     // 解压文件
                     entry.unpack(&target_path).map_err(|e| {
-                        DuckError::Backup(format!("Failed to unpack file {}: {e}", target_path.display()))
+                        DuckError::Backup(format!(
+                            "Failed to unpack file {}: {e}",
+                            target_path.display()
+                        ))
                     })?;
 
                     debug!("Restoring file: {}", target_path.display());
@@ -474,8 +512,8 @@ impl BackupManager {
 
             // 遍历归档中的所有条目
             for entry in archive.entries()? {
-                let mut entry =
-                    entry.map_err(|e| DuckError::Backup(format!("Failed to read archive entry: {e}")))?;
+                let mut entry = entry
+                    .map_err(|e| DuckError::Backup(format!("Failed to read archive entry: {e}")))?;
 
                 // 获取条目路径
                 let entry_path = entry
@@ -509,7 +547,10 @@ impl BackupManager {
 
                     // 解压文件
                     entry.unpack(&target_path).map_err(|e| {
-                        DuckError::Backup(format!("Failed to unpack file {}: {e}", target_path.display()))
+                        DuckError::Backup(format!(
+                            "Failed to unpack file {}: {e}",
+                            target_path.display()
+                        ))
                     })?;
 
                     debug!("Restoring file: {}", target_path.display());
@@ -537,7 +578,9 @@ impl BackupManager {
             .database
             .get_backup_by_id(backup_id)
             .await?
-            .ok_or_else(|| DuckError::Backup(format!("Backup record does not exist: {backup_id}")))?;
+            .ok_or_else(|| {
+                DuckError::Backup(format!("Backup record does not exist: {backup_id}"))
+            })?;
 
         let backup_path = PathBuf::from(&backup_record.file_path);
 
@@ -612,9 +655,10 @@ impl BackupManager {
 
             for entry in WalkDir::new(&source_dir).into_iter().flatten() {
                 if entry.path().is_file()
-                    && let Ok(metadata) = entry.metadata() {
-                        total += metadata.len();
-                    }
+                    && let Ok(metadata) = entry.metadata()
+                {
+                    total += metadata.len();
+                }
             }
 
             total

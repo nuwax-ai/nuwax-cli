@@ -10,7 +10,10 @@ pub fn show_client_version() {
     info!("🦆 Nuwax Cli ent Status");
     info!("==================");
     info!("📋 Basic Information:");
-    info!("   Client version: v{version}", version = env!("CARGO_PKG_VERSION"));
+    info!(
+        "   Client version: v{version}",
+        version = env!("CARGO_PKG_VERSION")
+    );
 }
 
 /// 显示服务状态（完整版本，包含基本信息）
@@ -22,7 +25,10 @@ pub async fn run_status(app: &CliApp) -> Result<()> {
 /// 显示详细状态信息（不包含基本信息标题）
 pub async fn run_status_details(app: &CliApp) -> Result<()> {
     // 继续显示其他基本信息
-    info!("   Docker service version: {version}", version = app.config.get_docker_versions());
+    info!(
+        "   Docker service version: {version}",
+        version = app.config.get_docker_versions()
+    );
     info!("   Configuration file: {file}", file = "config.toml");
 
     // 显示客户端UUID
@@ -43,9 +49,15 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
     );
 
     if docker_compose_path.exists() {
-        info!("   ✅ Docker Compose file: {file}", file = app.config.docker.compose_file);
+        info!(
+            "   ✅ Docker Compose file: {file}",
+            file = app.config.docker.compose_file
+        );
     } else {
-        info!("   ❌ Docker Compose file: {file} (not exists)", file = app.config.docker.compose_file);
+        info!(
+            "   ❌ Docker Compose file: {file} (not exists)",
+            file = app.config.docker.compose_file
+        );
     }
 
     match &download_path {
@@ -53,7 +65,10 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
             info!("   ✅ Service package file: {path}", path = path.display());
         }
         Err(e) => {
-            info!("   ❌ Service package file: (Error: {error})", error = e.to_string());
+            info!(
+                "   ❌ Service package file: (Error: {error})",
+                error = e.to_string()
+            );
         }
     }
 
@@ -68,7 +83,10 @@ pub async fn run_status_details(app: &CliApp) -> Result<()> {
                 // 状态检查成功，详细信息已在函数内部显示
             }
             Err(e) => {
-                warn!("   ⚠️  Service status check failed: {error}", error = e.to_string());
+                warn!(
+                    "   ⚠️  Service status check failed: {error}",
+                    error = e.to_string()
+                );
                 info!("   💡 Suggested checks:");
                 info!("      - Docker is installed and running");
                 info!("      - docker-compose is available");
@@ -136,7 +154,11 @@ async fn check_docker_services_status(
     } else {
         warn!("   ❌ Some services are not running");
         for container in report.failed_containers().iter() {
-            error!("   ❌ {name}: {status}", name = container.name, status = format!("{:?}", container.status));
+            error!(
+                "   ❌ {name}: {status}",
+                name = container.name,
+                status = format!("{:?}", container.status)
+            );
         }
     }
 

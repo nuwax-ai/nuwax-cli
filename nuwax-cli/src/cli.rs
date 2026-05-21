@@ -19,8 +19,8 @@ pub struct UpgradeArgs {
 pub enum UpgradeSubcommand {
     /// Download latest Docker service package to local cache
     Download {
-        /// Download full package (required for offline deployment)
-        #[arg(long, default_value = "true")]
+        /// Compatibility flag; download always produces a full package.
+        #[arg(long, hide = true)]
         full: bool,
     },
     /// Check available upgrades (existing behavior)
@@ -219,7 +219,10 @@ pub enum Commands {
     /// Download Docker service files
     Upgrade {
         #[command(subcommand)]
-        subcommand: UpgradeSubcommand,
+        subcommand: Option<UpgradeSubcommand>,
+
+        #[command(flatten)]
+        args: UpgradeArgs,
     },
     /// List all backups
     ListBackups,
@@ -234,7 +237,11 @@ pub enum Commands {
         #[arg(long)]
         list_json: bool,
         /// Whether to rollback data files, default no
-        #[arg(long, default_value = "false", help = "Whether to rollback data files, default no")]
+        #[arg(
+            long,
+            default_value = "false",
+            help = "Whether to rollback data files, default no"
+        )]
         rollback_data: bool,
     },
     /// Docker service related commands
@@ -275,7 +282,79 @@ pub enum Commands {
         #[arg(long, help = "New version number for diff description")]
         new_version: Option<String>,
         /// Output file name (optional, default: upgrade_diff.sql)
-        #[arg(long, default_value = "upgrade_diff.sql", help = "Diff SQL output file name")]
+        #[arg(
+            long,
+            default_value = "upgrade_diff.sql",
+            help = "Diff SQL output file name"
+        )]
         output: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_legacy_upgrade_command() {
+        let cli = Cli::parse_from(["nuwax-cli", "upgrade"]);
+
+        match cli.command {
+            Commands::Upgrade { subcommand, args } => {
+                assert!(subcommand.is_none());
+                assert!(!args.check);
+                assert!(!args.force);
+            }
+            _ => panic!("expected upgrade command"),
+        }
+    }
+
+    #[test]
+    fn parses_legacy_upgrade_check_and_force_flags() {
+        let cli = Cli::parse_from(["nuwax-cli", "upgrade", "--check", "--force"]);
+
+        match cli.command {
+            Commands::Upgrade { subcommand, args } => {
+                assert!(subcommand.is_none());
+                assert!(args.check);
+                assert!(args.force);
+            }
+            _ => panic!("expected upgrade command"),
+        }
+    }
+
+    #[test]
+    fn parses_upgrade_check_subcommand() {
+        let cli = Cli::parse_from(["nuwax-cli", "upgrade", "check", "--force"]);
+
+        match cli.command {
+            Commands::Upgrade {
+                subcommand: Some(UpgradeSubcommand::Check { force }),
+                args,
+            } => {
+                assert!(force);
+                assert!(!args.check);
+                assert!(!args.force);
+            }
+            _ => panic!("expected upgrade check command"),
+        }
+    }
+
+    #[test]
+    fn parses_upgrade_download_subcommand() {
+        let cli = Cli::parse_from(["nuwax-cli", "upgrade", "download", "--full"]);
+
+        match cli.command {
+            Commands::Upgrade {
+                subcommand: Some(UpgradeSubcommand::Download { full }),
+                args,
+            } => {
+                assert!(full);
+                assert!(!args.check);
+                assert!(!args.force);
+            }
+            _ => panic!("expected upgrade download command"),
+        }
+    }
 }

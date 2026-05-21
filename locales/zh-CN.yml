@@ -286,7 +286,7 @@ init_cmd:
   complete: "🎉 初始化完成！"
   next_steps: "📝 接下来的步骤:"
   step1_upgrade: "   1️⃣  运行 'nuwax-cli upgrade' 下载Docker服务全量包"
-  step1_upgrade_force: "       - 或者运行 'nuwax-cli upgrade --full --force' 强制下载完整服务包"
+  step1_upgrade_force: "       - 或者运行 'nuwax-cli upgrade --force' 强制下载完整服务包"
   step2_deploy: "   2️⃣  运行 'nuwax-cli docker-service deploy' 部署Docker服务"
   step3_start: "   3️⃣  运行 'nuwax-cli docker-service start' 启动Docker服务"
   shortcut_title: "🚀 快捷方式 - 自动升级部署:"

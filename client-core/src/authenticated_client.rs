@@ -108,10 +108,12 @@ impl AuthenticatedClient {
         url: &str,
     ) -> RequestBuilder {
         // 只对我们的服务器且非注册接口添加认证头
-        if self.is_our_server(url) && !self.is_register_endpoint(url)
-            && let Some(client_id) = self.get_client_id().await {
-                request_builder = request_builder.header("X-Client-ID", client_id);
-            }
+        if self.is_our_server(url)
+            && !self.is_register_endpoint(url)
+            && let Some(client_id) = self.get_client_id().await
+        {
+            request_builder = request_builder.header("X-Client-ID", client_id);
+        }
         request_builder
     }
 
@@ -150,7 +152,10 @@ impl AuthenticatedClient {
             // 尝试自动注册
             match self.auto_register().await {
                 Ok(new_client_id) => {
-                    info!("Auto re-registration successful, client ID: {}, retrying request...", new_client_id);
+                    info!(
+                        "Auto re-registration successful, client ID: {}, retrying request...",
+                        new_client_id
+                    );
 
                     // 重新从头构建请求，使用新的client_id
                     // 我们需要重新创建请求，因为原来的RequestBuilder已经被消费
@@ -164,7 +169,9 @@ impl AuthenticatedClient {
                 }
                 Err(e) => {
                     error!("Auto re-registration failed: {}", e);
-                    Err(anyhow::anyhow!("Authentication failed and unable to re-register: {e}"))
+                    Err(anyhow::anyhow!(
+                        "Authentication failed and unable to re-register: {e}"
+                    ))
                 }
             }
         } else {

@@ -31,7 +31,10 @@ async fn main() {
     if environment.is_testing() {
         warn!("⚠️  RUNNING IN TESTING MODE");
         warn!("   Environment: {env}", env = environment.display_name());
-        warn!("   API Endpoint: {url}", url = client_core::constants::api::get_base_url());
+        warn!(
+            "   API Endpoint: {url}",
+            url = client_core::constants::api::get_base_url()
+        );
         warn!("   Configuration: config-test.toml (if exists)");
         warn!("   Use Ctrl+C to cancel if this is not intended");
         warn!("   Waiting 2 seconds...");
@@ -64,12 +67,18 @@ async fn main() {
             Ok(app) => {
                 // 应用初始化成功，显示完整状态信息
                 if let Err(e) = nuwax_cli::run_status_details(&app).await {
-                    error!("❌ Failed to get detailed status: {error}", error = e.to_string());
+                    error!(
+                        "❌ Failed to get detailed status: {error}",
+                        error = e.to_string()
+                    );
                 }
             }
             Err(e) => {
                 // 应用初始化失败，显示友好提示
-                error!("⚠️  Unable to get full status info: {error}", error = e.to_string());
+                error!(
+                    "⚠️  Unable to get full status info: {error}",
+                    error = e.to_string()
+                );
                 info!("");
                 info!("💡 Possible reasons:");
                 info!("   - Current directory is not Nuwax Cli ent working directory");
@@ -95,7 +104,10 @@ async fn main() {
     } = cli.command
     {
         if let Err(e) = run_diff_sql(old_sql, new_sql, old_version, new_version, output).await {
-            error!("❌ SQL diff comparison failed: {error}", error = e.to_string());
+            error!(
+                "❌ SQL diff comparison failed: {error}",
+                error = e.to_string()
+            );
             std::process::exit(1);
         }
         return;
@@ -103,15 +115,17 @@ async fn main() {
 
     // 🚀 特殊处理：AutoUpgradeDeploy 命令需要优先检查CLI版本更新（在任何数据库初始化之前）
     // 但 offline-deploy 是离线命令，跳过 CLI 版本检查
-    if let Commands::AutoUpgradeDeploy(
-        AutoUpgradeDeployCommand::OfflineDeploy { .. },
-    ) = cli.command
+    if let Commands::AutoUpgradeDeploy(AutoUpgradeDeployCommand::OfflineDeploy { .. }) =
+        &cli.command
     {
         info!("🔍 Offline-deploy command detected, skipping CLI version check (offline mode)...");
-    } else if let Commands::AutoUpgradeDeploy(_) = cli.command {
+    } else if let Commands::AutoUpgradeDeploy(_) = &cli.command {
         info!("🔍 AutoUpgradeDeploy command detected, prioritizing CLI version check...");
         if let Err(e) = check_and_install_nuwax_cli_update_early().await {
-            error!("❌ CLI version check failed: {error}", error = e.to_string());
+            error!(
+                "❌ CLI version check failed: {error}",
+                error = e.to_string()
+            );
             std::process::exit(1);
         }
         // 如果有更新，上面的函数会直接退出进程，不会继续执行到这里
@@ -123,8 +137,12 @@ async fn main() {
     }
 
     // 🚀 特殊处理：upgrade download 命令不需要数据库初始化
-    if let Commands::Upgrade { subcommand: UpgradeSubcommand::Download { .. } } = &cli.command {
-        match nuwax_cli::run_download().await {
+    if let Commands::Upgrade {
+        subcommand: Some(UpgradeSubcommand::Download { .. }),
+        ..
+    } = &cli.command
+    {
+        match nuwax_cli::run_download(Some(&cli.config)).await {
             Ok(_) => return,
             Err(e) => {
                 error!("❌ Download failed: {error}", error = e.to_string());
@@ -142,18 +160,25 @@ async fn main() {
             let mut is_config_not_found = false;
             while let Some(err) = source {
                 if err.downcast_ref::<DuckError>().is_some()
-                    && let Some(DuckError::ConfigNotFound) = err.downcast_ref::<DuckError>() {
-                        is_config_not_found = true;
-                        break;
-                    }
+                    && let Some(DuckError::ConfigNotFound) = err.downcast_ref::<DuckError>()
+                {
+                    is_config_not_found = true;
+                    break;
+                }
                 source = err.source();
             }
 
             if is_config_not_found {
-                error!("❌ Configuration file '{file}' not found.", file = cli.config.display());
+                error!(
+                    "❌ Configuration file '{file}' not found.",
+                    file = cli.config.display()
+                );
                 error!("👉 Please run 'nuwax-cli init' first to create configuration file.");
             } else {
-                error!("❌ Application initialization failed: {error}", error = e.to_string());
+                error!(
+                    "❌ Application initialization failed: {error}",
+                    error = e.to_string()
+                );
             }
             std::process::exit(1);
         }

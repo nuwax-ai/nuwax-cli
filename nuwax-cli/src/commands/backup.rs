@@ -35,7 +35,10 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
     let compose_path = Path::new(&app.config.docker.compose_file);
 
     if !compose_path.exists() {
-        error!("❌ Docker Compose file does not exist: {path}", path = compose_path.display());
+        error!(
+            "❌ Docker Compose file does not exist: {path}",
+            path = compose_path.display()
+        );
         info!("💡 Please ensure Docker services are properly deployed");
         return Ok(());
     }
@@ -46,7 +49,10 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
     let docker_service = DockerService::new(app.config.clone(), app.docker_manager.clone())?;
     match docker_service.health_check().await {
         Ok(report) => {
-            info!("📊 Service status: {status}", status = report.get_status_summary());
+            info!(
+                "📊 Service status: {status}",
+                status = report.get_status_summary()
+            );
 
             // 智能分析服务状态
             let running_containers = report.get_running_containers();
@@ -63,9 +69,17 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
                 warn!("⚠️  Persistent services are still running!");
                 error!("❌ Cold backup requires persistent services to be stopped");
 
-                info!("📝 Found {count} running persistent services:", count = persistent_running_services.len());
+                info!(
+                    "📝 Found {count} running persistent services:",
+                    count = persistent_running_services.len()
+                );
                 for container in &persistent_running_services {
-                    info!("   - {name} (status: {status}, restart: {restart})", name = container.name, status = container.status.display_name(), restart = container.get_restart_display());
+                    info!(
+                        "   - {name} (status: {status}, restart: {restart})",
+                        name = container.name,
+                        status = container.status.display_name(),
+                        restart = container.get_restart_display()
+                    );
                 }
 
                 // 显示被忽略的一次性任务
@@ -75,9 +89,16 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
                     .collect();
 
                 if !oneshot_running_services.is_empty() {
-                    info!("📝 Found {count} running one-shot tasks (ignored):", count = oneshot_running_services.len());
+                    info!(
+                        "📝 Found {count} running one-shot tasks (ignored):",
+                        count = oneshot_running_services.len()
+                    );
                     for container in oneshot_running_services {
-                        info!("   - {name} (one-shot task, restart: {restart}, does not affect backup)", name = container.name, restart = container.get_restart_display());
+                        info!(
+                            "   - {name} (one-shot task, restart: {restart}, does not affect backup)",
+                            name = container.name,
+                            restart = container.get_restart_display()
+                        );
                     }
                 }
 
@@ -101,29 +122,56 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
                     .collect();
 
                 if !oneshot_completed.is_empty() {
-                    info!("🔄 Ignoring {count} one-shot task containers:", count = oneshot_completed.len());
+                    info!(
+                        "🔄 Ignoring {count} one-shot task containers:",
+                        count = oneshot_completed.len()
+                    );
                     for container in oneshot_completed {
-                        info!("   - {name} (status: {status}, restart: {restart})", name = container.name, status = container.status.display_name(), restart = container.get_restart_display());
+                        info!(
+                            "   - {name} (status: {status}, restart: {restart})",
+                            name = container.name,
+                            status = container.status.display_name(),
+                            restart = container.get_restart_display()
+                        );
                     }
                 }
 
                 if !other_completed.is_empty() {
-                    info!("📝 Found {count} other completed containers:", count = other_completed.len());
+                    info!(
+                        "📝 Found {count} other completed containers:",
+                        count = other_completed.len()
+                    );
                     for container in other_completed {
-                        info!("   - {name} (status: {status}, restart: {restart})", name = container.name, status = container.status.display_name(), restart = container.get_restart_display());
+                        info!(
+                            "   - {name} (status: {status}, restart: {restart})",
+                            name = container.name,
+                            status = container.status.display_name(),
+                            restart = container.get_restart_display()
+                        );
                     }
                 }
             }
 
             if !failed_containers.is_empty() {
-                warn!("⚠️  Found {count} failed containers (does not affect backup):", count = failed_containers.len());
+                warn!(
+                    "⚠️  Found {count} failed containers (does not affect backup):",
+                    count = failed_containers.len()
+                );
                 for container in failed_containers {
-                    warn!("   - {name} (status: {status}, restart: {restart})", name = container.name, status = container.status.display_name(), restart = container.get_restart_display());
+                    warn!(
+                        "   - {name} (status: {status}, restart: {restart})",
+                        name = container.name,
+                        status = container.status.display_name(),
+                        restart = container.get_restart_display()
+                    );
                 }
             }
         }
         Err(e) => {
-            error!("❌ Docker service status check failed: {error}", error = e.to_string());
+            error!(
+                "❌ Docker service status check failed: {error}",
+                error = e.to_string()
+            );
             info!("💡 Cannot confirm service status, suggest manual check before backup");
             return Ok(());
         }
@@ -152,9 +200,15 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
 
     match backup_manager.create_backup(backup_options).await {
         Ok(backup_record) => {
-            info!("✅ Backup created successfully: {path}", path = backup_record.file_path);
+            info!(
+                "✅ Backup created successfully: {path}",
+                path = backup_record.file_path
+            );
             info!("📝 Backup ID: {id}", id = backup_record.id);
-            info!("📏 Backup service version: {version}", version = backup_record.service_version);
+            info!(
+                "📏 Backup service version: {version}",
+                version = backup_record.service_version
+            );
         }
         Err(e) => {
             error!("❌ Backup creation failed: {error}", error = e.to_string());
@@ -196,7 +250,9 @@ pub async fn run_list_backups(app: &CliApp) -> Result<()> {
         t!("backup_cmd.header_size"),
         t!("backup_cmd.header_file_path")
     );
-    info!("----------------------------------------------------------------------------------------------------");
+    info!(
+        "----------------------------------------------------------------------------------------------------"
+    );
 
     for backup in &backups {
         let backup_path = std::path::Path::new(&backup.file_path);
@@ -226,7 +282,10 @@ pub async fn run_list_backups(app: &CliApp) -> Result<()> {
             (t!("backup_cmd.status_available").to_string(), size)
         } else {
             invalid_backups += 1;
-            (t!("backup_cmd.status_file_missing").to_string(), "---".to_string())
+            (
+                t!("backup_cmd.status_file_missing").to_string(),
+                "---".to_string(),
+            )
         };
 
         // 备份类型显示
@@ -259,7 +318,9 @@ pub async fn run_list_backups(app: &CliApp) -> Result<()> {
         }
     }
 
-    info!("----------------------------------------------------------------------------------------------------");
+    info!(
+        "----------------------------------------------------------------------------------------------------"
+    );
 
     // 统计摘要
     info!("📊 Backup Statistics:");
@@ -289,9 +350,15 @@ pub async fn run_list_backups(app: &CliApp) -> Result<()> {
     }
 
     if invalid_backups > 0 {
-        warn!("⚠️  Found {count} invalid backups (file missing)", count = invalid_backups);
+        warn!(
+            "⚠️  Found {count} invalid backups (file missing)",
+            count = invalid_backups
+        );
         info!("💡 Suggestions:");
-        info!("   - Check backup directory settings: {dir}", dir = app.config.get_backup_dir().display());
+        info!(
+            "   - Check backup directory settings: {dir}",
+            dir = app.config.get_backup_dir().display()
+        );
         info!("   - If backup files were deleted, these records cannot be used for recovery");
         info!("   - Consider manually cleaning up these invalid records");
     }
@@ -336,13 +403,20 @@ pub async fn run_rollback(
 
     if !force {
         if rollback_data {
-            warn!("⚠️  Warning: This operation will overwrite current data directory, Mysql, Redis etc. data will also be rolled back!");
+            warn!(
+                "⚠️  Warning: This operation will overwrite current data directory, Mysql, Redis etc. data will also be rolled back!"
+            );
         } else {
-            warn!("⚠️  Warning: This operation will rollback backend and frontend application versions, but not Mysql, Redis etc. data!");
+            warn!(
+                "⚠️  Warning: This operation will rollback backend and frontend application versions, but not Mysql, Redis etc. data!"
+            );
         }
 
         use std::io::{self, Write};
-        print!("{}", t!("backup_cmd.confirm_restore", id = selected_backup_id));
+        print!(
+            "{}",
+            t!("backup_cmd.confirm_restore", id = selected_backup_id)
+        );
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -361,7 +435,9 @@ pub async fn run_rollback(
         //data,app 等目录,全部恢复
         run_rollback_with_exculde(app, selected_backup_id, auto_start_service, &[]).await?;
     } else {
-        info!("rollback_data is false, not rolling back data directory (mysql, redis etc. data will not be rolled back)");
+        info!(
+            "rollback_data is false, not rolling back data directory (mysql, redis etc. data will not be rolled back)"
+        );
         //data 数据目录不用恢复,回滚应用业务逻辑, 考虑改写: perform_selective_restore ,增加参数,用于排除 data 目录
         run_rollback_with_exculde(app, selected_backup_id, auto_start_service, &["data"]).await?;
     }
@@ -456,14 +532,20 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
 
     info!("--------------------------------------------------------------------------------");
     info!("💡 Input instructions:");
-    info!("   - Enter index (1-{count}) to select backup to restore", count = valid_backups.len());
+    info!(
+        "   - Enter index (1-{count}) to select backup to restore",
+        count = valid_backups.len()
+    );
     info!("   - Enter 'q' or 'quit' to exit");
     info!("   - Enter 'l' or 'list' to redisplay list");
 
     // 交互式选择循环
     use std::io::{self, Write};
     loop {
-        print!("\n{}", t!("backup_cmd.select_prompt", count = valid_backups.len()));
+        print!(
+            "\n{}",
+            t!("backup_cmd.select_prompt", count = valid_backups.len())
+        );
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -489,7 +571,9 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
                 t!("backup_cmd.header_size"),
                 t!("backup_cmd.header_filename")
             );
-            info!("--------------------------------------------------------------------------------");
+            info!(
+                "--------------------------------------------------------------------------------"
+            );
 
             for (index, backup) in valid_backups.iter().enumerate() {
                 let backup_path = std::path::Path::new(&backup.file_path);
@@ -511,7 +595,9 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
 
                 let backup_type_display = match backup.backup_type {
                     client_core::database::BackupType::Manual => t!("backup_cmd.type_manual"),
-                    client_core::database::BackupType::PreUpgrade => t!("backup_cmd.type_pre_upgrade"),
+                    client_core::database::BackupType::PreUpgrade => {
+                        t!("backup_cmd.type_pre_upgrade")
+                    }
                 };
 
                 let filename = backup_path
@@ -529,7 +615,9 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
                     filename
                 );
             }
-            info!("--------------------------------------------------------------------------------");
+            info!(
+                "--------------------------------------------------------------------------------"
+            );
             continue;
         }
 
@@ -542,21 +630,37 @@ async fn interactive_backup_selection(app: &CliApp) -> Result<Option<i64>> {
                     // 显示选择确认
                     info!("✅ You selected backup:");
                     info!("   Backup ID: {id}", id = selected_backup.id);
-                    info!("   Type: {backup_type}", backup_type = match selected_backup.backup_type {
-                                client_core::database::BackupType::Manual => t!("backup_cmd.type_manual"),
-                                client_core::database::BackupType::PreUpgrade => t!("backup_cmd.type_pre_upgrade"),
-                            });
-                    info!("   Created at: {time}", time = selected_backup.created_at.format("%Y-%m-%d %H:%M:%S"));
-                    info!("   Service version: {version}", version = selected_backup.service_version);
+                    info!(
+                        "   Type: {backup_type}",
+                        backup_type = match selected_backup.backup_type {
+                            client_core::database::BackupType::Manual =>
+                                t!("backup_cmd.type_manual"),
+                            client_core::database::BackupType::PreUpgrade =>
+                                t!("backup_cmd.type_pre_upgrade"),
+                        }
+                    );
+                    info!(
+                        "   Created at: {time}",
+                        time = selected_backup.created_at.format("%Y-%m-%d %H:%M:%S")
+                    );
+                    info!(
+                        "   Service version: {version}",
+                        version = selected_backup.service_version
+                    );
                     info!("   File path: {path}", path = selected_backup.file_path);
 
                     return Ok(Some(selected_backup.id));
                 } else {
-                    warn!("❌ Invalid selection, please enter a number between 1-{count}", count = valid_backups.len());
+                    warn!(
+                        "❌ Invalid selection, please enter a number between 1-{count}",
+                        count = valid_backups.len()
+                    );
                 }
             }
             Err(_) => {
-                warn!("❌ Invalid input, please enter a number, 'q' (quit) or 'l' (redisplay list)");
+                warn!(
+                    "❌ Invalid input, please enter a number, 'q' (quit) or 'l' (redisplay list)"
+                );
             }
         }
     }
@@ -572,7 +676,10 @@ async fn run_rollback_with_exculde(
     info!("🛡️ Using smart data rollback mode");
     info!("   📁 Will restore: data/, app/ directories");
     info!("   🔧 Will keep: docker-compose.yml, .env and other config files");
-    info!("   Directories not restored:{dirs}", dirs = format!("{:?}", dirs_to_exculde));
+    info!(
+        "   Directories not restored:{dirs}",
+        dirs = format!("{:?}", dirs_to_exculde)
+    );
 
     // 使用 BackupManager 的智能数据恢复功能
     let docker_dir = std::path::Path::new("./docker");
@@ -597,7 +704,10 @@ async fn run_rollback_with_exculde(
                     use std::os::unix::fs::PermissionsExt;
                     let permissions = std::fs::Permissions::from_mode(0o775);
                     if let Err(e) = std::fs::set_permissions(&mysql_data_dir, permissions) {
-                        warn!("⚠️ Failed to set MySQL permission: {error}", error = e.to_string());
+                        warn!(
+                            "⚠️ Failed to set MySQL permission: {error}",
+                            error = e.to_string()
+                        );
                     } else {
                         info!("🔒 MySQL data directory permission set to 775");
                     }
@@ -643,7 +753,10 @@ async fn output_backups_as_json(app: &CliApp) -> Result<()> {
                     let error_response = JsonBackupListResponse {
                         success: false,
                         backups: vec![],
-                        error: Some(t!("backup_cmd.json_serialize_failed", error = e.to_string()).to_string()),
+                        error: Some(
+                            t!("backup_cmd.json_serialize_failed", error = e.to_string())
+                                .to_string(),
+                        ),
                     };
                     if let Ok(error_json) = serde_json::to_string(&error_response) {
                         print!("{error_json}");

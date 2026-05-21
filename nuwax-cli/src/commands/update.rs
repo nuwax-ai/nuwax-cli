@@ -2,12 +2,12 @@ use crate::app::CliApp;
 use crate::cli::UpgradeArgs;
 use anyhow::Result;
 use client_core::{
-    api::ApiClient,
-    config::AppConfig,
-    upgrade_strategy::UpgradeStrategy,
-    utils::archive,
+    api::ApiClient, config::AppConfig, upgrade_strategy::UpgradeStrategy, utils::archive,
 };
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use tracing::{error, info};
 
 /// 获取指定版本的全量下载目录路径,并创建目录
@@ -38,7 +38,10 @@ async fn handle_service_download(
     // 总是先下载到临时文件
     let temp_path = version_download_dir.join("temp_download");
 
-    info!("   Downloading to temp file: {path}", path = temp_path.display());
+    info!(
+        "   Downloading to temp file: {path}",
+        path = temp_path.display()
+    );
 
     let download_result = app
         .api_client
@@ -49,7 +52,10 @@ async fn handle_service_download(
         Ok(_) => {
             // 魔数检测格式
             let format = archive::detect_format_by_magic(&temp_path)?;
-            info!("   Detected file format: {format}", format = format!("{:?}", format));
+            info!(
+                "   Detected file format: {format}",
+                format = format!("{:?}", format)
+            );
 
             // 获取架构
             let arch = client_core::architecture::Architecture::detect();
@@ -70,8 +76,14 @@ async fn handle_service_download(
 
             info!("✅ Service package ready!");
             info!("   File location: {path}", path = final_path.display());
-            info!("   Download version: {version}", version = target_version.to_string());
-            info!("   Current deployed version: {version}", version = app.config.get_docker_versions());
+            info!(
+                "   Download version: {version}",
+                version = target_version.to_string()
+            );
+            info!(
+                "   Current deployed version: {version}",
+                version = app.config.get_docker_versions()
+            );
             info!("📝 Next step: Run 'nuwax-cli docker-service deploy' to deploy services");
             Ok(())
         }
@@ -122,7 +134,10 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
             info!("🔄 Full upgrade");
             info!("   Target version: {version}", version = target_version);
             info!("   Download path: {path}", path = url);
-            info!("   Current version: {version}", version = current_version_str);
+            info!(
+                "   Current version: {version}",
+                version = current_version_str
+            );
             info!("   Latest version: {version}", version = target_version);
 
             if args.check {
@@ -151,7 +166,10 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
             download_type: _,
         } => {
             info!("🔄 Incremental upgrade");
-            info!("   Current version: {version}", version = current_version_str);
+            info!(
+                "   Current version: {version}",
+                version = current_version_str
+            );
             info!("   Latest version: {version}", version = target_version);
 
             if args.check {
@@ -174,7 +192,10 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
             .await?;
         }
         UpgradeStrategy::NoUpgrade { target_version } => {
-            info!("   Current version: {version}", version = current_version_str);
+            info!(
+                "   Current version: {version}",
+                version = current_version_str
+            );
             info!("   Latest version: {version}", version = target_version);
             info!("✅ Current version is latest");
         }
@@ -186,19 +207,24 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
 /// 下载最新的 Docker 服务包（全量包）用于离线部署
 ///
 /// 此函数独立于 CliApp，不需要数据库初始化
-pub async fn run_download() -> Result<()> {
+pub async fn run_download(config_path: Option<&Path>) -> Result<()> {
+    let config = match config_path {
+        Some(path) if path.exists() => AppConfig::load_from_file(path)?,
+        Some(_) | None => match AppConfig::find_and_load_config() {
+            Ok(cfg) => cfg,
+            Err(_) => {
+                info!("   No config file found, using default configuration");
+                AppConfig::default()
+            }
+        },
+    };
+
+    run_download_with_config(&config).await
+}
+
+pub async fn run_download_with_config(config: &AppConfig) -> Result<()> {
     info!("📦 Downloading latest Docker service package...");
     info!("=====================");
-
-    // 1. 加载配置（不需要数据库）
-    let config = match AppConfig::find_and_load_config() {
-        Ok(cfg) => cfg,
-        Err(_) => {
-            // 如果没有配置文件，使用默认配置
-            info!("   No config file found, using default configuration");
-            AppConfig::default()
-        }
-    };
 
     // 2. 创建 API 客户端
     let api_client = ApiClient::new(Some("offline-download".to_string()), None);
@@ -207,12 +233,18 @@ pub async fn run_download() -> Result<()> {
     let manifest = api_client.get_enhanced_service_manifest().await?;
     let latest_version = manifest.version.clone();
 
-    info!("   Latest version: {version}", version = latest_version.to_string());
+    info!(
+        "   Latest version: {version}",
+        version = latest_version.to_string()
+    );
 
     // 4. 获取当前部署版本（如果存在）
     let current_version = config.get_docker_versions();
     if !current_version.is_empty() {
-        info!("   Current deployed version: {version}", version = current_version);
+        info!(
+            "   Current deployed version: {version}",
+            version = current_version
+        );
     } else {
         info!("   No current deployment detected");
     }
@@ -239,7 +271,9 @@ pub async fn run_download() -> Result<()> {
             .map(|p| p.url.clone())
             .ok_or_else(|| anyhow::anyhow!("No download URL for architecture: {}", arch_str))?
     } else {
-        return Err(anyhow::anyhow!("Manifest does not contain platform information"));
+        return Err(anyhow::anyhow!(
+            "Manifest does not contain platform information"
+        ));
     };
 
     info!("   Download URL: {url}", url = download_url);
@@ -253,7 +287,10 @@ pub async fn run_download() -> Result<()> {
 
     // 下载到临时文件
     let temp_path = version_download_dir.join("temp_download");
-    info!("   Downloading to temp file: {path}", path = temp_path.display());
+    info!(
+        "   Downloading to temp file: {path}",
+        path = temp_path.display()
+    );
 
     let download_result = api_client
         .download_service_update_optimized(&temp_path, Some(version_str.as_str()), &download_url)
@@ -263,7 +300,10 @@ pub async fn run_download() -> Result<()> {
         Ok(_) => {
             // 魔数检测格式
             let format = archive::detect_format_by_magic(&temp_path)?;
-            info!("   Detected file format: {format}", format = format!("{:?}", format));
+            info!(
+                "   Detected file format: {format}",
+                format = format!("{:?}", format)
+            );
 
             // 生成正确文件名
             let filename = archive::generate_docker_filename(arch_str, format);

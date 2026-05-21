@@ -5,7 +5,9 @@
 .DS_Store
 backups
 .vite
-docker
+/docker/*
+!/docker/mysql-integration/
+!/docker/mysql-integration/**
 cacheDuckData
 history.db
 history.db.wal

@@ -64,7 +64,9 @@ impl MySqlConfig {
                         None
                     }
                 })
-                .ok_or_else(|| anyhow!("No mapping to container port 3306 found in 'mysql' service"))?,
+                .ok_or_else(|| {
+                    anyhow!("No mapping to container port 3306 found in 'mysql' service")
+                })?,
             dct::Ports::Long(ports_list) => ports_list
                 .iter()
                 .find_map(|p| {
@@ -80,7 +82,9 @@ impl MySqlConfig {
                         None
                     }
                 })
-                .ok_or_else(|| anyhow!("No mapping to container port 3306 found in 'mysql' service"))?,
+                .ok_or_else(|| {
+                    anyhow!("No mapping to container port 3306 found in 'mysql' service")
+                })?,
         };
 
         Ok(MySqlConfig {
@@ -282,10 +286,12 @@ impl MySqlExecutor {
         let mut create_sqls = String::new();
         for table in &table_names {
             let query = format!("SHOW CREATE TABLE `{}`", table);
-            let row: Row = conn
-                .exec_first(query, ())
-                .await?
-                .ok_or_else(|| anyhow::anyhow!(format!("Failed to get CREATE statement for table: {}", table)))?;
+            let row: Row = conn.exec_first(query, ()).await?.ok_or_else(|| {
+                anyhow::anyhow!(format!(
+                    "Failed to get CREATE statement for table: {}",
+                    table
+                ))
+            })?;
             // MySQL返回两列：Table, Create Table
             let (_tbl_name, create_stmt): (String, String) = from_row(row);
             create_sqls.push_str(&create_stmt);

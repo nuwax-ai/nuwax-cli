@@ -371,7 +371,9 @@ impl FileDownloader {
         let is_object_storage_or_cdn = self.is_object_storage_or_cdn_url(url);
         let supports_range = if is_object_storage_or_cdn {
             // 对象存储和CDN服务器通常支持Range请求，即使不明确返回Accept-Ranges头部
-            info!("Detected object storage/CDN server, assuming Range support (force-enabled resume)");
+            info!(
+                "Detected object storage/CDN server, assuming Range support (force-enabled resume)"
+            );
             true
         } else {
             explicit_range_support
@@ -494,7 +496,10 @@ impl FileDownloader {
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to calculate file hash: {}, entering resume judgment", e);
+                    warn!(
+                        "Failed to calculate file hash: {}, entering resume judgment",
+                        e
+                    );
                     // 继续下面的断点续传逻辑
                 }
             }
@@ -510,7 +515,9 @@ impl FileDownloader {
                 return Ok(None); // 重新下载
             } else {
                 // 没有hash验证，认为文件完整
-                info!("File size complete and no hash verification required, file considered complete");
+                info!(
+                    "File size complete and no hash verification required, file considered complete"
+                );
                 let _ = self.cleanup_metadata(download_path).await;
                 return Ok(None);
             }
@@ -742,7 +749,10 @@ impl FileDownloader {
     }
 
     /// 内部断点续传下载实现 ⭐
-    async fn download_with_resume_internal<F>(&self, params: ResumeDownloadParams<'_, F>) -> Result<()>
+    async fn download_with_resume_internal<F>(
+        &self,
+        params: ResumeDownloadParams<'_, F>,
+    ) -> Result<()>
     where
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
@@ -872,7 +882,10 @@ impl FileDownloader {
     }
 
     /// 通用的流式下载处理（支持断点续传）⭐
-    async fn download_stream_with_resume<F>(&self, params: StreamDownloadParams<'_, F>) -> Result<()>
+    async fn download_stream_with_resume<F>(
+        &self,
+        params: StreamDownloadParams<'_, F>,
+    ) -> Result<()>
     where
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
@@ -892,7 +905,8 @@ impl FileDownloader {
             };
             callback(DownloadProgress {
                 task_id: params.task_id.to_string(),
-                file_name: params.download_path
+                file_name: params
+                    .download_path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
@@ -911,9 +925,12 @@ impl FileDownloader {
         }
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| DuckError::custom(format!("Failed to download data: {e}")))?;
+            let chunk =
+                chunk.map_err(|e| DuckError::custom(format!("Failed to download data: {e}")))?;
 
-            params.file.write_all(&chunk)
+            params
+                .file
+                .write_all(&chunk)
                 .await
                 .map_err(|e| DuckError::custom(format!("Failed to write file: {e}")))?;
 
@@ -929,7 +946,8 @@ impl FileDownloader {
 
                 callback(DownloadProgress {
                     task_id: params.task_id.to_string(),
-                    file_name: params.download_path
+                    file_name: params
+                        .download_path
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
@@ -949,19 +967,21 @@ impl FileDownloader {
                 let bytes_since_last = downloaded - last_progress_bytes;
                 let time_since_last = now.duration_since(last_progress_time);
 
-                let should_show_progress = bytes_since_last >= self.config.progress_bytes_interval ||
-                    time_since_last >= progress_interval ||
-                    (params.total_size > 0 && downloaded >= params.total_size);
+                let should_show_progress = bytes_since_last >= self.config.progress_bytes_interval
+                    || time_since_last >= progress_interval
+                    || (params.total_size > 0 && downloaded >= params.total_size);
 
                 if should_show_progress {
                     if params.total_size > 0 {
-                        let percentage = (downloaded as f64 / params.total_size as f64 * 100.0) as u32;
-                        let status_icon =
-                            if params.is_resume && downloaded <= params.start_byte + 50 * 1024 * 1024 {
-                                "🔄"
-                            } else {
-                                "📥"
-                            };
+                        let percentage =
+                            (downloaded as f64 / params.total_size as f64 * 100.0) as u32;
+                        let status_icon = if params.is_resume
+                            && downloaded <= params.start_byte + 50 * 1024 * 1024
+                        {
+                            "🔄"
+                        } else {
+                            "📥"
+                        };
 
                         let speed_mbps = if time_since_last.as_secs_f64() > 0.0 {
                             (bytes_since_last as f64 / 1024.0 / 1024.0)
@@ -987,12 +1007,16 @@ impl FileDownloader {
 
                     if self.config.enable_metadata {
                         params.metadata.update_progress(downloaded);
-                        let should_save_metadata = bytes_since_last >= 500 * 1024 * 1024 ||
-                            time_since_last >= std::time::Duration::from_secs(300);
+                        let should_save_metadata = bytes_since_last >= 500 * 1024 * 1024
+                            || time_since_last >= std::time::Duration::from_secs(300);
 
                         if should_save_metadata {
                             let _ = self
-                                .save_metadata_with_logging(params.download_path, params.metadata, false)
+                                .save_metadata_with_logging(
+                                    params.download_path,
+                                    params.metadata,
+                                    false,
+                                )
                                 .await;
                         }
                     }
@@ -1000,11 +1024,17 @@ impl FileDownloader {
             }
         }
 
-        params.file.flush()
+        params
+            .file
+            .flush()
             .await
             .map_err(|e| DuckError::custom(format!("Failed to flush file buffer: {e}")))?;
 
-        let download_type = if params.is_resume { "Resume download" } else { "Download" };
+        let download_type = if params.is_resume {
+            "Resume download"
+        } else {
+            "Download"
+        };
         info!("{} completed", download_type);
         info!("   File path: {}", params.download_path.display());
         info!(
@@ -1026,7 +1056,10 @@ impl FileDownloader {
     /// 计算文件的SHA256哈希值
     pub async fn calculate_file_hash(file_path: &Path) -> Result<String> {
         if !file_path.exists() {
-            return Err(anyhow::anyhow!("File does not exist: {}", file_path.display()));
+            return Err(anyhow::anyhow!(
+                "File does not exist: {}",
+                file_path.display()
+            ));
         }
 
         let mut file = File::open(file_path)
@@ -1037,10 +1070,9 @@ impl FileDownloader {
         let mut buffer = vec![0u8; 8192]; // 8KB buffer
 
         loop {
-            let bytes_read = file
-                .read(&mut buffer)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to read file {}: {}", file_path.display(), e))?;
+            let bytes_read = file.read(&mut buffer).await.map_err(|e| {
+                anyhow::anyhow!("Failed to read file {}: {}", file_path.display(), e)
+            })?;
 
             if bytes_read == 0 {
                 break;
@@ -1050,7 +1082,7 @@ impl FileDownloader {
         }
 
         let hash = hasher.finalize();
-        Ok(format!("{hash:x}"))
+        Ok(hash.to_vec().iter().map(|b| format!("{b:02x}")).collect())
     }
 
     /// 验证文件完整性
@@ -1064,9 +1096,15 @@ impl FileDownloader {
         let matches = actual_hash.to_lowercase() == expected_hash.to_lowercase();
 
         if matches {
-            info!("File integrity verification passed: {}", file_path.display());
+            info!(
+                "File integrity verification passed: {}",
+                file_path.display()
+            );
         } else {
-            warn!("File integrity verification failed: {}", file_path.display());
+            warn!(
+                "File integrity verification failed: {}",
+                file_path.display()
+            );
             warn!("   Expected hash: {}", expected_hash);
             warn!("   Actual hash: {}", actual_hash);
         }

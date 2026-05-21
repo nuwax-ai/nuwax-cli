@@ -118,7 +118,10 @@ impl DockerServiceManager {
         if !self.work_dir.exists() {
             return Err(DockerServiceError::EnvironmentCheck(format!(
                 "{}",
-                t!("docker_service_manager.work_dir_not_exists", path = self.work_dir.display())
+                t!(
+                    "docker_service_manager.work_dir_not_exists",
+                    path = self.work_dir.display()
+                )
             )));
         }
 
@@ -129,7 +132,10 @@ impl DockerServiceManager {
         if !images_dir.exists() {
             return Err(DockerServiceError::EnvironmentCheck(format!(
                 "{}",
-                t!("docker_service_manager.images_dir_not_exists", path = images_dir.display())
+                t!(
+                    "docker_service_manager.images_dir_not_exists",
+                    path = images_dir.display()
+                )
             )));
         }
 
@@ -140,14 +146,20 @@ impl DockerServiceManager {
         if !compose_file.exists() {
             return Err(DockerServiceError::EnvironmentCheck(format!(
                 "{}",
-                t!("docker_service_manager.compose_file_not_exists", path = compose_file.display())
+                t!(
+                    "docker_service_manager.compose_file_not_exists",
+                    path = compose_file.display()
+                )
             )));
         }
 
         // 环境信息提示（新增）
         let runtime_env = self.docker_manager.get_runtime_environment();
         if runtime_env.needs_special_handling() {
-            info!("   Environment: {env} - special handling required", env = runtime_env.summary());
+            info!(
+                "   Environment: {env} - special handling required",
+                env = runtime_env.summary()
+            );
         } else {
             info!("   Environment: {env}", env = runtime_env.summary());
         }
@@ -184,7 +196,11 @@ impl DockerServiceManager {
         let result = self.image_loader.load_all_images().await?;
 
         if !result.is_all_successful() {
-            warn!("Some image loading failed: success {success}, failed {failed}", success = result.success_count(), failed = result.failure_count());
+            warn!(
+                "Some image loading failed: success {success}, failed {failed}",
+                success = result.success_count(),
+                failed = result.failure_count()
+            );
         }
 
         Ok(result)
@@ -202,7 +218,11 @@ impl DockerServiceManager {
             .await?;
 
         if !result.is_all_successful() {
-            warn!("Some tag setup failed: success {success}, failed {failed}", success = result.success_count(), failed = result.failure_count());
+            warn!(
+                "Some tag setup failed: success {success}, failed {failed}",
+                success = result.success_count(),
+                failed = result.failure_count()
+            );
         }
 
         Ok(result)
@@ -220,7 +240,11 @@ impl DockerServiceManager {
             .await?;
 
         if !result.is_all_successful() {
-            warn!("Some tag setup failed: success {success}, failed {failed}", success = result.success_count(), failed = result.failure_count());
+            warn!(
+                "Some tag setup failed: success {success}, failed {failed}",
+                success = result.success_count(),
+                failed = result.failure_count()
+            );
         }
 
         Ok(result)
@@ -279,7 +303,10 @@ impl DockerServiceManager {
                         self.print_service_status(&report).await;
                     }
                     Err(e) => {
-warn!("Wait for services failed or timed out: {error}", error = e.to_string());
+                        warn!(
+                            "Wait for services failed or timed out: {error}",
+                            error = e.to_string()
+                        );
 
                         // 即使超时也显示当前状态
                         if let Ok(report) = self.health_checker.health_check().await {
@@ -292,13 +319,17 @@ warn!("Wait for services failed or timed out: {error}", error = e.to_string());
             }
             Err(e) => {
                 error!("Docker Compose start command failed, checking container status...");
-error!("Error detail: {error}", error = format!("{e:?}"));
+                error!("Error detail: {error}", error = format!("{e:?}"));
 
                 // 基于 ducker 思路：即使 compose 失败，也要检查是否有部分容器成功启动
                 match self.health_checker.health_check().await {
                     Ok(report) => {
                         if report.get_running_count() > 0 {
-                            info!("🔍 {running}/{total} containers are running, entering health-check phase", running = report.get_running_count(), total = report.get_total_count());
+                            info!(
+                                "🔍 {running}/{total} containers are running, entering health-check phase",
+                                running = report.get_running_count(),
+                                total = report.get_total_count()
+                            );
 
                             // 有部分容器成功，进入健康检查阶段
                             let check_interval =
@@ -325,7 +356,9 @@ error!("Error detail: {error}", error = format!("{e:?}"));
                                     return Ok(()); // 部分成功，返回 Ok
                                 }
                                 Err(_health_error) => {
-                                    warn!("⏰ Health check timed out, but some services are still running");
+                                    warn!(
+                                        "⏰ Health check timed out, but some services are still running"
+                                    );
 
                                     // // 检查MySQL容器状态，如果失败尝试权限修复
                                     // if (self.check_and_fix_mysql_if_failed(&report).await).is_err()
@@ -343,7 +376,9 @@ error!("Error detail: {error}", error = format!("{e:?}"));
                                     // }
 
                                     self.print_service_status_with_failures(&report).await;
-                                    info!("You can inspect logs: nuwax-cli docker-service logs [service]");
+                                    info!(
+                                        "You can inspect logs: nuwax-cli docker-service logs [service]"
+                                    );
                                     return Ok(()); // 部分成功，返回 Ok
                                 }
                             }
@@ -355,7 +390,7 @@ error!("Error detail: {error}", error = format!("{e:?}"));
                     }
                     Err(e) => {
                         error!("❌ Failed to get container status details");
-error!("Error detail: {error}", error = format!("{e:?}"));
+                        error!("Error detail: {error}", error = format!("{e:?}"));
                     }
                 }
 
@@ -377,7 +412,7 @@ error!("Error detail: {error}", error = format!("{e:?}"));
                 Ok(())
             }
             Err(e) => {
-error!("Failed to stop services: {error}", error = e.to_string());
+                error!("Failed to stop services: {error}", error = e.to_string());
                 Err(DockerServiceError::ServiceManagement(e.to_string()))
             }
         }
@@ -405,7 +440,10 @@ error!("Failed to stop services: {error}", error = e.to_string());
                         self.print_service_status(&report).await;
                     }
                     Err(e) => {
-                        warn!("Wait for services after restart failed or timed out: {error}", error = e.to_string());
+                        warn!(
+                            "Wait for services after restart failed or timed out: {error}",
+                            error = e.to_string()
+                        );
                         if let Ok(report) = self.health_checker.health_check().await {
                             self.print_service_status_with_failures(&report).await;
                         }
@@ -430,11 +468,18 @@ error!("Failed to stop services: {error}", error = e.to_string());
 
         match result {
             Ok(_) => {
-                info!("Container {name} restarted successfully", name = container_name);
+                info!(
+                    "Container {name} restarted successfully",
+                    name = container_name
+                );
                 Ok(())
             }
             Err(e) => {
-                error!("Container {name} restart failed: {error}", name = container_name, error = e.to_string());
+                error!(
+                    "Container {name} restart failed: {error}",
+                    name = container_name,
+                    error = e.to_string()
+                );
                 Err(DockerServiceError::ServiceManagement(e.to_string()))
             }
         }
@@ -453,8 +498,15 @@ error!("Failed to stop services: {error}", error = e.to_string());
     /// 打印服务状态信息
     async fn print_service_status(&self, report: &HealthReport) {
         info!("=== Service Status Overview ===");
-        info!("Overall status: {status}", status = report.finalize().display_name());
-        info!("Running containers: {running}/{total}", running = report.get_running_count(), total = report.get_total_count());
+        info!(
+            "Overall status: {status}",
+            status = report.finalize().display_name()
+        );
+        info!(
+            "Running containers: {running}/{total}",
+            running = report.get_running_count(),
+            total = report.get_total_count()
+        );
 
         if !report.containers.is_empty() {
             info!("Container details:");
@@ -479,8 +531,14 @@ error!("Failed to stop services: {error}", error = e.to_string());
         if report.finalize().is_healthy() {
             info!("=== Service Access Info ===");
             use client_core::constants::docker::ports;
-            info!("• Frontend: http://localhost:{port}", port = ports::DEFAULT_FRONTEND_PORT);
-            info!("• Backend API: http://localhost:{port}", port = ports::DEFAULT_BACKEND_PORT);
+            info!(
+                "• Frontend: http://localhost:{port}",
+                port = ports::DEFAULT_FRONTEND_PORT
+            );
+            info!(
+                "• Backend API: http://localhost:{port}",
+                port = ports::DEFAULT_BACKEND_PORT
+            );
             info!("• Service management complete. Ready to use.");
         }
     }
@@ -488,8 +546,15 @@ error!("Failed to stop services: {error}", error = e.to_string());
     /// 打印包含失败信息的服务状态
     async fn print_service_status_with_failures(&self, report: &HealthReport) {
         info!("=== Service Status Details ===");
-        info!("Overall status: {status}", status = report.finalize().display_name());
-        info!("Health summary: {running}/{total} containers healthy", running = report.get_running_count(), total = report.get_total_count());
+        info!(
+            "Overall status: {status}",
+            status = report.finalize().display_name()
+        );
+        info!(
+            "Health summary: {running}/{total} containers healthy",
+            running = report.get_running_count(),
+            total = report.get_total_count()
+        );
 
         // 分类显示容器状态
         let running_containers: Vec<_> = report
@@ -511,10 +576,11 @@ error!("Failed to stop services: {error}", error = e.to_string());
         if !running_containers.is_empty() {
             info!("✅ Running containers:");
             for container in running_containers {
-                info!("  • {name} ({image})",
-                        name = container.name,
-                        image = container.image
-                    );
+                info!(
+                    "  • {name} ({image})",
+                    name = container.name,
+                    image = container.image
+                );
             }
         }
 
@@ -560,10 +626,16 @@ error!("Failed to stop services: {error}", error = e.to_string());
                 .any(|c| c.status.is_healthy() && c.name.contains("backend"));
 
             if has_frontend {
-                info!("• Frontend: http://localhost:{port}", port = ports::DEFAULT_FRONTEND_PORT);
+                info!(
+                    "• Frontend: http://localhost:{port}",
+                    port = ports::DEFAULT_FRONTEND_PORT
+                );
             }
             if has_backend {
-                info!("• Backend API: http://localhost:{port}", port = ports::DEFAULT_BACKEND_PORT);
+                info!(
+                    "• Backend API: http://localhost:{port}",
+                    port = ports::DEFAULT_BACKEND_PORT
+                );
             }
             let failed_count = report
                 .containers
@@ -596,13 +668,20 @@ error!("Failed to stop services: {error}", error = e.to_string());
             return;
         }
 
-        error!("❌ Failed containers: {failed}/{total}", failed = failed_containers.len(), total = report.get_total_count());
+        error!(
+            "❌ Failed containers: {failed}/{total}",
+            failed = failed_containers.len(),
+            total = report.get_total_count()
+        );
 
         for container in failed_containers {
             error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             error!("Container: {name}", name = container.name);
             error!("Image: {image}", image = container.image);
-            error!("Current status: {status}", status = container.status.display_name());
+            error!(
+                "Current status: {status}",
+                status = container.status.display_name()
+            );
 
             // 提供针对性的故障排除建议
             self.print_container_troubleshooting(&container.name, &container.image)
@@ -617,7 +696,9 @@ error!("Failed to stop services: {error}", error = e.to_string());
     async fn print_container_troubleshooting(&self, container_name: &str, image_name: &str) {
         if container_name.contains("video-analysis-worker") {
             warn!("💡 Analysis:");
-            warn!("  - This container requires NVIDIA GPU support, which may be unavailable on this system");
+            warn!(
+                "  - This container requires NVIDIA GPU support, which may be unavailable on this system"
+            );
             warn!("  - Architecture mismatch detected (amd64 vs arm64)");
             warn!("💡 Suggested fix:");
             warn!("  - On Mac ARM64, disable this service or use an ARM64 image");
@@ -631,7 +712,9 @@ error!("Failed to stop services: {error}", error = e.to_string());
             warn!("  - Or add --platform linux/amd64 when running container");
         } else if container_name.contains("mysql") || container_name.contains("redis") {
             warn!("💡 Analysis:");
-            warn!("  - Database startup failed, likely due to port conflict or data directory permissions");
+            warn!(
+                "  - Database startup failed, likely due to port conflict or data directory permissions"
+            );
             warn!("💡 Suggested fix:");
             warn!("  - Check whether port 3306(MySQL) or 6379(Redis) is occupied");
             warn!("  - Check directory permissions: ./data/mysql or ./data/redis");
@@ -641,10 +724,16 @@ error!("Failed to stop services: {error}", error = e.to_string());
             warn!("💡 Suggested fix:");
             warn!("  - Check permissions for scripts like docker-entrypoint.sh");
             warn!("  - Run: chmod +x config/docker-entrypoint.sh");
-            warn!("  - View logs: docker-compose logs {name}", name = container_name);
+            warn!(
+                "  - View logs: docker-compose logs {name}",
+                name = container_name
+            );
         } else {
             warn!("💡 Suggestion:");
-            warn!("  - View logs: docker-compose logs {name}", name = container_name);
+            warn!(
+                "  - View logs: docker-compose logs {name}",
+                name = container_name
+            );
             warn!("  - Verify images were pulled successfully");
             warn!("  - Verify environment variables");
         }
@@ -706,13 +795,13 @@ error!("Failed to stop services: {error}", error = e.to_string());
 
             if !key_lines.is_empty() {
                 for line in key_lines {
-error!("     {line}", line = line.trim());
+                    error!("     {line}", line = line.trim());
                 }
             } else {
                 // 显示前几行作为备选
                 for line in error_message.lines().take(3) {
                     if !line.trim().is_empty() {
-error!("     {line}", line = line.trim());
+                        error!("     {line}", line = line.trim());
                     }
                 }
             }
@@ -745,18 +834,26 @@ error!("     {line}", line = line.trim());
                     // 对于Docker容器启动，我们采用更宽松的策略
                     // Docker会在实际绑定时处理端口冲突，这里只是警告
                     warn!("💡 Note: Docker may handle port binding automatically");
-                    warn!("   - If occupied by related service, container may reuse existing binding");
+                    warn!(
+                        "   - If occupied by related service, container may reuse existing binding"
+                    );
                     warn!("   - If occupied by unrelated service, startup may fail");
                     warn!("   - Check startup result and resolve conflicts manually if needed");
                 } else {
                     info!("✅ Port check passed, no conflict found");
                     if report.total_checked > 0 {
-                        info!("Checked {total} port mappings in total", total = report.total_checked);
+                        info!(
+                            "Checked {total} port mappings in total",
+                            total = report.total_checked
+                        );
                     }
                 }
             }
             Err(e) => {
-warn!("Port check failed: {error}, continuing startup", error = e.to_string());
+                warn!(
+                    "Port check failed: {error}, continuing startup",
+                    error = e.to_string()
+                );
                 // 端口检查失败不应该阻止服务启动，只是警告
             }
         }

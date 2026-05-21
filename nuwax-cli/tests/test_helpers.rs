@@ -98,6 +98,7 @@ pub const ENHANCED_MANIFEST_JSON: &str = r#"
 }"#;
 
 /// 最小化的增强服务清单JSON字符串
+#[allow(dead_code)]
 pub const MINIMAL_MANIFEST_JSON: &str = r#"
 {
     "version": "1.0.0",
@@ -114,6 +115,7 @@ pub const MINIMAL_MANIFEST_JSON: &str = r#"
 }"#;
 
 /// 用于解析测试的增强服务清单JSON字符串
+#[allow(dead_code)]
 pub const PARSING_TEST_JSON: &str = r#"
 {
     "version": "0.0.13",

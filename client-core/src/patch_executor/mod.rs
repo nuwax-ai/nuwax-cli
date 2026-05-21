@@ -129,7 +129,10 @@ impl PatchExecutor {
             return Err(PatchExecutorError::custom("Patch operations are empty"));
         }
 
-        debug!("Preconditions validated, total {} operations", total_operations);
+        debug!(
+            "Preconditions validated, total {} operations",
+            total_operations
+        );
         Ok(())
     }
 

@@ -78,13 +78,19 @@ impl DirectoryPermissionManager {
 
             // 设置为 644
             let metadata = fs::metadata(&mysql_cnf).map_err(|e| {
-                DockerServiceError::FileSystem(format!("Failed to read config file metadata: {}", e))
+                DockerServiceError::FileSystem(format!(
+                    "Failed to read config file metadata: {}",
+                    e
+                ))
             })?;
             let mut permissions = metadata.permissions();
             permissions.set_mode(0o644);
 
             fs::set_permissions(&mysql_cnf, permissions).map_err(|e| {
-                DockerServiceError::FileSystem(format!("Failed to set config file permissions: {}", e))
+                DockerServiceError::FileSystem(format!(
+                    "Failed to set config file permissions: {}",
+                    e
+                ))
             })?;
 
             info!("🔒 MySQL config file permission: 644 (safe)");

@@ -39,7 +39,9 @@ impl DockerManager {
         // 如果compose文件不存在，记录警告
         if !compose_file.exists() {
             warn!("docker-compose file does not exist");
-            info!("Compose configuration not loaded; this may be the first deployment and docker directory is missing");
+            info!(
+                "Compose configuration not loaded; this may be the first deployment and docker directory is missing"
+            );
         }
 
         Ok(Self {
@@ -118,17 +120,18 @@ impl DockerManager {
 
         if let Some(service_opt) = services.0.get(service_name) {
             if let Some(service) = service_opt
-                && let Some(restart_policy) = &service.restart {
-                    let policy = restart_policy.to_string();
-                    // restart: "no" 表示不自动重启，通常是一次性任务
-                    if policy == "no" || policy == "false" {
-                        return Ok(true);
-                    }
-                    // restart: "always" 或 "unless-stopped" 表示应该一直运行
-                    if policy == "always" || policy == "unless-stopped" || policy == "on-failure" {
-                        return Ok(false);
-                    }
+                && let Some(restart_policy) = &service.restart
+            {
+                let policy = restart_policy.to_string();
+                // restart: "no" 表示不自动重启，通常是一次性任务
+                if policy == "no" || policy == "false" {
+                    return Ok(true);
                 }
+                // restart: "always" 或 "unless-stopped" 表示应该一直运行
+                if policy == "always" || policy == "unless-stopped" || policy == "on-failure" {
+                    return Ok(false);
+                }
+            }
 
             Ok(false)
         } else {

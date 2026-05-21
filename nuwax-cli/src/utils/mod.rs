@@ -3,6 +3,7 @@ use client_core::{
     constants::docker::get_docker_work_dir, upgrade_strategy::UpgradeStrategy, utils::archive,
 };
 use std::io::{Read, Write};
+use std::path::{Component, Path};
 use std::time::Instant;
 use tracing::{error, info};
 use zip::read::ZipFile;
@@ -66,6 +67,70 @@ fn should_skip_file(file_name: &str) -> bool {
 
     // 其他以.开头的文件，谨慎起见也保留（除非明确知道要跳过）
     false
+}
+
+fn contains_unsafe_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
+}
+
+pub fn validate_archive_paths(archive_path: &Path) -> Result<()> {
+    let format = archive::detect_format_by_magic(archive_path)?;
+
+    match format {
+        client_core::utils::archive::ArchiveFormat::Zip => {
+            let file = std::fs::File::open(archive_path)?;
+            let mut archive = zip::ZipArchive::new(file)?;
+
+            for i in 0..archive.len() {
+                let file = archive.by_index(i)?;
+                let raw_name = file.name().to_string();
+                let Some(enclosed_name) = file.enclosed_name() else {
+                    return Err(anyhow::anyhow!(
+                        "Unsafe archive path detected: {}",
+                        raw_name
+                    ));
+                };
+
+                if contains_unsafe_component(&enclosed_name) {
+                    return Err(anyhow::anyhow!(
+                        "Unsafe archive path detected: {}",
+                        raw_name
+                    ));
+                }
+            }
+        }
+        client_core::utils::archive::ArchiveFormat::TarGz => {
+            let tar_gz = std::fs::File::open(archive_path)?;
+            let decoder = flate2::read::GzDecoder::new(tar_gz);
+            let mut archive = tar::Archive::new(decoder);
+
+            for entry in archive.entries()? {
+                let entry = entry?;
+                let entry_type = entry.header().entry_type();
+                if entry_type.is_symlink() || entry_type.is_hard_link() {
+                    return Err(anyhow::anyhow!(
+                        "Archive links are not allowed: {}",
+                        entry.path()?.display()
+                    ));
+                }
+
+                let path = entry.path()?;
+                if contains_unsafe_component(&path) {
+                    return Err(anyhow::anyhow!(
+                        "Unsafe archive path detected: {}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// # Nuwax Cli  日志系统使用说明
@@ -174,23 +239,36 @@ fn force_extract_file(
 
     // 确保父目录存在
     if let Some(parent) = target_path.parent()
-        && !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
 
     // 创建新文件/目录
     if entry.is_dir() {
         std::fs::create_dir_all(target_path).map_err(|e| {
-            error!("❌ Failed to create directory: {} - error: {}", target_path.display(), e);
+            error!(
+                "❌ Failed to create directory: {} - error: {}",
+                target_path.display(),
+                e
+            );
             e
         })?;
     } else {
         let mut outfile = std::fs::File::create(target_path).map_err(|e| {
-            error!("❌ Failed to create file: {} - error: {}", target_path.display(), e);
+            error!(
+                "❌ Failed to create file: {} - error: {}",
+                target_path.display(),
+                e
+            );
             e
         })?;
         std::io::copy(entry, &mut outfile).map_err(|e| {
-            error!("❌ Failed to write file: {} - error: {}", target_path.display(), e);
+            error!(
+                "❌ Failed to write file: {} - error: {}",
+                target_path.display(),
+                e
+            );
             e
         })?;
     }
@@ -213,9 +291,10 @@ fn handle_extraction(
 /// 确保父目录存在
 fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
     if let Some(parent) = path.parent()
-        && !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     Ok(())
 }
 
@@ -276,7 +355,10 @@ pub async fn extract_docker_service(
 ) -> Result<()> {
     let extract_start = Instant::now();
 
-    info!("📦 Starting Docker service package extraction: {}", archive_path.display());
+    info!(
+        "📦 Starting Docker service package extraction: {}",
+        archive_path.display()
+    );
 
     // 检查文件是否存在
     if !archive_path.exists() {
@@ -289,6 +371,8 @@ pub async fn extract_docker_service(
     // 检测文件格式
     let format = archive::detect_format_by_magic(archive_path)?;
     info!("✅ Detected archive format: {:?}", format);
+
+    validate_archive_paths(archive_path)?;
 
     // 根据格式选择解压方法
     match format {
@@ -311,7 +395,10 @@ async fn extract_zip_archive(
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
-    info!("✅ ZIP opened successfully, contains {} files", archive.len());
+    info!(
+        "✅ ZIP opened successfully, contains {} files",
+        archive.len()
+    );
 
     match upgrade_strategy {
         UpgradeStrategy::FullUpgrade { .. } => {
@@ -335,6 +422,9 @@ async fn extract_zip_archive(
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
                 let file_name = file.name().to_string();
+                let enclosed_name = file.enclosed_name().ok_or_else(|| {
+                    anyhow::anyhow!("Unsafe archive path detected: {}", file_name)
+                })?;
 
                 // 跳过系统文件和临时文件
                 if should_skip_file(&file_name) {
@@ -343,11 +433,13 @@ async fn extract_zip_archive(
                 }
 
                 // 处理路径：移除可能的顶层docker目录前缀
-                let clean_path = if file_name.starts_with("docker/") {
+                let clean_path = if enclosed_name.starts_with("docker") {
                     // 如果ZIP内已有docker/前缀，移除它
-                    file_name.strip_prefix("docker/").unwrap_or(&file_name)
+                    enclosed_name
+                        .strip_prefix("docker")
+                        .unwrap_or(&enclosed_name)
                 } else {
-                    &file_name
+                    enclosed_name.as_path()
                 };
 
                 let target_path = output_dir.join(clean_path);
@@ -363,7 +455,10 @@ async fn extract_zip_archive(
                         );
                         continue;
                     } else {
-                        info!("📁 Creating new upload directory structure: {}", target_path.display());
+                        info!(
+                            "📁 Creating new upload directory structure: {}",
+                            target_path.display()
+                        );
                     }
                 }
 
@@ -416,7 +511,10 @@ async fn extract_zip_archive(
             // 清理即将被替换或删除的文件/目录（跳过upload目录）
             for file_or_dir in upgrade_change_file_or_dir {
                 if is_upload_directory_path(&file_or_dir) {
-                    info!("🛡️ Keeping upload directory, skipping deletion: {}", file_or_dir.display());
+                    info!(
+                        "🛡️ Keeping upload directory, skipping deletion: {}",
+                        file_or_dir.display()
+                    );
                     continue;
                 }
 
@@ -425,7 +523,10 @@ async fn extract_zip_archive(
                 } else if file_or_dir.is_dir() {
                     std::fs::remove_dir_all(file_or_dir)?;
                 } else {
-                    info!("File or directory does not exist, skipping: {}", file_or_dir.display());
+                    info!(
+                        "File or directory does not exist, skipping: {}",
+                        file_or_dir.display()
+                    );
                 }
             }
 
@@ -447,18 +548,16 @@ async fn extract_zip_archive(
                     let zip_path = format!("docker/{}", file.trim_start_matches('/'));
                     info!("🔍 Locating file: {} -> {}", file, zip_path);
 
-                    let mut entry = archive
-                        .by_name(&zip_path)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "{}",
-                                t!(
-                                    "utils.file_not_found_in_archive",
-                                    path = zip_path,
-                                    error = e.to_string()
-                                )
+                    let mut entry = archive.by_name(&zip_path).map_err(|e| {
+                        anyhow::anyhow!(
+                            "{}",
+                            t!(
+                                "utils.file_not_found_in_archive",
+                                path = zip_path,
+                                error = e.to_string()
                             )
-                        })?;
+                        )
+                    })?;
 
                     let dst = work_dir.join(&file);
 
@@ -466,10 +565,16 @@ async fn extract_zip_archive(
                     if is_upload_directory_path(&dst) {
                         // 如果保护目录已存在，跳过解压以保护用户数据
                         if dst.exists() {
-                            info!("🛡️ Keeping existing directory, skipping replacement: {}", dst.display());
+                            info!(
+                                "🛡️ Keeping existing directory, skipping replacement: {}",
+                                dst.display()
+                            );
                             continue;
                         } else {
-                            info!("📁 Creating new protected directory structure: {}", dst.display());
+                            info!(
+                                "📁 Creating new protected directory structure: {}",
+                                dst.display()
+                            );
                         }
                     }
 
@@ -488,7 +593,10 @@ async fn extract_zip_archive(
                     // 清理现有目录（跳过保护目录）
                     let target_dir = work_dir.join(&dir);
                     if is_upload_directory_path(&target_dir) && target_dir.exists() {
-                        info!("🛡️ Keeping existing directory, skipping directory replacement: {}", target_dir.display());
+                        info!(
+                            "🛡️ Keeping existing directory, skipping directory replacement: {}",
+                            target_dir.display()
+                        );
                         continue;
                     }
 
@@ -530,7 +638,10 @@ async fn extract_zip_archive(
                 for file in delete.files {
                     let path = work_dir.join(file);
                     if is_upload_directory_path(&path) {
-                        info!("🛡️ Keeping upload directory, skipping file deletion: {}", path.display());
+                        info!(
+                            "🛡️ Keeping upload directory, skipping file deletion: {}",
+                            path.display()
+                        );
                         continue;
                     }
                     info!("🗑️ Removing file: {}", path.display());
@@ -546,7 +657,10 @@ async fn extract_zip_archive(
                 for dir in delete.directories {
                     let path = work_dir.join(dir);
                     if is_upload_directory_path(&path) {
-                        info!("🛡️ Keeping upload directory, skipping directory deletion: {}", path.display());
+                        info!(
+                            "🛡️ Keeping upload directory, skipping directory deletion: {}",
+                            path.display()
+                        );
                         continue;
                     }
                     info!("🗑️ Removing directory: {}", path.display());
@@ -582,7 +696,10 @@ async fn extract_zip_archive(
         }
         UpgradeStrategy::NoUpgrade { .. } => {
             // 无需升级,不应该走到这里的解压逻辑
-            return Err(anyhow::anyhow!("{}", t!("utils.no_upgrade_extract_unsupported")));
+            return Err(anyhow::anyhow!(
+                "{}",
+                t!("utils.no_upgrade_extract_unsupported")
+            ));
         }
     }
 
@@ -636,6 +753,19 @@ fn extract_tar_gz_blocking(
             for entry in archive.entries()? {
                 let mut entry: tar::Entry<flate2::read::GzDecoder<std::fs::File>> = entry?;
                 let path = entry.path()?;
+                let entry_type = entry.header().entry_type();
+                if entry_type.is_symlink() || entry_type.is_hard_link() {
+                    return Err(anyhow::anyhow!(
+                        "Archive links are not allowed: {}",
+                        path.display()
+                    ));
+                }
+                if contains_unsafe_component(&path) {
+                    return Err(anyhow::anyhow!(
+                        "Unsafe archive path detected: {}",
+                        path.display()
+                    ));
+                }
 
                 // 跳过 __MACOSX 等系统文件
                 if should_skip_tar_entry(&path) {
@@ -648,15 +778,19 @@ fn extract_tar_gz_blocking(
 
                 // 保护 upload 目录
                 if is_upload_directory_path(&target_path) && target_path.exists() {
-                    info!("🛡️ Keeping existing directory, skipping: {}", target_path.display());
+                    info!(
+                        "🛡️ Keeping existing directory, skipping: {}",
+                        target_path.display()
+                    );
                     continue;
                 }
 
                 // 确保父目录存在
                 if let Some(parent) = target_path.parent()
-                    && !parent.exists() {
-                        std::fs::create_dir_all(parent)?;
-                    }
+                    && !parent.exists()
+                {
+                    std::fs::create_dir_all(parent)?;
+                }
 
                 // 解压文件
                 entry.unpack(&target_path)?;
@@ -687,7 +821,10 @@ fn extract_tar_gz_blocking(
             return Err(anyhow::anyhow!("{}", t!("utils.tar_gz_patch_unsupported")));
         }
         UpgradeStrategy::NoUpgrade { .. } => {
-            return Err(anyhow::anyhow!("{}", t!("utils.no_upgrade_extract_unsupported")));
+            return Err(anyhow::anyhow!(
+                "{}",
+                t!("utils.no_upgrade_extract_unsupported")
+            ));
         }
     }
 

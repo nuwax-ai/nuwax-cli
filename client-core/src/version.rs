@@ -60,8 +60,8 @@ impl FromStr for Version {
         if s.is_empty() {
             return Err(anyhow::anyhow!("Version string cannot be empty"));
         }
-        let version =
-            Version::parse_version(s).map_err(|e| anyhow::anyhow!("Failed to parse version: {}", e))?;
+        let version = Version::parse_version(s)
+            .map_err(|e| anyhow::anyhow!("Failed to parse version: {}", e))?;
         Ok(version)
     }
 }

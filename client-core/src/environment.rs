@@ -11,8 +11,7 @@
 /// - 设置 NUWAX_CLI_ENV=testing 或 NUWAX_CLI_ENV=test → 测试环境
 ///
 /// 环境类型枚举
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Environment {
     /// 生产环境
     #[default]
@@ -78,7 +77,6 @@ impl Environment {
         }
     }
 }
-
 
 impl std::fmt::Display for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

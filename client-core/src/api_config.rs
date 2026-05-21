@@ -55,8 +55,7 @@ impl Default for ApiConfig {
                 client_self_upgrade_history: api::endpoints::CLIENT_SELF_UPGRADE_HISTORY
                     .to_string(),
                 docker_version_oss_prod: api::endpoints::DOCKER_VERSION_OSS_PROD.to_string(),
-                docker_version_oss_beta: api::endpoints::DOCKER_VERSION_OSS_BETA
-                    .to_string(),
+                docker_version_oss_beta: api::endpoints::DOCKER_VERSION_OSS_BETA.to_string(),
                 docker_upgrade_version_latest: api::endpoints::DOCKER_UPGRADE_VERSION_LATEST
                     .to_string(),
                 service_upgrade_history: api::endpoints::SERVICE_UPGRADE_HISTORY.to_string(),

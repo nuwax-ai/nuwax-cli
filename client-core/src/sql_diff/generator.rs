@@ -16,8 +16,14 @@ pub fn generate_schema_diff(
     match from_sql {
         None => {
             // 初始版本，返回完整的创建脚本
-            info!("Generating complete database schema for initial version {}", to_version);
-            let description = format!("Complete database schema for initial version {}", to_version);
+            info!(
+                "Generating complete database schema for initial version {}",
+                to_version
+            );
+            let description = format!(
+                "Complete database schema for initial version {}",
+                to_version
+            );
             Ok((to_sql.to_string(), description))
         }
         Some(from_content) => {
@@ -111,7 +117,10 @@ pub async fn generate_live_schema_diff(
     to_sql: &str,
     to_version: &str,
 ) -> Result<super::types::SchemaDiffResult, DuckError> {
-    info!("Starting to generate online schema to {} SQL diff", to_version);
+    info!(
+        "Starting to generate online schema to {} SQL diff",
+        to_version
+    );
 
     // 解析目标模板
     let to_tables = parse_sql_tables(to_sql)?;
@@ -131,7 +140,9 @@ pub async fn generate_live_schema_diff(
     let description = if !stats.has_changes() {
         format!("Online schema to {to_version}: no actual schema differences")
     } else if !has_executable_sql && has_warnings {
-        format!("Online schema to {to_version}: only includes delete operation warnings, no executable SQL")
+        format!(
+            "Online schema to {to_version}: only includes delete operation warnings, no executable SQL"
+        )
     } else {
         let executable_lines = diff_sql
             .lines()

@@ -286,7 +286,7 @@ init_cmd:
   complete: "🎉 Initialization complete!"
   next_steps: "📝 Next steps:"
   step1_upgrade: "   1️⃣  Run 'nuwax-cli upgrade' to download Docker service package"
-  step1_upgrade_force: "       - Or run 'nuwax-cli upgrade --full --force' to force full download"
+  step1_upgrade_force: "       - Or run 'nuwax-cli upgrade --force' to force full download"
   step2_deploy: "   2️⃣  Run 'nuwax-cli docker-service deploy' to deploy Docker services"
   step3_start: "   3️⃣  Run 'nuwax-cli docker-service start' to start Docker services"
   shortcut_title: "🚀 Shortcut - Auto upgrade deploy:"

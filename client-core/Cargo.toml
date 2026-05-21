@@ -1,6 +1,6 @@
 [package]
 name = "client-core"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "Duck Client 核心库"
 authors = ["Duck Team"]
@@ -58,8 +58,8 @@ ducker = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
 zip-extract = { workspace = true }
-fs_extra = "1.3"                   # 扩展文件操作功能
-remove_dir_all = "1"             # 跨平台目录删除
+fs_extra = { workspace = true }                   # 扩展文件操作功能
+remove_dir_all = { workspace = true }             # 跨平台目录删除
 
 # 压缩
 zip = { workspace = true }
@@ -73,7 +73,7 @@ infer = { workspace = true }
 sha2 = { workspace = true }
 
 # Base64 编码/解码
-base64 = "0.22"
+base64 = { workspace = true }
 
 # OSS 依赖
 # aliyun-oss-rust-sdk = { version = "0.2.1", features = ["blocking"] }
@@ -83,7 +83,7 @@ url = { workspace = true }
 indicatif = { workspace = true, optional = true }
 
 # 系统信息
-num_cpus = "1.16"
+num_cpus = { workspace = true }
 
 # SQL解析 依赖的库
 sqlparser = { workspace = true }
@@ -95,7 +95,7 @@ derive_builder = { workspace = true }
 
 mysql_async = { workspace = true, features = ["minimal"] }
 dotenvy =  {workspace = true}
-shellexpand = "3.1.0"
+shellexpand = { workspace = true }
 
 
 docker-compose-types = {workspace = true}
@@ -103,8 +103,8 @@ docker-compose-types = {workspace = true}
 bollard = {workspace = true}
 
 # 缓存库
-quick_cache = "0.6"
-once_cell = "1.19"
+quick_cache = { workspace = true }
+once_cell = { workspace = true }
 
 # 国际化支持
 rust-i18n = { workspace = true }
