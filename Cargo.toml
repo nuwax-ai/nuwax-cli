@@ -5,8 +5,8 @@ members = ["client-core", "nuwax-cli"]
 
 [workspace.dependencies]
 
-# 集成的 ducker Docker TUI (锁定 v0.6.5 以兼容 bollard 0.20 和 ratatui 0.30)
-ducker = { version = "0.6.5"}
+# 集成的 ducker Docker TUI (锁定 v0.5.5 以兼容 bollard 0.19.4)
+ducker = { version = "0.5.5"}
 
 # 异步运行时
 tokio = { version = "1.52", features = ["macros", "net", "rt", "rt-multi-thread"] }
@@ -73,7 +73,7 @@ derive_builder = "0.20"
 # HTTP客户端
 reqwest = { version = "0.13", features = [
     "json",
-    "rustls",
+    "native-tls",
 ], default-features = false }
 
 http = "1.3"
@@ -128,8 +128,8 @@ url = "2.5"
 winnow = "1.0"
 
 
-# Docker API 客户端 (与 ducker v0.6.5 兼容, 锁定 bollard 0.20.1, 0.20.2 破坏了 VolumeScopeEnum 可见性)
-bollard = "=0.20.1"
+# Docker API 客户端 (与 ducker v0.5.5 兼容)
+bollard = "0.19.4"
 
 # MySQL Async 客户端,用于连接mysql,执行差异sql,升级库表结构
 mysql_async = "0.36.2"
