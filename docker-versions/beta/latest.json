@@ -1,10 +1,10 @@
 {
-  "version": "0.0.78",
+  "version": "0.0.79",
   "release_notes": "测试版本beta",
   "release_date": "2026-05-10T07:51:53Z",
   "packages": {
     "full": {
-      "url": "https://s3.nuwax.com:9443/nuwax-packages/docker/20260513161117/docker-x86_64.zip",
+      "url": "https://s3.nuwax.com:9443/nuwax-packages/docker/20260522/docker-x86_64.zip",
       "hash": "external",
       "signature": "",
       "size": 0
@@ -13,11 +13,11 @@
   "platforms": {
     "aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNsaSBzZWNyZXQga2V5CkNMSS1XSU5ET1dTLVg2NC12MS4xLjA=",
-      "url": "https://s3.nuwax.com:9443/nuwax-packages/docker/20260513161117/docker-aarch64.zip"
+      "url": "https://s3.nuwax.com:9443/nuwax-packages/docker/20260522/docker-aarch64.zip"
     },
     "x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNsaSBzZWNyZXQga2V5CkNMSS1MSU5VWC1YNjQtdjEuMS4w",
-      "url": "https://s3.nuwax.com:9443/nuwax-packages/docker/20260513161117/docker-x86_64.zip"
+      "url": "https://s3.nuwax.com:9443/nuwax-packages/docker/20260522/docker-x86_64.zip"
     }
   },
   "patch": null
