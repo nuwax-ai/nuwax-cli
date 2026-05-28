@@ -1,6 +1,6 @@
 [package]
 name = "nuwax-cli"
-version = "1.0.122"
+version = "1.0.123"
 edition = "2024"
 description = "Docker service management and upgrade CLI"
 authors = ["soddygo"]
@@ -26,7 +26,7 @@ path = "src/main.rs"
 
 [dependencies]
 # 核心库
-client-core = { path = "../client-core", version = "0.1.7", features = ["indicatif"] }
+client-core = { path = "../client-core", version = "0.1.8", features = ["indicatif"] }
 
 # 命令行参数解析
 clap = { workspace = true, features = ["derive"] }
@@ -73,6 +73,9 @@ bollard = { workspace = true }
 
 # HTTP 客户端
 reqwest = { workspace = true }
+
+# TLS 加密提供者 - 使用 ring 替代系统 OpenSSL
+rustls = { workspace = true }
 
 # 流处理
 tokio-stream = { workspace = true }

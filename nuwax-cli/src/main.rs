@@ -20,6 +20,12 @@ fn detect_and_set_language() {
 
 #[tokio::main]
 async fn main() {
+    // Initialize rustls with ring crypto provider (replaces system OpenSSL dependency)
+    // This must be done before any TLS/HTTPS connections are made
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls ring crypto provider");
+
     // Set locale before parsing CLI args so clap help/metadata is also in English.
     detect_and_set_language();
 

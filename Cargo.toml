@@ -73,8 +73,11 @@ derive_builder = "0.20"
 # HTTP客户端
 reqwest = { version = "0.13", features = [
     "json",
-    "native-tls",
+    "rustls-no-provider",
 ], default-features = false }
+
+# TLS 加密提供者 - 使用 ring 替代 aws-lc-rs，避免 Ubuntu 20.04 GCC 编译器兼容性问题
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 http = "1.3"
 

@@ -1,6 +1,6 @@
 [package]
 name = "client-core"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 description = "Duck Client 核心库"
 authors = ["Duck Team"]
@@ -113,3 +113,5 @@ rust-i18n = { workspace = true }
 sqlx = { version = "0.8", features = [ "runtime-tokio-native-tls", "mysql" ] }
 tokio = { version = "1", features = ["full"] }
 tempfile = { workspace = true }
+rustls = { workspace = true }
+ctor = "0.3"
