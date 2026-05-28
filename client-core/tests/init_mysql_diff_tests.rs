@@ -1,7 +1,7 @@
 // 专门测试 init_mysql_old.sql 和 init_mysql_new.sql 差异的测试用例
 // 验证 SQL 解析器和差异生成功能的正确性
 
-use client_core::sql_diff::generate_schema_diff;
+use client_core::sql_diff::{generate_schema_diff, parse_sql_tables};
 use std::fs;
 use std::path::Path;
 
@@ -127,16 +127,19 @@ fn test_generate_mysql_diff_sql() {
     println!("总行数: {}", diff_sql.lines().count());
     println!(
         "CREATE TABLE 数量: {}",
-        diff_sql.matches("CREATE TABLE").len()
+        diff_sql.matches("CREATE TABLE").count()
     );
     println!(
         "ALTER TABLE 数量: {}",
-        diff_sql.matches("ALTER TABLE").len()
+        diff_sql.matches("ALTER TABLE").count()
     );
 
     // 打印生成的SQL（截取前1000字符避免输出过长）
-    let sql_preview = if diff_sql.len() > 1000 {
-        format!("{}...(截取前1000字符)", &diff_sql[..1000])
+    let sql_preview: String = if diff_sql.len() > 1000 {
+        format!(
+            "{}...(截取前1000字符)",
+            diff_sql.chars().take(1000).collect::<String>()
+        )
     } else {
         diff_sql.clone()
     };
@@ -411,9 +414,9 @@ fn test_generate_complete_migration_sql() {
     println!("✅ 迁移SQL语法验证通过");
 
     // 统计SQL语句数量
-    let create_count = diff_sql.matches("CREATE TABLE").len();
-    let alter_count = diff_sql.matches("ALTER TABLE").len();
-    let add_column_count = diff_sql.matches("ADD COLUMN").len();
+    let create_count = diff_sql.matches("CREATE TABLE").count();
+    let alter_count = diff_sql.matches("ALTER TABLE").count();
+    let add_column_count = diff_sql.matches("ADD COLUMN").count();
 
     println!("📈 SQL统计:");
     println!("  CREATE TABLE: {} 个", create_count);

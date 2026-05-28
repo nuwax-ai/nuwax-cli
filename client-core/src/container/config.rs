@@ -36,21 +36,17 @@ impl DockerManager {
 
         let runtime_env = detect_runtime_environment();
 
-        // 如果compose文件不存在，使用默认配置；否则正常加载配置
-        let compose_config = if compose_file.exists() {
-            Some(load_compose_config_with_env(&compose_file, &env_file)?)
-        } else {
+        // 如果compose文件不存在，记录警告
+        if !compose_file.exists() {
             warn!("docker-compose file does not exist");
-            None
-        };
-        if compose_config.is_none() {
-            info!("Compose configuration not loaded; this may be the first deployment and docker directory is missing");
+            info!(
+                "Compose configuration not loaded; this may be the first deployment and docker directory is missing"
+            );
         }
 
         Ok(Self {
             compose_file,
             env_file,
-            compose_config,
             project_name,
             runtime_env,
         })
@@ -123,17 +119,17 @@ impl DockerManager {
         let services = &self.load_compose_config()?.services;
 
         if let Some(service_opt) = services.0.get(service_name) {
-            if let Some(service) = service_opt {
-                if let Some(restart_policy) = &service.restart {
-                    let policy = restart_policy.to_string();
-                    // restart: "no" 表示不自动重启，通常是一次性任务
-                    if policy == "no" || policy == "false" {
-                        return Ok(true);
-                    }
-                    // restart: "always" 或 "unless-stopped" 表示应该一直运行
-                    if policy == "always" || policy == "unless-stopped" || policy == "on-failure" {
-                        return Ok(false);
-                    }
+            if let Some(service) = service_opt
+                && let Some(restart_policy) = &service.restart
+            {
+                let policy = restart_policy.to_string();
+                // restart: "no" 表示不自动重启，通常是一次性任务
+                if policy == "no" || policy == "false" {
+                    return Ok(true);
+                }
+                // restart: "always" 或 "unless-stopped" 表示应该一直运行
+                if policy == "always" || policy == "unless-stopped" || policy == "on-failure" {
+                    return Ok(false);
                 }
             }
 

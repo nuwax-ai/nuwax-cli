@@ -2,7 +2,6 @@ use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
 use memory_stats::memory_stats;
-use pprof::criterion::{Output, PProfProfiler};
 use std::time::Duration;
 use tempfile::NamedTempFile;
 use tokio::runtime::Runtime;
@@ -64,6 +63,7 @@ pub enum UpgradeScenario {
 }
 
 impl UpgradeScenario {
+    #[allow(dead_code)]
     fn describe(&self) -> String {
         match self {
             UpgradeScenario::FullUpgrade {
@@ -127,6 +127,7 @@ pub struct PerformanceResult {
 }
 
 /// 创建测试用的模拟文件
+#[allow(dead_code)]
 async fn create_test_file(size: u64) -> Result<NamedTempFile, std::io::Error> {
     let file = NamedTempFile::new()?;
 
@@ -484,7 +485,6 @@ fn bench_version_strategy_selection(c: &mut Criterion) {
 // 创建 Criterion 配置，启用内存分析
 fn create_criterion() -> Criterion {
     Criterion::default()
-        .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)))
         .warm_up_time(Duration::from_secs(3))
         .measurement_time(Duration::from_secs(10))
         .sample_size(50)

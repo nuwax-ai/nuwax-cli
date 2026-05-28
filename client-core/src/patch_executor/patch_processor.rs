@@ -27,16 +27,22 @@ pub struct PatchProcessor {
 impl PatchProcessor {
     /// 创建新的补丁处理器
     pub fn new() -> Result<Self> {
-        let temp_dir = TempDir::new()
-            .map_err(|e| PatchExecutorError::custom(format!("Failed to create temp directory: {e}")))?;
+        let temp_dir = TempDir::new().map_err(|e| {
+            PatchExecutorError::custom(format!("Failed to create temp directory: {e}"))
+        })?;
 
         // 创建带超时的HTTP客户端
         let http_client = Client::builder()
             .timeout(std::time::Duration::from_secs(300)) // 5分钟超时
             .build()
-            .map_err(|e| PatchExecutorError::custom(format!("Failed to create HTTP client: {e}")))?;
+            .map_err(|e| {
+                PatchExecutorError::custom(format!("Failed to create HTTP client: {e}"))
+            })?;
 
-        debug!("Creating patch processor, temp directory: {:?}", temp_dir.path());
+        debug!(
+            "Creating patch processor, temp directory: {:?}",
+            temp_dir.path()
+        );
 
         Ok(Self {
             temp_dir,
@@ -56,7 +62,9 @@ impl PatchProcessor {
             .get(&patch_info.url)
             .send()
             .await
-            .map_err(|e| PatchExecutorError::download_failed(format!("HTTP request failed: {e}")))?;
+            .map_err(|e| {
+                PatchExecutorError::download_failed(format!("HTTP request failed: {e}"))
+            })?;
 
         if !response.status().is_success() {
             return Err(PatchExecutorError::download_failed(format!(
@@ -77,8 +85,9 @@ impl PatchProcessor {
         use futures_util::StreamExt;
 
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result
-                .map_err(|e| PatchExecutorError::download_failed(format!("Failed to download data chunk: {e}")))?;
+            let chunk = chunk_result.map_err(|e| {
+                PatchExecutorError::download_failed(format!("Failed to download data chunk: {e}"))
+            })?;
 
             file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
@@ -90,7 +99,10 @@ impl PatchProcessor {
         }
 
         file.flush().await?;
-        info!("Patch package download completed: {:?} ({} bytes)", patch_path, downloaded);
+        info!(
+            "Patch package download completed: {:?} ({} bytes)",
+            patch_path, downloaded
+        );
 
         Ok(patch_path)
     }
@@ -105,7 +117,9 @@ impl PatchProcessor {
 
         // 1. 验证文件存在
         if !patch_path.exists() {
-            return Err(PatchExecutorError::verification_failed("Patch file does not exist"));
+            return Err(PatchExecutorError::verification_failed(
+                "Patch file does not exist",
+            ));
         }
 
         // 2. 验证哈希值
@@ -127,17 +141,19 @@ impl PatchProcessor {
         debug!("Verifying file hash: {:?}", file_path);
 
         // 解析期望的哈希值（格式：sha256:hash_value）
-        let expected_hash = if expected_hash.starts_with("sha256:") {
-            &expected_hash[7..]
-        } else {
-            expected_hash
-        };
+        let expected_hash = expected_hash
+            .strip_prefix("sha256:")
+            .unwrap_or(expected_hash);
 
         // 计算文件的SHA256哈希
         let file_content = fs::read(file_path).await?;
         let mut hasher = Sha256::new();
         hasher.update(&file_content);
-        let actual_hash = format!("{:x}", hasher.finalize());
+        let actual_hash: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
 
         // 比较哈希值
         if actual_hash != expected_hash {
@@ -194,7 +210,9 @@ impl PatchProcessor {
             Self::extract_tar_gz(&patch_path_clone, &extract_dir_clone)
         })
         .await
-        .map_err(|e| PatchExecutorError::extraction_failed(format!("Extraction task failed: {e}")))??;
+        .map_err(|e| {
+            PatchExecutorError::extraction_failed(format!("Extraction task failed: {e}"))
+        })??;
 
         info!("Patch package extracted: {:?}", extract_dir);
         Ok(extract_dir)
@@ -208,8 +226,9 @@ impl PatchProcessor {
 
         // 解压所有文件
         for entry_result in archive.entries()? {
-            let mut entry = entry_result
-                .map_err(|e| PatchExecutorError::extraction_failed(format!("Failed to read entry: {e}")))?;
+            let mut entry = entry_result.map_err(|e| {
+                PatchExecutorError::extraction_failed(format!("Failed to read entry: {e}"))
+            })?;
 
             // 获取文件路径
             let path = entry.path().map_err(|e| {
@@ -239,7 +258,9 @@ impl PatchProcessor {
 
             // 解压文件
             entry.unpack(&extract_path).map_err(|e| {
-                PatchExecutorError::extraction_failed(format!("Failed to unpack file {path_buf:?}: {e}"))
+                PatchExecutorError::extraction_failed(format!(
+                    "Failed to unpack file {path_buf:?}: {e}"
+                ))
             })?;
 
             debug!("Extracting file: {:?} -> {:?}", path_buf, extract_path);
@@ -266,10 +287,10 @@ impl PatchProcessor {
 
         while let Some(entry) = read_dir.next_entry().await? {
             let path = entry.path();
-            if path.is_file() {
-                if let Ok(relative_path) = path.strip_prefix(&extract_dir) {
-                    files.push(relative_path.to_owned());
-                }
+            if path.is_file()
+                && let Ok(relative_path) = path.strip_prefix(&extract_dir)
+            {
+                files.push(relative_path.to_owned());
             }
         }
 
@@ -326,7 +347,14 @@ mod tests {
         // 计算期望的哈希
         let mut hasher = Sha256::new();
         hasher.update(content);
-        let expected_hash = format!("sha256:{:x}", hasher.finalize());
+        let expected_hash = format!(
+            "sha256:{}",
+            hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
 
         // 验证哈希
         let result = processor.verify_hash(&test_file, &expected_hash).await;

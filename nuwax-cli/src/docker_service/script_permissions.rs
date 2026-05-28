@@ -27,12 +27,12 @@ impl ScriptPermissionManager {
             info!("🪟 Windows environment detected, running cross-platform compatibility checks");
 
             // 执行Windows兼容性检查
-            if let Ok(suggestions) = self.windows_compatibility_check().await {
-                if !suggestions.is_empty() {
-                    warn!("🪟 Windows suggestions:");
-                    for suggestion in suggestions {
-                        warn!("  • {item}", item = suggestion);
-                    }
+            if let Ok(suggestions) = self.windows_compatibility_check().await
+                && !suggestions.is_empty()
+            {
+                warn!("🪟 Windows suggestions:");
+                for suggestion in suggestions {
+                    warn!("  • {item}", item = suggestion);
                 }
             }
         }
@@ -44,7 +44,10 @@ impl ScriptPermissionManager {
             return Ok(());
         }
 
-        info!("Found {count} script files to check permissions", count = script_paths.len());
+        info!(
+            "Found {count} script files to check permissions",
+            count = script_paths.len()
+        );
 
         let mut fixed_count = 0;
         let mut converted_count = 0;
@@ -57,11 +60,18 @@ impl ScriptPermissionManager {
                     Ok(was_converted) => {
                         if was_converted {
                             converted_count += 1;
-                            info!("🔄 Line endings converted: {path}", path = script_path.display());
+                            info!(
+                                "🔄 Line endings converted: {path}",
+                                path = script_path.display()
+                            );
                         }
                     }
                     Err(e) => {
-                        warn!("⚠️  Failed converting line endings {path}: {error}", path = script_path.display(), error = e.to_string());
+                        warn!(
+                            "⚠️  Failed converting line endings {path}: {error}",
+                            path = script_path.display(),
+                            error = e.to_string()
+                        );
                     }
                 }
             }
@@ -71,14 +81,24 @@ impl ScriptPermissionManager {
                 Ok(was_fixed) => {
                     if was_fixed {
                         fixed_count += 1;
-                        info!("✅ Script permission fixed: {path}", path = script_path.display());
+                        info!(
+                            "✅ Script permission fixed: {path}",
+                            path = script_path.display()
+                        );
                     } else {
-                        debug!("✓ Script permission is OK: {path}", path = script_path.display());
+                        debug!(
+                            "✓ Script permission is OK: {path}",
+                            path = script_path.display()
+                        );
                     }
                 }
                 Err(e) => {
                     error_count += 1;
-                    error!("❌ Failed to fix script permission {path}: {error}", path = script_path.display(), error = e.to_string());
+                    error!(
+                        "❌ Failed to fix script permission {path}: {error}",
+                        path = script_path.display(),
+                        error = e.to_string()
+                    );
 
                     // Windows环境提供额外建议
                     if is_windows {
@@ -93,17 +113,24 @@ impl ScriptPermissionManager {
 
         // 汇总结果
         if converted_count > 0 {
-            info!("🔄 Converted line endings for {count} scripts",
-                    count = converted_count
-                );
+            info!(
+                "🔄 Converted line endings for {count} scripts",
+                count = converted_count
+            );
         }
 
         if fixed_count > 0 {
-            info!("🛠️  Fixed execute permission for {count} scripts", count = fixed_count);
+            info!(
+                "🛠️  Fixed execute permission for {count} scripts",
+                count = fixed_count
+            );
         }
 
         if error_count > 0 {
-            warn!("⚠️  {count} scripts failed, manual handling may be required", count = error_count);
+            warn!(
+                "⚠️  {count} scripts failed, manual handling may be required",
+                count = error_count
+            );
             if is_windows {
                 warn!("🪟 Windows users can try:");
                 warn!("  1. Run in Git Bash: chmod +x config/docker-entrypoint.sh");
@@ -122,15 +149,23 @@ impl ScriptPermissionManager {
         let mut script_paths = Vec::new();
 
         // 递归查找工作目录下的所有 .sh 文件（限制最大深度）
-        Self::find_shell_scripts_recursive(&self.work_dir, &mut script_paths, MAX_SCRIPT_SCAN_DEPTH)?;
+        Self::find_shell_scripts_recursive(
+            &self.work_dir,
+            &mut script_paths,
+            MAX_SCRIPT_SCAN_DEPTH,
+        )?;
 
         // 去重
         script_paths.sort();
         script_paths.dedup();
 
-        info!("🔍 Dynamically scanned {count} script files (max depth: {depth})", count = script_paths.len(), depth = MAX_SCRIPT_SCAN_DEPTH);
+        info!(
+            "🔍 Dynamically scanned {count} script files (max depth: {depth})",
+            count = script_paths.len(),
+            depth = MAX_SCRIPT_SCAN_DEPTH
+        );
         for script in &script_paths {
-debug!("Script found: {path}", path = script.display());
+            debug!("Script found: {path}", path = script.display());
         }
 
         Ok(script_paths)
@@ -161,7 +196,10 @@ debug!("Script found: {path}", path = script.display());
             let entry = entry.map_err(|e| {
                 DockerServiceError::FileSystem(format!(
                     "{}",
-                    t!("script_permissions.read_dir_entry_failed", error = e.to_string())
+                    t!(
+                        "script_permissions.read_dir_entry_failed",
+                        error = e.to_string()
+                    )
                 ))
             })?;
             let path = entry.path();
@@ -170,10 +208,11 @@ debug!("Script found: {path}", path = script.display());
                 let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
 
                 // 跳过不需要遍历的目录（数据目录、上传目录等）
-                if client_core::constants::docker::EXCLUDE_DIRS
-                    .contains(&dir_name.as_ref())
-                {
-                    debug!("Skipping protected directory: {path}", path = path.display());
+                if client_core::constants::docker::EXCLUDE_DIRS.contains(&dir_name.as_ref()) {
+                    debug!(
+                        "Skipping protected directory: {path}",
+                        path = path.display()
+                    );
                     continue;
                 }
 
@@ -193,7 +232,10 @@ debug!("Script found: {path}", path = script.display());
         if !script_path.exists() {
             return Err(DockerServiceError::FileSystem(format!(
                 "{}",
-                t!("script_permissions.script_file_not_exists", path = script_path.display())
+                t!(
+                    "script_permissions.script_file_not_exists",
+                    path = script_path.display()
+                )
             )));
         }
 
@@ -216,7 +258,10 @@ debug!("Script found: {path}", path = script.display());
             // Windows 系统权限检查
             self.check_windows_permissions(script_path, &metadata).await
         } else {
-            debug!("Unknown OS, skip permission check: {path}", path = script_path.display());
+            debug!(
+                "Unknown OS, skip permission check: {path}",
+                path = script_path.display()
+            );
             Ok(false)
         }
     }
@@ -233,12 +278,18 @@ debug!("Script found: {path}", path = script.display());
         let is_executable = (mode & 0o111) != 0; // 检查是否有执行权限
 
         if is_executable {
-            debug!("Script already executable: {path}", path = script_path.display());
+            debug!(
+                "Script already executable: {path}",
+                path = script_path.display()
+            );
             return Ok(false);
         }
 
         // 添加执行权限
-        info!("Adding execute permission: {path}", path = script_path.display());
+        info!(
+            "Adding execute permission: {path}",
+            path = script_path.display()
+        );
         self.add_execute_permission(script_path).await?;
         Ok(true)
     }
@@ -259,19 +310,28 @@ debug!("Script found: {path}", path = script.display());
         script_path: &Path,
         _metadata: &std::fs::Metadata,
     ) -> DockerServiceResult<bool> {
-        info!("🪟 Checking script permission on Windows: {path}", path = script_path.display());
+        info!(
+            "🪟 Checking script permission on Windows: {path}",
+            path = script_path.display()
+        );
 
         // Windows下，我们假设脚本可能需要设置执行权限
         // 因为Windows文件系统挂载到Docker容器时可能丢失执行权限
 
         // 检查是否已经有执行权限（通过尝试chmod来验证）
         if self.verify_windows_execute_permission(script_path).await? {
-            debug!("Script should be executable in container: {path}", path = script_path.display());
+            debug!(
+                "Script should be executable in container: {path}",
+                path = script_path.display()
+            );
             return Ok(false);
         }
 
         // 尝试设置执行权限
-        info!("Adding execute permission: {path}", path = script_path.display());
+        info!(
+            "Adding execute permission: {path}",
+            path = script_path.display()
+        );
         self.add_execute_permission(script_path).await?;
         Ok(true)
     }
@@ -312,11 +372,10 @@ debug!("Script found: {path}", path = script.display());
                 .arg("-c")
                 .arg(format!("test -x \"{}\"", script_path.display()))
                 .output()
+                && output.status.success()
             {
-                if output.status.success() {
-                    debug!("Git Bash verify: script is executable");
-                    return Ok(true);
-                }
+                debug!("Git Bash verify: script is executable");
+                return Ok(true);
             }
         }
 
@@ -342,7 +401,10 @@ debug!("Script found: {path}", path = script.display());
                 }
             }
             Err(e) => {
-                debug!("WSL verification failed, WSL may not be installed: {error}", error = e.to_string());
+                debug!(
+                    "WSL verification failed, WSL may not be installed: {error}",
+                    error = e.to_string()
+                );
             }
         }
 
@@ -385,7 +447,10 @@ debug!("Script found: {path}", path = script.display());
             )));
         }
 
-        info!("✅ Execute permission added: {path}", path = script_path.display());
+        info!(
+            "✅ Execute permission added: {path}",
+            path = script_path.display()
+        );
         Ok(())
     }
 
@@ -396,69 +461,94 @@ debug!("Script found: {path}", path = script.display());
 
     /// Windows系统下添加执行权限
     async fn add_execute_permission_windows(&self, script_path: &Path) -> DockerServiceResult<()> {
-        info!("🪟 Setting script permission on Windows: {path}", path = script_path.display());
+        info!(
+            "🪟 Setting script permission on Windows: {path}",
+            path = script_path.display()
+        );
 
         // 首先检查文件是否存在
         if !script_path.exists() {
-            warn!("⚠️ Script file does not exist: {path}", path = script_path.display());
+            warn!(
+                "⚠️ Script file does not exist: {path}",
+                path = script_path.display()
+            );
             return Ok(());
         }
 
         // 检查文件扩展名
-        if let Some(extension) = script_path.extension() {
-            if extension != "sh" && extension != "bash" {
-                debug!("Skip non-shell script: {path}", path = script_path.display());
-                return Ok(());
-            }
+        if let Some(extension) = script_path.extension()
+            && extension != "sh"
+            && extension != "bash"
+        {
+            debug!(
+                "Skip non-shell script: {path}",
+                path = script_path.display()
+            );
+            return Ok(());
         }
 
         let mut success_methods: Vec<String> = Vec::new();
 
         // 方法1: 尝试使用Git Bash的chmod
-        if let Ok(result) = self.try_git_bash_chmod(script_path).await {
-            if result {
-                success_methods.push("Git Bash".to_string());
-            }
+        if let Ok(result) = self.try_git_bash_chmod(script_path).await
+            && result
+        {
+            success_methods.push("Git Bash".to_string());
         }
 
         // 方法2: 尝试使用WSL的chmod
-        if let Ok(result) = self.try_wsl_chmod(script_path).await {
-            if result {
-                success_methods.push("WSL".to_string());
-            }
+        if let Ok(result) = self.try_wsl_chmod(script_path).await
+            && result
+        {
+            success_methods.push("WSL".to_string());
         }
 
         // 方法3: 尝试直接chmod（如果可用）
-        if let Ok(result) = self.try_direct_chmod(script_path).await {
-            if result {
-                success_methods.push(t!("script_permissions.method_direct_chmod").to_string());
-            }
+        if let Ok(result) = self.try_direct_chmod(script_path).await
+            && result
+        {
+            success_methods.push(t!("script_permissions.method_direct_chmod").to_string());
         }
 
         // 方法4: 尝试修复行尾符
-        if let Ok(result) = self.fix_line_endings(script_path).await {
-            if result {
-                success_methods.push(t!("script_permissions.method_line_endings_fix").to_string());
-            }
+        if let Ok(result) = self.fix_line_endings(script_path).await
+            && result
+        {
+            success_methods.push(t!("script_permissions.method_line_endings_fix").to_string());
         }
 
         if !success_methods.is_empty() {
-            info!("✅ Script permission set successfully, methods: {methods}", methods = success_methods.join(", "));
+            info!(
+                "✅ Script permission set successfully, methods: {methods}",
+                methods = success_methods.join(", ")
+            );
             return Ok(());
         }
 
         // 所有自动方法都失败，提供详细的手动操作指导
         warn!("⚠️ Automatic permission setup failed, manual action required:");
         warn!("🪟 Windows host script permission guide:");
-        warn!("Git Bash: cd \"{path}\"", path = script_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .display());
-        warn!("Git Bash: chmod +x \"{name}\"", name = script_path.file_name().unwrap().to_string_lossy());
-        warn!("WSL: chmod +x \"{path}\"", path = self
-                    .convert_to_wsl_path(script_path)
-                    .unwrap_or_else(|_| script_path.display().to_string()));
-        warn!("PowerShell: bash -c \"chmod +x '{path}'\"", path = script_path.display());
+        warn!(
+            "Git Bash: cd \"{path}\"",
+            path = script_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .display()
+        );
+        warn!(
+            "Git Bash: chmod +x \"{name}\"",
+            name = script_path.file_name().unwrap().to_string_lossy()
+        );
+        warn!(
+            "WSL: chmod +x \"{path}\"",
+            path = self
+                .convert_to_wsl_path(script_path)
+                .unwrap_or_else(|_| script_path.display().to_string())
+        );
+        warn!(
+            "PowerShell: bash -c \"chmod +x '{path}'\"",
+            path = script_path.display()
+        );
         warn!("docker-compose volumes: - ./config:/app/config:ro");
         warn!("docker-compose volumes: - ./script:/app/script:ro");
         warn!("entrypoint command: sh -c \"chmod +x /app/script/*.sh && your-original-command\"");
@@ -489,11 +579,10 @@ debug!("Script found: {path}", path = script.display());
                 .arg("-c")
                 .arg(format!("chmod +x \"{}\"", script_path.display()))
                 .output()
+                && output.status.success()
             {
-                if output.status.success() {
-                    debug!("Git Bash chmod succeeded: {path}", path = bash_path);
-                    return Ok(true);
-                }
+                debug!("Git Bash chmod succeeded: {path}", path = bash_path);
+                return Ok(true);
             }
         }
 
@@ -522,7 +611,10 @@ debug!("Script found: {path}", path = script.display());
                 }
             }
             Err(e) => {
-                debug!("WSL chmod unavailable, WSL may not be installed: {error}", error = e.to_string());
+                debug!(
+                    "WSL chmod unavailable, WSL may not be installed: {error}",
+                    error = e.to_string()
+                );
             }
         }
 
@@ -532,11 +624,11 @@ debug!("Script found: {path}", path = script.display());
 
     /// 尝试直接chmod
     async fn try_direct_chmod(&self, script_path: &Path) -> DockerServiceResult<bool> {
-        if let Ok(output) = Command::new("chmod").arg("+x").arg(script_path).output() {
-            if output.status.success() {
-                debug!("Direct chmod succeeded");
-                return Ok(true);
-            }
+        if let Ok(output) = Command::new("chmod").arg("+x").arg(script_path).output()
+            && output.status.success()
+        {
+            debug!("Direct chmod succeeded");
+            return Ok(true);
         }
 
         debug!("Direct chmod is unavailable");
@@ -561,22 +653,30 @@ debug!("Script found: {path}", path = script.display());
     }
 
     /// 手动修复特定脚本权限
+    #[allow(dead_code)]
     pub async fn fix_specific_script(&self, script_name: &str) -> DockerServiceResult<()> {
         let script_path = self.work_dir.join("config").join(script_name);
 
         if !script_path.exists() {
             return Err(DockerServiceError::FileSystem(format!(
                 "{}",
-                t!("script_permissions.script_file_not_exists", path = script_path.display())
+                t!(
+                    "script_permissions.script_file_not_exists",
+                    path = script_path.display()
+                )
             )));
         }
 
-        info!("🛠️  Fix specific script permission: {name}", name = script_name);
+        info!(
+            "🛠️  Fix specific script permission: {name}",
+            name = script_name
+        );
         self.check_and_fix_file_permission(&script_path).await?;
         Ok(())
     }
 
     /// 预检查常见问题脚本
+    #[allow(dead_code)]
     pub async fn precheck_common_script_issues(&self) -> DockerServiceResult<Vec<String>> {
         let mut issues = Vec::new();
 
@@ -588,15 +688,15 @@ debug!("Script found: {path}", path = script.display());
                 use std::os::unix::fs::PermissionsExt;
                 if let Ok(metadata) = std::fs::metadata(&entrypoint_script) {
                     let mode = metadata.permissions().mode();
-                        if (mode & 0o111) == 0 {
-                            issues.push(
-                                t!(
-                                    "script_permissions.script_missing_exec_permission",
-                                    path = entrypoint_script.display()
-                                )
-                                .to_string(),
-                            );
-                        }
+                    if (mode & 0o111) == 0 {
+                        issues.push(
+                            t!(
+                                "script_permissions.script_missing_exec_permission",
+                                path = entrypoint_script.display()
+                            )
+                            .to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -653,11 +753,17 @@ debug!("Script found: {path}", path = script.display());
 
         // 检查是否包含Windows行尾符
         if !content.contains("\r\n") {
-            debug!("Script already uses Unix line endings: {path}", path = script_path.display());
+            debug!(
+                "Script already uses Unix line endings: {path}",
+                path = script_path.display()
+            );
             return Ok(false);
         }
 
-        info!("Windows line endings found, converting: {path}", path = script_path.display());
+        info!(
+            "Windows line endings found, converting: {path}",
+            path = script_path.display()
+        );
 
         // 转换行尾符: CRLF -> LF
         let unix_content = content.replace("\r\n", "\n");
@@ -675,7 +781,7 @@ debug!("Script found: {path}", path = script.display());
             ))
         })?;
 
-debug!("Backup file created: {path}", path = backup_path.display());
+        debug!("Backup file created: {path}", path = backup_path.display());
 
         // 写入转换后的内容
         std::fs::write(script_path, unix_content).map_err(|e| {
@@ -689,13 +795,17 @@ debug!("Backup file created: {path}", path = backup_path.display());
             ))
         })?;
 
-        info!("✅ Line endings conversion done: {path}", path = script_path.display());
+        info!(
+            "✅ Line endings conversion done: {path}",
+            path = script_path.display()
+        );
         info!("💾 Backup file: {path}", path = backup_path.display());
 
         Ok(true)
     }
 
     /// 检查脚本编码问题
+    #[allow(dead_code)]
     pub async fn check_script_encoding(&self, script_path: &Path) -> DockerServiceResult<bool> {
         if !script_path.exists() {
             return Ok(false);
@@ -713,15 +823,25 @@ debug!("Backup file created: {path}", path = backup_path.display());
 
                 // 检查是否包含Windows行尾符
                 if content.contains("\r\n") {
-                    warn!("Script uses Windows line endings: {path}", path = script_path.display());
+                    warn!(
+                        "Script uses Windows line endings: {path}",
+                        path = script_path.display()
+                    );
                     return Ok(false);
                 }
 
-                debug!("Script encoding check passed: {path}", path = script_path.display());
+                debug!(
+                    "Script encoding check passed: {path}",
+                    path = script_path.display()
+                );
                 Ok(true)
             }
             Err(e) => {
-                warn!("Script encoding check failed {path}: {error}", path = script_path.display(), error = e.to_string());
+                warn!(
+                    "Script encoding check failed {path}: {error}",
+                    path = script_path.display(),
+                    error = e.to_string()
+                );
                 warn!("File may not be valid UTF-8");
                 Ok(false)
             }
@@ -749,9 +869,7 @@ debug!("Backup file created: {path}", path = backup_path.display());
                 if output.status.success() {
                     let wsl_output = String::from_utf8_lossy(&output.stdout);
                     if wsl_output.contains("Version 2") {
-                        suggestions.push(
-                            t!("script_permissions.suggest_use_wsl2").to_string(),
-                        );
+                        suggestions.push(t!("script_permissions.suggest_use_wsl2").to_string());
                     }
                 } else {
                     debug!("WSL check failed, WSL may be missing or misconfigured");
@@ -773,9 +891,8 @@ debug!("Backup file created: {path}", path = backup_path.display());
                 if output.status.success() {
                     let git_config = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if git_config == "true" {
-                        suggestions.push(
-                            t!("script_permissions.suggest_git_autocrlf_false").to_string(),
-                        );
+                        suggestions
+                            .push(t!("script_permissions.suggest_git_autocrlf_false").to_string());
                     }
                 } else {
                     debug!("Git config check failed, Git may be missing or not configured");
@@ -793,7 +910,10 @@ debug!("Backup file created: {path}", path = backup_path.display());
                 if scripts.is_empty() {
                     debug!("No script files found, skip encoding check");
                 } else {
-                    debug!("Start checking encoding issues for {count} script files", count = scripts.len());
+                    debug!(
+                        "Start checking encoding issues for {count} script files",
+                        count = scripts.len()
+                    );
                     let mut encoding_issues = 0;
 
                     for script_path in scripts {
@@ -836,14 +956,20 @@ debug!("Backup file created: {path}", path = backup_path.display());
                     }
 
                     if encoding_issues > 0 {
-                        debug!("Found encoding issues in {count} scripts", count = encoding_issues);
+                        debug!(
+                            "Found encoding issues in {count} scripts",
+                            count = encoding_issues
+                        );
                     } else {
                         debug!("All script encoding checks passed");
                     }
                 }
             }
             Err(e) => {
-                debug!("Script scan failed (non-critical): {error}", error = e.to_string());
+                debug!(
+                    "Script scan failed (non-critical): {error}",
+                    error = e.to_string()
+                );
                 // 不添加建议，因为扫描失败不影响核心功能
             }
         }
@@ -851,13 +977,17 @@ debug!("Backup file created: {path}", path = backup_path.display());
         if suggestions.is_empty() {
             info!("✅ Windows compatibility check passed");
         } else {
-            warn!("⚠️  Found {count} Windows compatibility issues", count = suggestions.len());
+            warn!(
+                "⚠️  Found {count} Windows compatibility issues",
+                count = suggestions.len()
+            );
         }
 
         Ok(suggestions)
     }
 
     /// 为Windows用户提供一键修复脚本权限的方法
+    #[allow(dead_code)]
     pub async fn fix_windows_script_permissions(&self) -> DockerServiceResult<()> {
         if !cfg!(target_os = "windows") {
             return Ok(());
@@ -873,7 +1003,10 @@ debug!("Backup file created: {path}", path = backup_path.display());
             return Ok(());
         }
 
-        info!("🔍 Found {count} script files, starting permission fix...", count = scripts.len());
+        info!(
+            "🔍 Found {count} script files, starting permission fix...",
+            count = scripts.len()
+        );
 
         let mut success_count = 0;
         let mut fail_count = 0;
@@ -881,26 +1014,32 @@ debug!("Backup file created: {path}", path = backup_path.display());
         for script_path in &scripts {
             match self.check_and_fix_file_permission(script_path).await {
                 Ok(true) => {
-                    info!("✅ Script permission fixed successfully: {path}", path = script_path.display());
+                    info!(
+                        "✅ Script permission fixed successfully: {path}",
+                        path = script_path.display()
+                    );
                     success_count += 1;
                 }
                 Ok(false) => {
-                    debug!("Script permission already correct: {path}", path = script_path.display());
+                    debug!(
+                        "Script permission already correct: {path}",
+                        path = script_path.display()
+                    );
                 }
                 Err(e) => {
-                    warn!("❌ Failed fixing script permission: {path} - {error}", path = script_path.display(), error = e.to_string());
+                    warn!(
+                        "❌ Failed fixing script permission: {path} - {error}",
+                        path = script_path.display(),
+                        error = e.to_string()
+                    );
                     fail_count += 1;
                 }
             }
         }
 
         info!("📊 Script permission fix completed:");
-        info!("  ✅ Fixed successfully: {count}",
-                count = success_count
-            );
-        info!("  ❌ Failed fixes: {count}",
-                count = fail_count
-            );
+        info!("  ✅ Fixed successfully: {count}", count = success_count);
+        info!("  ❌ Failed fixes: {count}", count = fail_count);
         info!("  📝 Total processed: {count}", count = scripts.len());
 
         if fail_count > 0 {

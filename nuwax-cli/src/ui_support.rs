@@ -107,7 +107,10 @@ where
     // 初始化步骤
     let steps = [
         ("downloading", "Preparing initialization environment..."),
-        ("extracting", "Creating configuration files and directories..."),
+        (
+            "extracting",
+            "Creating configuration files and directories...",
+        ),
         ("loading", "Initializing DuckDB database..."),
         ("starting", "Registering client..."),
         ("configuring", "Finalizing initialization setup..."),

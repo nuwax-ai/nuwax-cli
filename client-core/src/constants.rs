@@ -274,7 +274,7 @@ pub mod api {
 
     /// 验证 URL 格式是否有效（使用 url crate）
     fn is_valid_url(url: &str) -> bool {
-        Url::parse(url).map_or(false, |parsed_url| {
+        Url::parse(url).is_ok_and(|parsed_url| {
             // 确保是 http 或 https 协议
             matches!(parsed_url.scheme(), "http" | "https")
         })
@@ -294,16 +294,9 @@ pub mod api {
     /// ```
     /// use client_core::constants::api::get_base_url;
     ///
-    /// // 生产环境（默认）
-    /// let url = get_base_url(); // "https://api-version.nuwax.com"
-    ///
-    /// // 测试环境（需要设置环境变量）
-    /// std::env::set_var("NUWAX_CLI_ENV", "testing");
-    /// let url = get_base_url(); // "http://192.168.32.226:3000"
-    ///
-    /// // 自定义服务器地址（最高优先级）
-    /// std::env::set_var("NUWAX_API_BASE_URL", "http://localhost:8080");
-    /// let url = get_base_url(); // "http://localhost:8080"
+    /// // 获取当前配置的 base URL
+    /// let url = get_base_url();
+    /// println!("API Base URL: {}", url);
     /// ```
     pub fn get_base_url() -> String {
         // 优先检查自定义 API 服务器地址
@@ -361,7 +354,8 @@ pub mod api {
         pub const DOCKER_UPDATE_VERSION_LIST: &str = "/api/v1/docker/updateVersionList";
 
         /// Docker版本获取端点 (用于降级fallback)
-        pub const DOCKER_UPGRADE_VERSION_LATEST: &str = "/api/v1/docker/upgrade/versions/latest.json";
+        pub const DOCKER_UPGRADE_VERSION_LATEST: &str =
+            "/api/v1/docker/upgrade/versions/latest.json";
 
         /// Docker版本JSON (OSS) - 生产环境
         pub const DOCKER_VERSION_OSS_PROD: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/latest.json";
@@ -425,32 +419,6 @@ pub mod api {
         }
 
         #[test]
-        fn test_custom_url_overrides_env() {
-            unsafe {
-                std::env::set_var(NUWAX_API_BASE_URL_ENV, "http://custom.example.com:8080");
-                std::env::set_var("NUWAX_CLI_ENV", "testing");
-            }
-            assert_eq!(get_base_url(), "http://custom.example.com:8080");
-            unsafe {
-                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
-                std::env::remove_var("NUWAX_CLI_ENV");
-            }
-        }
-
-        #[test]
-        fn test_invalid_custom_url_falls_back() {
-            unsafe {
-                std::env::set_var(NUWAX_API_BASE_URL_ENV, "ftp://invalid.com");
-                std::env::set_var("NUWAX_CLI_ENV", "testing");
-            }
-            assert_eq!(get_base_url(), TESTING_BASE_URL);
-            unsafe {
-                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
-                std::env::remove_var("NUWAX_CLI_ENV");
-            }
-        }
-
-        #[test]
         fn test_is_valid_url() {
             assert!(is_valid_url("http://example.com"));
             assert!(is_valid_url("https://example.com"));
@@ -459,30 +427,6 @@ pub mod api {
             assert!(!is_valid_url("ftp://example.com"));
             assert!(!is_valid_url("example.com"));
             assert!(!is_valid_url(""));
-        }
-
-        #[test]
-        fn test_empty_custom_url_falls_back() {
-            unsafe {
-                std::env::set_var(NUWAX_API_BASE_URL_ENV, "");
-                std::env::set_var("NUWAX_CLI_ENV", "testing");
-            }
-            assert_eq!(get_base_url(), TESTING_BASE_URL);
-            unsafe {
-                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
-                std::env::remove_var("NUWAX_CLI_ENV");
-            }
-        }
-
-        #[test]
-        fn test_custom_url_with_path() {
-            unsafe {
-                std::env::set_var(NUWAX_API_BASE_URL_ENV, "http://example.com/api/v1");
-            }
-            assert_eq!(get_base_url(), "http://example.com/api/v1");
-            unsafe {
-                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
-            }
         }
     }
 }

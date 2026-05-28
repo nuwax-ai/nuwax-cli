@@ -31,7 +31,10 @@ impl FileOperationExecutor {
             )));
         }
 
-        debug!("Creating file operation executor, working directory: {:?}", work_dir);
+        debug!(
+            "Creating file operation executor, working directory: {:?}",
+            work_dir
+        );
 
         Ok(Self {
             work_dir,
@@ -104,15 +107,15 @@ impl FileOperationExecutor {
         let source_path = self.get_patch_source_path(file_path)?;
 
         // 创建备份
-        if let Some(backup_dir) = &self.backup_dir {
-            if target_path.exists() {
-                let backup_path = backup_dir.path().join(file_path);
-                if let Some(parent) = backup_path.parent() {
-                    fs::create_dir_all(parent).await?;
-                }
-                fs::copy(&target_path, &backup_path).await?;
-                debug!("Backed up file: {} -> {:?}", file_path, backup_path);
+        if let Some(backup_dir) = &self.backup_dir
+            && target_path.exists()
+        {
+            let backup_path = backup_dir.path().join(file_path);
+            if let Some(parent) = backup_path.parent() {
+                fs::create_dir_all(parent).await?;
             }
+            fs::copy(&target_path, &backup_path).await?;
+            debug!("Backed up file: {} -> {:?}", file_path, backup_path);
         }
 
         // 原子性替换
@@ -130,12 +133,12 @@ impl FileOperationExecutor {
         let source_path = self.get_patch_source_path(dir_path)?;
 
         // 创建备份
-        if let Some(backup_dir) = &self.backup_dir {
-            if target_path.exists() {
-                let backup_path = backup_dir.path().join(dir_path);
-                self.backup_directory(&target_path, &backup_path).await?;
-                debug!("Backed up directory: {} -> {:?}", dir_path, backup_path);
-            }
+        if let Some(backup_dir) = &self.backup_dir
+            && target_path.exists()
+        {
+            let backup_path = backup_dir.path().join(dir_path);
+            self.backup_directory(&target_path, &backup_path).await?;
+            debug!("Backed up directory: {} -> {:?}", dir_path, backup_path);
         }
 
         // 删除目标目录
@@ -170,7 +173,10 @@ impl FileOperationExecutor {
                 }
                 fs::copy(&target_path, &backup_path).await?;
             }
-            debug!("Backed up item for deletion: {} -> {:?}", item_path, backup_path);
+            debug!(
+                "Backed up item for deletion: {} -> {:?}",
+                item_path, backup_path
+            );
         }
 
         // 执行删除
@@ -228,7 +234,9 @@ impl FileOperationExecutor {
         let path_clone = path.to_owned();
         tokio::task::spawn_blocking(move || remove_dir_all(&path_clone))
             .await
-            .map_err(|e| PatchExecutorError::custom(format!("Delete directory task failed: {e}")))??;
+            .map_err(|e| {
+                PatchExecutorError::custom(format!("Delete directory task failed: {e}"))
+            })??;
 
         debug!("Safely deleted directory: {:?}", path);
         Ok(())
@@ -244,14 +252,18 @@ impl FileOperationExecutor {
 
             // 确保目标目录的父目录存在
             if let Some(parent) = target_clone.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| PatchExecutorError::custom(format!("Failed to create target parent directory: {e}")))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    PatchExecutorError::custom(format!(
+                        "Failed to create target parent directory: {e}"
+                    ))
+                })?;
             }
 
             // 如果目标目录不存在，创建它
             if !target_clone.exists() {
-                std::fs::create_dir_all(&target_clone)
-                    .map_err(|e| PatchExecutorError::custom(format!("Failed to create target directory: {e}")))?;
+                std::fs::create_dir_all(&target_clone).map_err(|e| {
+                    PatchExecutorError::custom(format!("Failed to create target directory: {e}"))
+                })?;
             }
 
             // 复制源目录内容到目标目录
@@ -294,7 +306,9 @@ impl FileOperationExecutor {
             tokio::task::spawn_blocking(move || {
                 for entry in WalkDir::new(&backup_path) {
                     let entry = entry.map_err(|e| {
-                        PatchExecutorError::custom(format!("Failed to traverse backup directory: {e}"))
+                        PatchExecutorError::custom(format!(
+                            "Failed to traverse backup directory: {e}"
+                        ))
                     })?;
 
                     let backup_file_path = entry.path();
@@ -302,7 +316,9 @@ impl FileOperationExecutor {
                         // 计算相对路径
                         let relative_path =
                             backup_file_path.strip_prefix(&backup_path).map_err(|e| {
-                                PatchExecutorError::custom(format!("Failed to calculate relative path: {e}"))
+                                PatchExecutorError::custom(format!(
+                                    "Failed to calculate relative path: {e}"
+                                ))
                             })?;
 
                         let target_path = work_dir.join(relative_path);
@@ -310,7 +326,9 @@ impl FileOperationExecutor {
                         // 确保目标目录存在
                         if let Some(parent) = target_path.parent() {
                             std::fs::create_dir_all(parent).map_err(|e| {
-                                PatchExecutorError::custom(format!("Failed to create rollback target directory: {e}"))
+                                PatchExecutorError::custom(format!(
+                                    "Failed to create rollback target directory: {e}"
+                                ))
                             })?;
                         }
 
@@ -319,7 +337,10 @@ impl FileOperationExecutor {
                             PatchExecutorError::custom(format!("Failed to restore file: {e}"))
                         })?;
 
-                        debug!("Restoring file: {:?} -> {:?}", backup_file_path, target_path);
+                        debug!(
+                            "Restoring file: {:?} -> {:?}",
+                            backup_file_path, target_path
+                        );
                     }
                 }
 

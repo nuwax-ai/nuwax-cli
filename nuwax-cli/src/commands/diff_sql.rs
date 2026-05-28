@@ -34,13 +34,13 @@ pub async fn run_diff_sql(
     info!("📖 Reading SQL files...");
     let old_sql_content = fs::read_to_string(&old_sql_path).map_err(|e| {
         client_core::error::DuckError::custom(
-            t!("diff_sql.read_old_failed", error = e.to_string()).to_string()
+            t!("diff_sql.read_old_failed", error = e.to_string()).to_string(),
         )
     })?;
 
     let new_sql_content = fs::read_to_string(&new_sql_path).map_err(|e| {
         client_core::error::DuckError::custom(
-            t!("diff_sql.read_new_failed", error = e.to_string()).to_string()
+            t!("diff_sql.read_new_failed", error = e.to_string()).to_string(),
         )
     })?;
 
@@ -56,11 +56,16 @@ pub async fn run_diff_sql(
         Some(from_version),
         to_version,
     )
-    .map_err(|e| client_core::error::DuckError::custom(
-        t!("diff_sql.generate_failed", error = e.to_string()).to_string()
-    ))?;
+    .map_err(|e| {
+        client_core::error::DuckError::custom(
+            t!("diff_sql.generate_failed", error = e.to_string()).to_string(),
+        )
+    })?;
 
-    info!("📊 SQL diff analysis result: {description}", description = description);
+    info!(
+        "📊 SQL diff analysis result: {description}",
+        description = description
+    );
 
     // 检查是否有实际的SQL语句需要执行
     let meaningful_lines: Vec<&str> = diff_sql
@@ -76,19 +81,24 @@ pub async fn run_diff_sql(
         let empty_diff_content = format!(
             "-- SQL diff analysis result\n-- {description}\n-- No SQL execution needed; database schema unchanged\n"
         );
-        fs::write(&output_file, empty_diff_content)
-            .map_err(|e| client_core::error::DuckError::custom(
-                t!("diff_sql.write_failed", error = e.to_string()).to_string()
-            ))?;
+        fs::write(&output_file, empty_diff_content).map_err(|e| {
+            client_core::error::DuckError::custom(
+                t!("diff_sql.write_failed", error = e.to_string()).to_string(),
+            )
+        })?;
     } else {
         // 保存差异SQL文件
-        fs::write(&output_file, &diff_sql)
-            .map_err(|e| client_core::error::DuckError::custom(
-                t!("diff_sql.write_failed", error = e.to_string()).to_string()
-            ))?;
+        fs::write(&output_file, &diff_sql).map_err(|e| {
+            client_core::error::DuckError::custom(
+                t!("diff_sql.write_failed", error = e.to_string()).to_string(),
+            )
+        })?;
 
         info!("📄 SQL diff file saved: {file}", file = output_file);
-        info!("📋 Found {count} executable SQL statements", count = meaningful_lines.len());
+        info!(
+            "📋 Found {count} executable SQL statements",
+            count = meaningful_lines.len()
+        );
 
         // 显示差异SQL内容（截取前10行）
         let diff_lines: Vec<&str> = diff_sql.lines().take(10).collect();
@@ -111,7 +121,10 @@ pub async fn run_diff_sql(
     info!("   3. Execute in production after confirmation");
 
     if !meaningful_lines.is_empty() {
-        info!("   4. Execute example: mysql -u username -p database_name < {file}", file = output_file);
+        info!(
+            "   4. Execute example: mysql -u username -p database_name < {file}",
+            file = output_file
+        );
     }
 
     info!("✅ SQL diff comparison completed");

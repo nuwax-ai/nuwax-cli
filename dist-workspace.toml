@@ -11,8 +11,7 @@ ci = "github"
 installers = ["npm"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
-# Build only the packages being released instead of `--workspace`,
-# avoiding unrelated members like `cli-ui`.
+# Build only the packages being released instead of `--workspace`.
 precise-builds = true
 # Keep existing hand-written workflows untouched.
 allow-dirty = ["ci"]

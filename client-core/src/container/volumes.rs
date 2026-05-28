@@ -28,13 +28,16 @@ impl DockerManager {
             return Ok(());
         }
 
-        info!("📁 Found {} mount directories to verify", mount_directories.len());
+        info!(
+            "📁 Found {} mount directories to verify",
+            mount_directories.len()
+        );
 
         for mount_info in mount_directories {
-            if let Some(host_path) = &mount_info.host_path {
-                if mount_info.is_bind_mount {
-                    self.create_host_directory_if_not_exists(host_path)?;
-                }
+            if let Some(host_path) = &mount_info.host_path
+                && mount_info.is_bind_mount
+            {
+                self.create_host_directory_if_not_exists(host_path)?;
             }
         }
 
@@ -206,7 +209,8 @@ impl DockerManager {
                     Ok(())
                 }
                 Err(e) => {
-                    let error_msg = format!("Failed to create directory {}: {}", dir_path.display(), e);
+                    let error_msg =
+                        format!("Failed to create directory {}: {}", dir_path.display(), e);
                     warn!("❌ {}", error_msg);
                     Err(DuckError::Docker(error_msg).into())
                 }

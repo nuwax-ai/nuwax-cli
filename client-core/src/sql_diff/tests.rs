@@ -84,7 +84,7 @@ CREATE TABLE users (
     assert_eq!(users_table.indexes.len(), 1);
 
     // 确保被忽略的表没有被解析
-    assert!(tables.get("should_be_ignored").is_none());
+    assert!(!tables.contains_key("should_be_ignored"));
 }
 
 #[test]
@@ -128,7 +128,7 @@ CREATE TABLE posts (
         generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "1.1.0").unwrap();
 
     assert!(diff_sql.contains("CREATE TABLE `posts`"));
-    assert!(description.contains("新增表"));
+    assert!(description.contains("new tables"));
 }
 
 #[test]
@@ -157,7 +157,7 @@ CREATE TABLE users (
         generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "1.1.0").unwrap();
 
     assert!(diff_sql.contains("DROP TABLE IF EXISTS `posts`"));
-    assert!(description.contains("删除表"));
+    assert!(description.contains("dropped tables"));
 }
 
 #[test]
@@ -173,7 +173,7 @@ CREATE TABLE users (
     let (diff_sql, description) =
         generate_schema_diff(Some(sql), sql, Some("1.0.0"), "1.0.1").unwrap();
     assert!(diff_sql.is_empty());
-    assert!(description.contains("无变化"));
+    assert!(description.contains("No changes"));
 }
 
 #[test]
@@ -222,7 +222,7 @@ CREATE TABLE users (
 ) ENGINE=InnoDB;
     "#;
 
-    let (diff_sql, description) =
+    let (diff_sql, _description) =
         generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "1.1.0").unwrap();
     println!("Index diff SQL: {diff_sql}");
 

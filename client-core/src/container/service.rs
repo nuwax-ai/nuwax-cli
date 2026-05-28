@@ -138,7 +138,10 @@ impl DockerManager {
 
         // 1. 获取docker-compose.yml中定义的服务名称
         let compose_services = self.get_compose_service_names().await?;
-        info!("Services defined in docker-compose.yml: {:?}", compose_services);
+        info!(
+            "Services defined in docker-compose.yml: {:?}",
+            compose_services
+        );
 
         // 2. 获取所有容器信息
         let containers = self.get_all_containers_with_ducker().await?;
@@ -234,7 +237,10 @@ impl DockerManager {
         {
             Ok(docker) => match DockerContainer::list(&docker).await {
                 Ok(containers) => {
-                    info!("ducker fetched {} containers successfully", containers.len());
+                    info!(
+                        "ducker fetched {} containers successfully",
+                        containers.len()
+                    );
                     Ok(containers)
                 }
                 Err(e) => {
@@ -440,7 +446,10 @@ impl DockerManager {
                                     .await
                                     .unwrap_or(false)
                                 {
-                                    debug!("Service {} is a one-shot task and exited normally", service.name);
+                                    debug!(
+                                        "Service {} is a one-shot task and exited normally",
+                                        service.name
+                                    );
                                 } else {
                                     failed_services.push(service.name.clone());
                                 }
@@ -482,8 +491,14 @@ impl DockerManager {
                     }
 
                     if !pending_services.is_empty() {
-                        info!("⏳ Continuing to wait for services: {}", pending_services.join(", "));
-                        tracing::debug!("Waiting for services to start: {}", pending_services.join(", "));
+                        info!(
+                            "⏳ Continuing to wait for services: {}",
+                            pending_services.join(", ")
+                        );
+                        tracing::debug!(
+                            "Waiting for services to start: {}",
+                            pending_services.join(", ")
+                        );
                     }
 
                     // 如果是最后一次尝试，返回错误
@@ -505,7 +520,9 @@ impl DockerManager {
                             ));
                         }
                         error!("❌ Service startup verification failed: {}", error_msg);
-                        return Err(anyhow::anyhow!("Service startup verification failed: {error_msg}"));
+                        return Err(anyhow::anyhow!(
+                            "Service startup verification failed: {error_msg}"
+                        ));
                     }
                 }
                 Err(e) => {
@@ -519,7 +536,10 @@ impl DockerManager {
 
             // 等待下次检查
             if attempt < max_attempts {
-                info!("⏳ Waiting {} seconds before the next check...", check_interval.as_secs());
+                info!(
+                    "⏳ Waiting {} seconds before the next check...",
+                    check_interval.as_secs()
+                );
                 sleep(check_interval).await;
             }
         }

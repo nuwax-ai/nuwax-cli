@@ -93,24 +93,40 @@ pub async fn check_services_running(filter: &ServiceFilter) -> Result<bool> {
 
                     match filter {
                         ServiceFilter::All => {
-                            info!("Found {running} running containers (total {total})", running = running_count, total = total_filtered);
+                            info!(
+                                "Found {running} running containers (total {total})",
+                                running = running_count,
+                                total = total_filtered
+                            );
                         }
                         ServiceFilter::NameContains(keywords) => {
-                            info!("Matched {keywords} containers: {running} running (total {total})", keywords = format!("{:?}", keywords), running = running_count, total = total_filtered);
+                            info!(
+                                "Matched {keywords} containers: {running} running (total {total})",
+                                keywords = format!("{:?}", keywords),
+                                running = running_count,
+                                total = total_filtered
+                            );
                         }
                     }
 
                     Ok(running_count > 0)
                 }
                 Err(e) => {
-                    error!("Failed to get container list: {error}", error = e.to_string());
-                    Err(anyhow::anyhow!(t!("docker_utils.get_containers_failed", error = e.to_string()).to_string()))
+                    error!(
+                        "Failed to get container list: {error}",
+                        error = e.to_string()
+                    );
+                    Err(anyhow::anyhow!(
+                        t!("docker_utils.get_containers_failed", error = e.to_string()).to_string()
+                    ))
                 }
             }
         }
         Err(e) => {
             error!("Cannot connect to Docker: {error}", error = e.to_string());
-            Err(anyhow::anyhow!(t!("docker_utils.docker_connect_failed", error = e.to_string()).to_string()))
+            Err(anyhow::anyhow!(
+                t!("docker_utils.docker_connect_failed", error = e.to_string()).to_string()
+            ))
         }
     }
 }
@@ -118,11 +134,16 @@ pub async fn check_services_running(filter: &ServiceFilter) -> Result<bool> {
 /// 等待指定的Docker服务完全停止
 ///
 /// 注意：推荐使用 health_check.rs 中的 wait_for_services_ready 方法
+#[allow(dead_code)]
 pub async fn wait_for_services_stopped(filter: &ServiceFilter, timeout_secs: u64) -> Result<bool> {
     let start_time = tokio::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
 
-    info!("Waiting for services to stop, filter: {filter}, timeout: {timeout}s", filter = format!("{:?}", filter), timeout = timeout_secs);
+    info!(
+        "Waiting for services to stop, filter: {filter}, timeout: {timeout}s",
+        filter = format!("{:?}", filter),
+        timeout = timeout_secs
+    );
 
     while start_time.elapsed() < timeout {
         match check_services_running(filter).await {
@@ -135,13 +156,19 @@ pub async fn wait_for_services_stopped(filter: &ServiceFilter, timeout_secs: u64
                 sleep(Duration::from_secs(timeout::SERVICE_CHECK_INTERVAL)).await;
             }
             Err(e) => {
-                warn!("Error checking service status: {error}", error = e.to_string());
+                warn!(
+                    "Error checking service status: {error}",
+                    error = e.to_string()
+                );
                 sleep(Duration::from_secs(timeout::SERVICE_CHECK_INTERVAL)).await;
             }
         }
     }
 
-    warn!("Wait for service stop timeout ({timeout}s)", timeout = timeout_secs);
+    warn!(
+        "Wait for service stop timeout ({timeout}s)",
+        timeout = timeout_secs
+    );
     Ok(false)
 }
 
@@ -152,7 +179,11 @@ pub async fn wait_for_services_started(filter: &ServiceFilter, timeout_secs: u64
     let start_time = tokio::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
 
-    info!("Waiting for services to start, filter: {filter}, timeout: {timeout}s", filter = format!("{:?}", filter), timeout = timeout_secs);
+    info!(
+        "Waiting for services to start, filter: {filter}, timeout: {timeout}s",
+        filter = format!("{:?}", filter),
+        timeout = timeout_secs
+    );
 
     while start_time.elapsed() < timeout {
         match check_services_running(filter).await {
@@ -165,20 +196,29 @@ pub async fn wait_for_services_started(filter: &ServiceFilter, timeout_secs: u64
                 sleep(Duration::from_secs(timeout::SERVICE_CHECK_INTERVAL)).await;
             }
             Err(e) => {
-                warn!("Error checking service status: {error}", error = e.to_string());
+                warn!(
+                    "Error checking service status: {error}",
+                    error = e.to_string()
+                );
                 sleep(Duration::from_secs(timeout::SERVICE_CHECK_INTERVAL)).await;
             }
         }
     }
 
-    warn!("Wait for service start timeout ({timeout}s)", timeout = timeout_secs);
+    warn!(
+        "Wait for service start timeout ({timeout}s)",
+        timeout = timeout_secs
+    );
     Ok(false)
 }
 
 /// 从docker-compose.yml文件中解析服务名称
 pub async fn parse_service_names_from_compose(compose_file_path: &Path) -> Result<Vec<String>> {
     if !compose_file_path.exists() {
-        warn!("docker-compose.yml file not found: {path}", path = compose_file_path.display());
+        warn!(
+            "docker-compose.yml file not found: {path}",
+            path = compose_file_path.display()
+        );
         return Ok(vec![]);
     }
 
@@ -187,17 +227,21 @@ pub async fn parse_service_names_from_compose(compose_file_path: &Path) -> Resul
             Ok(yaml) => {
                 let mut service_names = Vec::new();
 
-                if let Some(services) = yaml.get("services") {
-                    if let Some(services_map) = services.as_mapping() {
-                        for (key, _value) in services_map {
-                            if let Some(service_name) = key.as_str() {
-                                service_names.push(service_name.to_string());
-                            }
+                if let Some(services) = yaml.get("services")
+                    && let Some(services_map) = services.as_mapping()
+                {
+                    for (key, _value) in services_map {
+                        if let Some(service_name) = key.as_str() {
+                            service_names.push(service_name.to_string());
                         }
                     }
                 }
 
-                info!("Parsed {count} services from {path}:", path = compose_file_path.display(), count = service_names.len());
+                info!(
+                    "Parsed {count} services from {path}:",
+                    path = compose_file_path.display(),
+                    count = service_names.len()
+                );
                 for name in &service_names {
                     info!("  - {}", name);
                 }
@@ -205,13 +249,23 @@ pub async fn parse_service_names_from_compose(compose_file_path: &Path) -> Resul
                 Ok(service_names)
             }
             Err(e) => {
-                error!("Failed to parse docker-compose.yml: {error}", error = e.to_string());
-                Err(anyhow::anyhow!(t!("docker_utils.parse_compose_failed", error = e.to_string()).to_string()))
+                error!(
+                    "Failed to parse docker-compose.yml: {error}",
+                    error = e.to_string()
+                );
+                Err(anyhow::anyhow!(
+                    t!("docker_utils.parse_compose_failed", error = e.to_string()).to_string()
+                ))
             }
         },
         Err(e) => {
-            error!("Failed to read docker-compose.yml: {error}", error = e.to_string());
-            Err(anyhow::anyhow!(t!("docker_utils.read_compose_failed", error = e.to_string()).to_string()))
+            error!(
+                "Failed to read docker-compose.yml: {error}",
+                error = e.to_string()
+            );
+            Err(anyhow::anyhow!(
+                t!("docker_utils.read_compose_failed", error = e.to_string()).to_string()
+            ))
         }
     }
 }
@@ -234,6 +288,7 @@ pub async fn create_compose_filter(compose_file_path: &Path) -> Result<ServiceFi
 /// 推荐使用 HealthChecker 来获得更准确的状态判断。
 ///
 /// 此函数保留用于向后兼容，但建议迁移到 HealthChecker。
+#[allow(dead_code)]
 pub async fn wait_for_compose_services_stopped(
     compose_file_path: &Path,
     timeout_secs: u64,

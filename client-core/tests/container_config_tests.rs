@@ -79,8 +79,8 @@ mod tests {
     #[tokio::test]
     async fn test_is_oneshot_service() {
         let (_temp_dir, compose_path, env_path) = create_test_files();
-        let manager =
-            DockerManager::new(compose_path, env_path).expect("Failed to create DockerManager");
+        let manager = DockerManager::with_project(&compose_path, &env_path, None)
+            .expect("Failed to create DockerManager");
 
         // 测试restart: "false"的一次性服务
         let result = manager.is_oneshot_service("permission-fix").await;
@@ -110,8 +110,8 @@ mod tests {
     #[tokio::test]
     async fn test_parse_service_config() {
         let (_temp_dir, compose_path, env_path) = create_test_files();
-        let manager =
-            DockerManager::new(compose_path, env_path).expect("Failed to create DockerManager");
+        let manager = DockerManager::with_project(compose_path, env_path, None)
+            .expect("Failed to create DockerManager");
 
         // 测试restart: always的服务
         let result = manager.parse_service_config("frontend").await;
@@ -157,8 +157,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_compose_service_names() {
         let (_temp_dir, compose_path, env_path) = create_test_files();
-        let manager =
-            DockerManager::new(compose_path, env_path).expect("Failed to create DockerManager");
+        let manager = DockerManager::with_project(compose_path, env_path, None)
+            .expect("Failed to create DockerManager");
 
         let result = manager.get_compose_service_names().await;
         assert!(result.is_ok());
@@ -192,8 +192,8 @@ mod tests {
         let env_path = PathBuf::from("fixtures/.env");
 
         if compose_path.exists() && env_path.exists() {
-            let manager =
-                DockerManager::new(compose_path, env_path).expect("Failed to create DockerManager");
+            let manager = DockerManager::with_project(compose_path, env_path, None)
+                .expect("Failed to create DockerManager");
 
             // 测试get_compose_service_names
             let result = manager.get_compose_service_names().await;

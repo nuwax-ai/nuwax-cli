@@ -58,15 +58,15 @@ pub async fn detect_compose_command_type() -> ComposeCommandType {
         .output()
         .await;
 
-    if let Ok(output) = output {
-        if output.status.success() {
-            let version_info = String::from_utf8_lossy(&output.stdout);
-            info!(
-                "   ✅ Using standalone docker-compose command: {}",
-                version_info.trim()
-            );
-            return ComposeCommandType::DockerComposeStandalone;
-        }
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let version_info = String::from_utf8_lossy(&output.stdout);
+        info!(
+            "   ✅ Using standalone docker-compose command: {}",
+            version_info.trim()
+        );
+        return ComposeCommandType::DockerComposeStandalone;
     }
 
     warn!("   ⚠️ No available Docker Compose command detected");
@@ -239,11 +239,11 @@ fn detect_host_os() -> HostOs {
 /// 检测是否在 WSL2 中运行
 fn is_running_in_wsl() -> bool {
     // 方法 1: 检查 /proc/version
-    if let Ok(version) = std::fs::read_to_string("/proc/version") {
-        if version.to_lowercase().contains("microsoft") {
-            debug!("Detected WSL marker in /proc/version");
-            return true;
-        }
+    if let Ok(version) = std::fs::read_to_string("/proc/version")
+        && version.to_lowercase().contains("microsoft")
+    {
+        debug!("Detected WSL marker in /proc/version");
+        return true;
     }
 
     // 方法 2: 检查 WSL 环境变量
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn test_compose_command_type_clone_copy() {
         let original = ComposeCommandType::DockerComposeSubcommand;
-        let cloned = original.clone();
+        let cloned = original;
         let copied = original;
 
         assert_eq!(original, cloned);

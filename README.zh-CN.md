@@ -46,9 +46,6 @@ nuwax-cli/
 │   │   ├── container/     # Docker 操作
 │   │   └── sql_diff/      # SQL 差异对比
 │   └── Cargo.toml
-├── 🖥️ cli-ui/            # Tauri GUI 应用 (开发中)
-│   ├── src-tauri/        # Tauri 后端
-│   └── src/              # 前端界面
 ├── 📚 docs/              # 技术文档
 ├── 📋 spec/              # 设计规范
 ├── 🗄️ data/              # 数据目录
@@ -135,9 +132,12 @@ nuwax-cli ducker                      # 启动 Docker TUI
 
 ```bash
 # 升级管理
-nuwax-cli upgrade                     # 执行升级
-nuwax-cli upgrade --check            # 检查更新
-nuwax-cli upgrade --force           # 强制重装
+nuwax-cli upgrade                     # 下载升级包（兼容旧入口）
+nuwax-cli upgrade --check             # 检查更新（兼容旧入口）
+nuwax-cli upgrade --force             # 强制全量下载
+nuwax-cli upgrade check               # 检查更新
+nuwax-cli upgrade download            # 下载离线部署全量包
+nuwax-cli auto-upgrade-deploy offline-deploy --archive ./docker-x86_64.zip --version 1.2.3
 
 # 备份恢复
 nuwax-cli backup                     # 创建备份
@@ -207,7 +207,6 @@ cargo bench -- --output-format html
 
 - **nuwax-cli**: CLI 接口层，依赖 client-core
 - **client-core**: 核心业务逻辑，独立可测试
-- **cli-ui**: Tauri GUI 应用，独立前端项目
 
 所有依赖版本在根 `Cargo.toml` 中统一管理，确保版本一致性。
 

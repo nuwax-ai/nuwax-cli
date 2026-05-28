@@ -8,8 +8,6 @@ mod service;
 pub mod types;
 pub mod volumes;
 
-mod modern_docker;
-
 // 重新导出公共API
 pub use environment::{
     ComposeCommandType, HostOs, PathFormat, RuntimeEnvironment, detect_compose_command_type,

@@ -138,7 +138,7 @@ CREATE TABLE `posts` (
         let re = regex::Regex::new(use_pattern).unwrap();
 
         let extracted = if let Some(mat) = re.find(sql_with_use) {
-            &sql_with_use[mat.end()..].trim()
+            sql_with_use[mat.end()..].trim()
         } else {
             sql_with_use
         };

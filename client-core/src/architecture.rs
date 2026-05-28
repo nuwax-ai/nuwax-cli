@@ -68,13 +68,13 @@ impl Architecture {
     /// ```
     /// use client_core::architecture::Architecture;
     ///
-    /// let arch = Architecture::from_str("x86_64").unwrap();
+    /// let arch = Architecture::parse("x86_64").unwrap();
     /// assert_eq!(arch, Architecture::X86_64);
     ///
-    /// let arch = Architecture::from_str("arm64").unwrap();
+    /// let arch = Architecture::parse("arm64").unwrap();
     /// assert_eq!(arch, Architecture::Aarch64);
     /// ```
-    pub fn from_str(arch_str: &str) -> Result<Self> {
+    pub fn parse(arch_str: &str) -> Result<Self> {
         match arch_str.to_lowercase().as_str() {
             "x86_64" | "amd64" | "x64" => Ok(Self::X86_64),
             "aarch64" | "arm64" | "armv8" => Ok(Self::Aarch64),
@@ -112,9 +112,9 @@ impl Architecture {
     /// ```
     pub fn display_name(&self) -> &str {
         match self {
-            Self::X86_64 => "Intel/AMD 64-bit",
-            Self::Aarch64 => "ARM 64-bit",
-            Self::Unsupported(_) => "Unsupported architecture",
+            Self::X86_64 => "Intel/AMD 64位",
+            Self::Aarch64 => "ARM 64位",
+            Self::Unsupported(_) => "不支持的架构",
         }
     }
 
@@ -168,7 +168,7 @@ impl FromStr for Architecture {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        Architecture::from_str(s)
+        Architecture::parse(s)
     }
 }
 
@@ -202,11 +202,11 @@ impl ArchitectureCompatibilityChecker {
     pub fn get_system_summary() -> String {
         let arch = Architecture::detect();
         format!(
-            "OS: {}, architecture: {} ({}), 64-bit support: {}",
+            "操作系统: {}, 架构: {} ({}), 64位支持: {}",
             std::env::consts::OS,
             arch.as_str(),
             arch.display_name(),
-            if arch.is_64bit() { "yes" } else { "no" }
+            if arch.is_64bit() { "是" } else { "否" }
         )
     }
 

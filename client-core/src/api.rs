@@ -1,7 +1,7 @@
 use crate::api_config::ApiConfig;
-use crate::constants::api as api_constants;
 use crate::api_types::*;
 use crate::authenticated_client::AuthenticatedClient;
+use crate::constants::api as api_constants;
 use crate::downloader::{DownloadProgress, DownloaderConfig, FileDownloader};
 use crate::error::DuckError;
 use crate::version::Version;
@@ -118,7 +118,9 @@ impl ApiClient {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             error!("Failed to get announcements: {} - {}", status, text);
-            Err(anyhow::anyhow!("Failed to get announcements: {status} - {text}"))
+            Err(anyhow::anyhow!(
+                "Failed to get announcements: {status} - {text}"
+            ))
         }
     }
 
@@ -150,7 +152,9 @@ impl ApiClient {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             error!("Failed to check Docker version: {} - {}", status, text);
-            Err(anyhow::anyhow!("Failed to check Docker version: {status} - {text}"))
+            Err(anyhow::anyhow!(
+                "Failed to check Docker version: {status} - {text}"
+            ))
         }
     }
 
@@ -169,7 +173,9 @@ impl ApiClient {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             error!("Failed to get Docker version list: {} - {}", status, text);
-            Err(anyhow::anyhow!("Failed to get Docker version list: {status} - {text}"))
+            Err(anyhow::anyhow!(
+                "Failed to get Docker version list: {status} - {text}"
+            ))
         }
     }
 
@@ -199,18 +205,27 @@ impl ApiClient {
         save_path: P,
         use_auth: bool,
     ) -> Result<()> {
-        info!("Starting to download Docker service update package: {}", url);
+        info!(
+            "Starting to download Docker service update package: {}",
+            url
+        );
 
         // 根据是否需要认证决定使用哪种客户端
-        let response = if use_auth && self.authenticated_client.is_some() {
-            // 使用认证客户端（API下载）
-            let auth_client = self.authenticated_client.as_ref().unwrap();
-            match auth_client.get(url).await {
-                Ok(request_builder) => auth_client.send(request_builder, url).await?,
-                Err(e) => {
-                    warn!("AuthenticatedClient failed, falling back to regular request: {}", e);
-                    self.build_request(url).send().await?
+        let response = if use_auth {
+            if let Some(auth_client) = self.authenticated_client.as_ref() {
+                match auth_client.get(url).await {
+                    Ok(request_builder) => auth_client.send(request_builder, url).await?,
+                    Err(e) => {
+                        warn!(
+                            "AuthenticatedClient failed, falling back to regular request: {}",
+                            e
+                        );
+                        self.build_request(url).send().await?
+                    }
                 }
+            } else {
+                info!("Using regular HTTP client for download (no auth client available)");
+                self.build_request(url).send().await?
             }
         } else {
             // 使用普通客户端（直接URL下载）
@@ -221,7 +236,10 @@ impl ApiClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            error!("Failed to download Docker service update package: {} - {}", status, text);
+            error!(
+                "Failed to download Docker service update package: {} - {}",
+                status, text
+            );
             return Err(anyhow::anyhow!("Download failed: {status} - {text}"));
         }
 
@@ -243,7 +261,8 @@ impl ApiClient {
         let mut last_progress_time = std::time::Instant::now();
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| DuckError::custom(format!("Failed to download data: {e}")))?;
+            let chunk =
+                chunk.map_err(|e| DuckError::custom(format!("Failed to download data: {e}")))?;
 
             tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
                 .await
@@ -256,7 +275,7 @@ impl ApiClient {
             let time_since_last = now.duration_since(last_progress_time);
 
             // 减少频率：每50MB或每30秒显示一次
-            let should_show_progress = downloaded % (50 * 1024 * 1024) == 0 && downloaded > 0 ||  // 每50MB显示一次
+            let should_show_progress = downloaded.is_multiple_of(50 * 1024 * 1024) && downloaded > 0 ||  // 每50MB显示一次
                 time_since_last >= std::time::Duration::from_secs(30) ||  // 每30秒显示一次
                 (total_size.is_some_and(|size| downloaded >= size)); // 下载完成时显示
 
@@ -287,7 +306,9 @@ impl ApiClient {
             let bar_width = 30;
             let progress_bar = "█".repeat(bar_width);
 
-            print!("\rDownload progress: [{progress_bar}] 100.0% ({downloaded_mb:.1}/{total_mb:.1} MB)");
+            print!(
+                "\rDownload progress: [{progress_bar}] 100.0% ({downloaded_mb:.1}/{total_mb:.1} MB)"
+            );
             io::stdout().flush().unwrap();
         } else {
             // 没有总大小信息时，显示最终下载量
@@ -299,7 +320,10 @@ impl ApiClient {
         // 下载完成，换行并显示完成信息
         println!(); // 换行
         file.flush().await?;
-        info!("Docker service update package download completed: {}", save_path.as_ref().display());
+        info!(
+            "Docker service update package download completed: {}",
+            save_path.as_ref().display()
+        );
         Ok(())
     }
 
@@ -320,7 +344,10 @@ impl ApiClient {
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            warn!("Failed to report service upgrade history: {} - {}", status, text);
+            warn!(
+                "Failed to report service upgrade history: {} - {}",
+                status, text
+            );
             // 上报失败不影响主流程，只记录警告
             Ok(())
         }
@@ -343,7 +370,10 @@ impl ApiClient {
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            warn!("Failed to report client self-upgrade history: {} - {}", status, text);
+            warn!(
+                "Failed to report client self-upgrade history: {} - {}",
+                status, text
+            );
             // 上报失败不影响主流程，只记录警告
             Ok(())
         }
@@ -379,11 +409,18 @@ impl ApiClient {
     /// 计算文件的SHA256哈希值
     pub async fn calculate_file_hash(file_path: &Path) -> Result<String> {
         if !file_path.exists() {
-            return Err(anyhow::anyhow!("File does not exist: {}", file_path.display()));
+            return Err(anyhow::anyhow!(
+                "File does not exist: {}",
+                file_path.display()
+            ));
         }
 
         let mut file = File::open(file_path).await.map_err(|e| {
-            DuckError::Custom(format!("Failed to open file {}: {}", file_path.display(), e))
+            DuckError::Custom(format!(
+                "Failed to open file {}: {}",
+                file_path.display(),
+                e
+            ))
         })?;
 
         let mut hasher = Sha256::new();
@@ -391,7 +428,11 @@ impl ApiClient {
 
         loop {
             let bytes_read = file.read(&mut buffer).await.map_err(|e| {
-                DuckError::Custom(format!("Failed to read file {}: {}", file_path.display(), e))
+                DuckError::Custom(format!(
+                    "Failed to read file {}: {}",
+                    file_path.display(),
+                    e
+                ))
             })?;
 
             if bytes_read == 0 {
@@ -402,7 +443,7 @@ impl ApiClient {
         }
 
         let hash = hasher.finalize();
-        Ok(format!("{hash:x}"))
+        Ok(hash.to_vec().iter().map(|b| format!("{b:02x}")).collect())
     }
 
     /// 保存文件哈希信息到.hash文件
@@ -470,9 +511,15 @@ impl ApiClient {
         let matches = actual_hash.to_lowercase() == expected_hash.to_lowercase();
 
         if matches {
-            info!("File integrity verification passed: {}", file_path.display());
+            info!(
+                "File integrity verification passed: {}",
+                file_path.display()
+            );
         } else {
-            warn!("File integrity verification failed: {}", file_path.display());
+            warn!(
+                "File integrity verification failed: {}",
+                file_path.display()
+            );
             warn!("   Expected hash: {}", expected_hash);
             warn!("   Actual hash: {}", actual_hash);
         }
@@ -511,7 +558,10 @@ impl ApiClient {
 
         // 文件不存在，需要下载
         if !file_path.exists() {
-            info!("File does not exist, need to download: {}", file_path.display());
+            info!(
+                "File does not exist, need to download: {}",
+                file_path.display()
+            );
             // 清理可能存在的哈希文件
             let hash_file_path = file_path.with_extension("hash");
             if hash_file_path.exists() {
@@ -563,7 +613,10 @@ impl ApiClient {
                         return Ok(true);
                     }
                     Err(e) => {
-                        warn!("File integrity verification error: {}, need to re-download", e);
+                        warn!(
+                            "File integrity verification error: {}, need to re-download",
+                            e
+                        );
                         return Ok(true);
                     }
                 }
@@ -609,19 +662,25 @@ impl ApiClient {
     pub async fn get_enhanced_service_manifest(&self) -> Result<EnhancedServiceManifest> {
         // 检查是否设置了自定义 Docker 版本 URL 环境变量
         let custom_url = std::env::var(api_constants::NUWAX_API_DOCKER_VERSION_URL_ENV);
-        
+
         let (oss_url, url_source) = if let Ok(url) = custom_url {
             (url, "env NUWAX_API_DOCKER_VERSION_URL")
         } else {
             // 检查是否为测试环境
             let cli_env = std::env::var("NUWAX_CLI_ENV").unwrap_or_default();
             if cli_env.eq_ignore_ascii_case("test") || cli_env.eq_ignore_ascii_case("testing") {
-                (self.config.endpoints.docker_version_oss_beta.clone(), "beta OSS (test env)")
+                (
+                    self.config.endpoints.docker_version_oss_beta.clone(),
+                    "beta OSS (test env)",
+                )
             } else {
-                (self.config.endpoints.docker_version_oss_prod.clone(), "prod OSS")
+                (
+                    self.config.endpoints.docker_version_oss_prod.clone(),
+                    "prod OSS",
+                )
             }
         };
-        
+
         info!("Fetching service manifest from {}: {}", url_source, oss_url);
 
         match self.fetch_and_parse_manifest(&oss_url).await {
@@ -630,7 +689,10 @@ impl ApiClient {
                 return Ok(manifest);
             }
             Err(e) => {
-                warn!("Failed to fetch from {}: {}, falling back to API", url_source, e);
+                warn!(
+                    "Failed to fetch from {}: {}, falling back to API",
+                    url_source, e
+                );
             }
         }
 
@@ -650,8 +712,9 @@ impl ApiClient {
         if response.status().is_success() {
             // 先获取原始json文本，解析为serde_json::Value，判断根对象是否有 platforms 字段
             let text = response.text().await?;
-            let json_value: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| DuckError::Api(format!("Service manifest JSON parsing failed: {e}")))?;
+            let json_value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+                DuckError::Api(format!("Service manifest JSON parsing failed: {e}"))
+            })?;
 
             let has_platforms = match &json_value {
                 serde_json::Value::Object(map) => map.contains_key("platforms"),
@@ -668,14 +731,19 @@ impl ApiClient {
                     }
                     Err(e) => {
                         error!("Failed to parse service upgrade - enhanced format: {}", e);
-                        Err(anyhow::anyhow!("Failed to parse service upgrade - enhanced format: {}", e))
+                        Err(anyhow::anyhow!(
+                            "Failed to parse service upgrade - enhanced format: {}",
+                            e
+                        ))
                     }
                 }
             } else {
                 // 没有 platforms 字段，按旧格式解析并转换
                 match serde_json::from_value::<ServiceManifest>(json_value) {
                     Ok(old_manifest) => {
-                        info!("Successfully parsed legacy service manifest, converting to enhanced format");
+                        info!(
+                            "Successfully parsed legacy service manifest, converting to enhanced format"
+                        );
                         let enhanced_manifest = EnhancedServiceManifest {
                             version: old_manifest.version.parse::<Version>()?,
                             release_date: old_manifest.release_date,
@@ -689,15 +757,23 @@ impl ApiClient {
                     }
                     Err(e) => {
                         error!("Failed to parse service upgrade - legacy format: {}", e);
-                        Err(anyhow::anyhow!("Failed to parse service upgrade - legacy format: {}", e))
+                        Err(anyhow::anyhow!(
+                            "Failed to parse service upgrade - legacy format: {}",
+                            e
+                        ))
                     }
                 }
             }
         } else {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            error!("Failed to get enhanced service manifest: {} - {}", status, text);
-            Err(anyhow::anyhow!("Failed to get enhanced service manifest: {status} - {text}"))
+            error!(
+                "Failed to get enhanced service manifest: {} - {}",
+                status, text
+            );
+            Err(anyhow::anyhow!(
+                "Failed to get enhanced service manifest: {status} - {text}"
+            ))
         }
     }
 
@@ -725,9 +801,9 @@ impl ApiClient {
             info!("Found hash file: {}", hash_file_path.display());
             // 读取保存的哈希和版本信息
             if let Ok(hash_content) = std::fs::read_to_string(&hash_file_path) {
-                let hash_info: DownloadHashInfo = hash_content
-                    .parse()
-                    .map_err(|e| DuckError::custom(format!("Invalid hash info format for downloaded file: {e}")))?;
+                let hash_info: DownloadHashInfo = hash_content.parse().map_err(|e| {
+                    DuckError::custom(format!("Invalid hash info format for downloaded file: {e}"))
+                })?;
 
                 info!("Hash file info:");
                 info!("   Saved hash: {}", hash_info.hash);
@@ -763,10 +839,10 @@ impl ApiClient {
         }
 
         // 6. 确保下载目录存在
-        if let Some(parent) = download_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return Err(anyhow::anyhow!("Failed to create download directory: {e}"));
-            }
+        if let Some(parent) = download_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return Err(anyhow::anyhow!("Failed to create download directory: {e}"));
         }
 
         info!("Starting to download service update package...");

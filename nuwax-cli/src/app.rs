@@ -14,6 +14,7 @@ use tracing::debug;
 
 #[derive(Clone)]
 pub struct CliApp {
+    pub config_path: PathBuf,
     pub config: Arc<AppConfig>,
     pub database: Arc<Database>,
     pub api_client: Arc<ApiClient>,
@@ -28,7 +29,7 @@ impl CliApp {
     pub async fn new_with_auto_config() -> Result<Self> {
         let config = Arc::new(AppConfig::find_and_load_config()?);
 
-        Self::new_with_config(config).await
+        Self::new_with_config(config, PathBuf::from("config.toml")).await
     }
 
     /// 使用指定配置文件路径初始化CLI应用
@@ -41,11 +42,11 @@ impl CliApp {
             Arc::new(AppConfig::find_and_load_config()?)
         };
 
-        Self::new_with_config(config).await
+        Self::new_with_config(config, config_path.to_path_buf()).await
     }
 
     /// 使用配置初始化CLI应用
-    async fn new_with_config(config: Arc<AppConfig>) -> Result<Self> {
+    async fn new_with_config(config: Arc<AppConfig>, config_path: PathBuf) -> Result<Self> {
         // 确保缓存目录存在
         config.ensure_cache_dirs()?;
 
@@ -87,12 +88,13 @@ impl CliApp {
         )?);
         let upgrade_manager = Arc::new(UpgradeManager::new(
             config.clone(),
-            PathBuf::from("config.toml"), // 使用默认配置路径
+            config_path.clone(),
             api_client.clone(),
             database.clone(),
         ));
 
         Ok(Self {
+            config_path,
             config,
             database,
             api_client,
@@ -112,12 +114,39 @@ impl CliApp {
             Commands::CheckUpdate(check_update_cmd) => {
                 commands::handle_check_update_command(check_update_cmd)
                     .await
-                    .map_err(|e| anyhow::anyhow!(t!("app.check_update_failed", error = e.to_string()).to_string()))
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            t!("app.check_update_failed", error = e.to_string()).to_string()
+                        )
+                    })
             }
-            Commands::Upgrade { args } => {
-                commands::run_upgrade(self, args)
-                    .await
-                    .map_err(|e| client_core::DuckError::custom(t!("app.upgrade_failed", error = e.to_string()).to_string()))?;
+            Commands::Upgrade { subcommand, args } => {
+                match subcommand {
+                    Some(crate::cli::UpgradeSubcommand::Download { full: _ }) => {
+                        commands::run_download_with_config(&self.config)
+                            .await
+                            .map_err(|e| {
+                                client_core::DuckError::custom(
+                                    t!("app.upgrade_failed", error = e.to_string()).to_string(),
+                                )
+                            })?;
+                    }
+                    Some(crate::cli::UpgradeSubcommand::Check { force }) => {
+                        let args = crate::cli::UpgradeArgs { force, check: true };
+                        commands::run_upgrade(self, args).await.map_err(|e| {
+                            client_core::DuckError::custom(
+                                t!("app.upgrade_failed", error = e.to_string()).to_string(),
+                            )
+                        })?;
+                    }
+                    None => {
+                        commands::run_upgrade(self, args).await.map_err(|e| {
+                            client_core::DuckError::custom(
+                                t!("app.upgrade_failed", error = e.to_string()).to_string(),
+                            )
+                        })?;
+                    }
+                }
                 Ok(())
             }
             Commands::ListBackups => commands::run_list_backups(self).await,

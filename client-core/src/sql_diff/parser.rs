@@ -86,7 +86,10 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
                 }
             }
             Err(e) => {
-                warn!("Failed to parse SQL statement: {} - error: {}", create_table_sql, e);
+                warn!(
+                    "Failed to parse SQL statement: {} - error: {}",
+                    create_table_sql, e
+                );
             }
         }
     }
@@ -232,10 +235,12 @@ fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError>
             sqlparser::ast::ColumnOption::Comment(c) => {
                 comment = Some(c.clone());
             }
-            sqlparser::ast::ColumnOption::Unique { is_primary, .. } => {
-                if *is_primary {
-                    nullable = false; // 主键不能为空
-                }
+            sqlparser::ast::ColumnOption::Unique(_) => {
+                // sqlparser 0.62: 列级 UNIQUE 不再包含 is_primary 字段
+                // 列级 PRIMARY KEY 现在是独立的 ColumnOption::PrimaryKey 变体
+            }
+            sqlparser::ast::ColumnOption::PrimaryKey(_) => {
+                nullable = false; // 主键不能为空
             }
             sqlparser::ast::ColumnOption::DialectSpecific(tokens) => {
                 // 检查是否是AUTO_INCREMENT
@@ -266,8 +271,8 @@ fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError>
 /// 解析表约束
 fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIndex>, DuckError> {
     match constraint {
-        TableConstraint::PrimaryKey { columns, .. } => {
-            let column_names: Vec<String> = columns.iter().map(ident_to_string).collect();
+        TableConstraint::PrimaryKey(pk) => {
+            let column_names = extract_index_columns(&pk.columns);
 
             Ok(Some(TableIndex {
                 name: "PRIMARY".to_string(),
@@ -277,9 +282,10 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 index_type: Some("PRIMARY".to_string()),
             }))
         }
-        TableConstraint::Unique { columns, name, .. } => {
-            let column_names: Vec<String> = columns.iter().map(ident_to_string).collect();
-            let index_name = name
+        TableConstraint::Unique(uq) => {
+            let column_names = extract_index_columns(&uq.columns);
+            let index_name = uq
+                .name
                 .as_ref()
                 .map(ident_to_string)
                 .unwrap_or_else(|| format!("unique_{}", column_names.join("_")));
@@ -292,9 +298,10 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 index_type: Some("UNIQUE".to_string()),
             }))
         }
-        TableConstraint::Index { name, columns, .. } => {
-            let column_names: Vec<String> = columns.iter().map(ident_to_string).collect();
-            let index_name = name
+        TableConstraint::Index(idx) => {
+            let column_names = extract_index_columns(&idx.columns);
+            let index_name = idx
+                .name
                 .as_ref()
                 .map(ident_to_string)
                 .unwrap_or_else(|| format!("idx_{}", column_names.join("_")));
@@ -324,7 +331,10 @@ fn format_default_value(expr: &sqlparser::ast::Expr) -> String {
             match function_name.to_uppercase().as_str() {
                 "CURRENT_TIMESTAMP" | "NOW" | "CURRENT_DATE" | "CURRENT_TIME"
                 | "LOCALTIMESTAMP" | "LOCALTIME" => {
-                    debug!("Recognized as MySQL datetime function, returning: {}", function_name);
+                    debug!(
+                        "Recognized as MySQL datetime function, returning: {}",
+                        function_name
+                    );
                     function_name
                 }
                 _ => {
@@ -416,10 +426,10 @@ fn format_data_type(data_type: &DataType) -> String {
             // 正确处理 ENUM 变体
             let enum_values: Vec<String> = variants
                 .iter()
-                .filter_map(|variant| match variant {
-                    sqlparser::ast::EnumMember::Name(name) => Some(format!("'{}'", name)),
+                .map(|variant| match variant {
+                    sqlparser::ast::EnumMember::Name(name) => format!("'{}'", name),
                     sqlparser::ast::EnumMember::NamedValue(name, _expr) => {
-                        Some(format!("'{}'", name))
+                        format!("'{}'", name)
                     }
                 })
                 .collect();
@@ -437,10 +447,8 @@ fn format_data_type(data_type: &DataType) -> String {
 /// 检查列是否是列级别的主键
 fn is_column_primary_key(column: &ColumnDef) -> bool {
     for option in &column.options {
-        if let sqlparser::ast::ColumnOption::Unique { is_primary, .. } = &option.option {
-            if *is_primary {
-                return true;
-            }
+        if let sqlparser::ast::ColumnOption::PrimaryKey(_) = &option.option {
+            return true;
         }
     }
     false
@@ -525,7 +533,10 @@ fn parse_standalone_indexes(
                         if let Some(table_def) = tables.get_mut(&table_name) {
                             // 检查是否已经存在同名索引
                             if table_def.indexes.iter().any(|idx| idx.name == index_name) {
-                                debug!("Index {} already exists in table {}, skipping", index_name, table_name);
+                                debug!(
+                                    "Index {} already exists in table {}, skipping",
+                                    index_name, table_name
+                                );
                                 continue;
                             }
 
@@ -548,19 +559,28 @@ fn parse_standalone_indexes(
                                 index_name, table_name, columns, is_unique
                             );
                         } else {
-                            warn!("Index {} references table {} which does not exist, skipping", index_name, table_name);
+                            warn!(
+                                "Index {} references table {} which does not exist, skipping",
+                                index_name, table_name
+                            );
                         }
                     }
                 }
             }
             Err(e) => {
-                warn!("Failed to parse CREATE INDEX statement: {} - error: {}", index_sql, e);
+                warn!(
+                    "Failed to parse CREATE INDEX statement: {} - error: {}",
+                    index_sql, e
+                );
             }
         }
     }
 
     if index_count > 0 {
-        info!("Successfully parsed {} standalone CREATE INDEX statements", index_count);
+        info!(
+            "Successfully parsed {} standalone CREATE INDEX statements",
+            index_count
+        );
     }
 
     Ok(())

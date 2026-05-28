@@ -7,8 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Nuwax CLI is a Rust-based Docker service management and upgrade tool with a modular workspace architecture:
 
 - **nuwax-cli**: Main CLI binary entry point
-- **client-core**: Shared core business logic library  
-- **cli-ui**: Tauri desktop GUI application (React + TypeScript)
+- **client-core**: Shared core business logic library
 
 ## Development Commands
 
@@ -16,9 +15,6 @@ Nuwax CLI is a Rust-based Docker service management and upgrade tool with a modu
 ```bash
 # Build CLI (release)
 cargo build --release -p nuwax-cli
-
-# Build Tauri GUI (must be in cli-ui directory)
-cd cli-ui && npm run tauri build
 
 # Build workspace
 cargo build --workspace
@@ -52,9 +48,6 @@ cargo check --workspace
 ```bash
 # Run CLI in development
 cargo run -- --help
-
-# Run Tauri GUI (must be in cli-ui directory)
-cd cli-ui && npm run tauri dev
 
 # Run CLI with debug logging
 RUST_LOG=debug cargo run -- status
@@ -100,12 +93,6 @@ All project constants are centralized in `client-core/src/constants.rs` includin
 - DuckDB for embedded analytics and state storage
 - MySQL support for SQL diff execution and schema upgrades
 - Dashmap for concurrent-safe in-memory data structures (instead of Arc<RwLock<HashMap>>)
-
-### Tauri GUI Development
-- Must run from `cli-ui/` directory, not workspace root
-- Uses Tauri updater and file-system plugins
-- Development server: `npm run tauri dev`
-- API documentation available at: `http://127.0.0.1:3000/api-docs/openapi.json`
 
 ## Configuration Management
 

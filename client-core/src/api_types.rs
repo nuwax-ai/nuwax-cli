@@ -464,10 +464,10 @@ impl PatchPackageInfo {
             return Err(anyhow::anyhow!("Invalid patch package URL format"));
         }
 
-        if let Some(hash) = &self.hash {
-            if hash.is_empty() {
-                return Err(anyhow::anyhow!("Patch package hash cannot be empty"));
-            }
+        if let Some(hash) = &self.hash
+            && hash.is_empty()
+        {
+            return Err(anyhow::anyhow!("Patch package hash cannot be empty"));
         }
 
         self.operations.validate()?;

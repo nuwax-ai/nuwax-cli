@@ -13,7 +13,7 @@ use rust_i18n::t;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
@@ -59,16 +59,77 @@ fn create_docker_manager(
 /// 如果保存配置文件失败会返回错误
 fn update_config_version(
     config: &mut Arc<client_core::config::AppConfig>,
+    config_path: &Path,
     version: &str,
 ) -> Result<()> {
     let config_mut = Arc::make_mut(config);
     config_mut.write_docker_versions(version.to_string());
 
     config_mut
-        .save_to_file("config.toml")
+        .save_to_file(config_path)
         .context(t!("auto_upgrade_deploy.save_config_failed"))?;
 
-    info!(version = version, "✅ Updated and saved the version in configuration file");
+    info!(
+        version = version,
+        "✅ Updated and saved the version in configuration file"
+    );
+    Ok(())
+}
+
+fn create_docker_backup_path() -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    PathBuf::from(format!(
+        ".docker.offline-backup-{}-{timestamp}",
+        std::process::id()
+    ))
+}
+
+fn restore_docker_backup(backup_dir: &Path, docker_dir: &Path) -> Result<()> {
+    if docker_dir.exists() {
+        fs::remove_dir_all(docker_dir).context("Failed to remove partial docker directory")?;
+    }
+
+    if backup_dir.exists() {
+        fs::rename(backup_dir, docker_dir)
+            .context("Failed to restore previous docker directory")?;
+    }
+
+    Ok(())
+}
+
+fn restore_preserved_docker_dirs(backup_dir: &Path, docker_dir: &Path) -> Result<()> {
+    if !backup_dir.exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(docker_dir).context("Failed to create docker directory")?;
+
+    for dir_name in client_core::constants::docker::EXCLUDE_DIRS {
+        let old_path = backup_dir.join(dir_name);
+        if !old_path.exists() {
+            continue;
+        }
+
+        let new_path = docker_dir.join(dir_name);
+        if new_path.exists() {
+            if new_path.is_dir() {
+                fs::remove_dir_all(&new_path).with_context(|| {
+                    format!("Failed to replace preserved directory: {dir_name}")
+                })?;
+            } else {
+                fs::remove_file(&new_path)
+                    .with_context(|| format!("Failed to replace preserved file: {dir_name}"))?;
+            }
+        }
+
+        fs::rename(&old_path, &new_path)
+            .with_context(|| format!("Failed to restore preserved directory: {dir_name}"))?;
+        info!("🛡️ Restored preserved docker directory: {dir_name}");
+    }
+
     Ok(())
 }
 
@@ -90,6 +151,16 @@ pub async fn handle_auto_upgrade_deploy_command(
             info!("Show auto-upgrade deployment status");
             show_status(app).await
         }
+        AutoUpgradeDeployCommand::OfflineDeploy {
+            archive,
+            version,
+            port,
+            config,
+            project,
+        } => {
+            info!("📦 Starting offline deployment...");
+            run_offline_deploy(app, archive, version, port, config, project).await
+        }
     }
 }
 
@@ -109,7 +180,10 @@ pub async fn run_auto_upgrade_deploy(
 
     // 如果指定了配置文件，显示配置文件信息
     if let Some(config_path) = &config_file {
-        info!("📄 Custom docker-compose configuration file: {path}", path = config_path.display());
+        info!(
+            "📄 Custom docker-compose configuration file: {path}",
+            path = config_path.display()
+        );
     }
 
     // 注意：CLI版本检查已经在 main.rs 中优先处理，这里不再重复检查
@@ -170,13 +244,19 @@ pub async fn run_auto_upgrade_deploy(
         info!("Podman Desktop does not auto-create mount directories; manual creation is required");
 
         if let Err(e) = docker_manager.ensure_host_volumes_exist().await {
-            warn!("⚠️ Mount directory check/creation failed: {error}", error = e.to_string());
+            warn!(
+                "⚠️ Mount directory check/creation failed: {error}",
+                error = e.to_string()
+            );
             warn!("Continuing execution, but container startup may fail");
         } else {
             info!("✅ Mount directory check complete");
         }
     } else {
-        info!("ℹ️ Current environment: {env} (no special handling needed)", env = runtime_env.summary());
+        info!(
+            "ℹ️ Current environment: {env} (no special handling needed)",
+            env = runtime_env.summary()
+        );
     }
 
     // 6. 📦 解压新的Docker服务包（在服务停止后）
@@ -200,12 +280,18 @@ pub async fn run_auto_upgrade_deploy(
                 let remove_file_or_dir: Vec<&Path> =
                     remove_file_or_dir.iter().map(|p| p.as_path()).collect();
                 match safe_remove_file_or_dir(&remove_file_or_dir).await {
-                    Ok(_) => info!("✅ Cleaned files/directories successfully: {files}", files = &remove_file_or_dir
-                                .iter()
-                                .map(|p| p.to_string_lossy())
-                                .collect::<Vec<_>>()
-                                .join(", ")),
-                    Err(e) => warn!("⚠️ Failed to clean files/directories: {error}; continuing extraction", error = e.to_string()),
+                    Ok(_) => info!(
+                        "✅ Cleaned files/directories successfully: {files}",
+                        files = &remove_file_or_dir
+                            .iter()
+                            .map(|p| p.to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    Err(e) => warn!(
+                        "⚠️ Failed to clean files/directories: {error}; continuing extraction",
+                        error = e.to_string()
+                    ),
                 }
             }
             UpgradeStrategy::FullUpgrade { .. } => {
@@ -214,8 +300,14 @@ pub async fn run_auto_upgrade_deploy(
                 match safe_remove_docker_directory(docker_dir).await {
                     Ok(_) => info!("✅ Docker directory cleanup completed"),
                     Err(e) => {
-                        warn!("⚠️ Failed to clean docker directory: {error}; continuing extraction", error = e.to_string());
-                        return Err(anyhow::anyhow!(t!("auto_upgrade_deploy.clean_docker_dir_error", error = e.to_string())));
+                        warn!(
+                            "⚠️ Failed to clean docker directory: {error}; continuing extraction",
+                            error = e.to_string()
+                        );
+                        return Err(anyhow::anyhow!(t!(
+                            "auto_upgrade_deploy.clean_docker_dir_error",
+                            error = e.to_string()
+                        )));
                     }
                 }
             }
@@ -240,7 +332,8 @@ pub async fn run_auto_upgrade_deploy(
                 info!(from_version = %app.config.get_docker_versions(), to_version = %latest_version, "📝 Updating Docker service version");
 
                 // 更新版本号并保存到配置文件
-                update_config_version(&mut app.config, &latest_version)?;
+                let app_config_path = app.config_path.clone();
+                update_config_version(&mut app.config, &app_config_path, &latest_version)?;
             } else {
                 info!(version = %latest_version, "📝 Version is already latest; no update needed");
             }
@@ -248,7 +341,10 @@ pub async fn run_auto_upgrade_deploy(
             // 📊 SQL差异将在服务启动后通过 Live Diff 生成和执行
         }
         Err(e) => {
-            error!("❌ Failed to extract Docker service package: {error}", error = e.to_string());
+            error!(
+                "❌ Failed to extract Docker service package: {error}",
+                error = e.to_string()
+            );
             return Err(e);
         }
     }
@@ -364,10 +460,24 @@ pub async fn schedule_delayed_deploy(app: &mut CliApp, time: u32, unit: &str) ->
     info!("⏰ Delayed auto-upgrade deployment has been scheduled");
     info!("Task ID: {id}", id = task.task_id);
     info!("Delay: {time} {unit}", time = time, unit = unit);
-    println!("   {}", t!("auto_upgrade_deploy.estimated_exec_time", duration = format_duration(delay_duration)));
-    info!("Planned execution time: {time}", time = scheduled_at.format("%Y-%m-%d %H:%M:%S UTC"));
+    println!(
+        "   {}",
+        t!(
+            "auto_upgrade_deploy.estimated_exec_time",
+            duration = format_duration(delay_duration)
+        )
+    );
+    info!(
+        "Planned execution time: {time}",
+        time = scheduled_at.format("%Y-%m-%d %H:%M:%S UTC")
+    );
 
-    info!("Scheduled delayed auto-upgrade deployment: {time} {unit}, task ID: {task_id}", time = time, unit = unit, task_id = task.task_id);
+    info!(
+        "Scheduled delayed auto-upgrade deployment: {time} {unit}, task ID: {task_id}",
+        time = time,
+        unit = unit,
+        task_id = task.task_id
+    );
 
     // 更新任务状态为进行中
     {
@@ -385,7 +495,10 @@ pub async fn schedule_delayed_deploy(app: &mut CliApp, time: u32, unit: &str) ->
     sleep(delay_duration).await;
 
     info!("🔔 Delay reached; starting auto-upgrade deployment");
-    info!("Delay reached; auto-upgrade deployment starting, task ID: {task_id}", task_id = task.task_id);
+    info!(
+        "Delay reached; auto-upgrade deployment starting, task ID: {task_id}",
+        task_id = task.task_id
+    );
 
     // 执行自动升级部署
     match run_auto_upgrade_deploy(app, None, None, None).await {
@@ -403,7 +516,10 @@ pub async fn schedule_delayed_deploy(app: &mut CliApp, time: u32, unit: &str) ->
             config_manager
                 .update_upgrade_task_status(&task.task_id, "failed", None, Some(&e.to_string()))
                 .await?;
-            error!("Delayed upgrade deployment task failed: {error}", error = e.to_string());
+            error!(
+                "Delayed upgrade deployment task failed: {error}",
+                error = e.to_string()
+            );
             return Err(e);
         }
     }
@@ -432,7 +548,10 @@ pub async fn show_status(app: &mut CliApp) -> Result<()> {
                     info!("Name: {name}", name = task.task_name);
                     info!("Type: {type_name}", type_name = task.upgrade_type);
                     info!("Status: {status}", status = task.status);
-                    info!("Planned execution time: {time}", time = task.schedule_time.format("%Y-%m-%d %H:%M:%S UTC"));
+                    info!(
+                        "Planned execution time: {time}",
+                        time = task.schedule_time.format("%Y-%m-%d %H:%M:%S UTC")
+                    );
                     if let Some(target_version) = &task.target_version {
                         info!("Target version: {version}", version = target_version);
                     }
@@ -446,7 +565,10 @@ pub async fn show_status(app: &mut CliApp) -> Result<()> {
             }
         }
         Err(e) => {
-            warn!("⚠️ Failed to obtain upgrade task information: {error}", error = e.to_string());
+            warn!(
+                "⚠️ Failed to obtain upgrade task information: {error}",
+                error = e.to_string()
+            );
             info!("Note: Task query capability is limited in this version");
         }
     }
@@ -591,12 +713,19 @@ async fn safe_remove_docker_directory(path: &Path) -> Result<()> {
 
         // 首先尝试安全删除（保留upload目录）
         if let Err(e) = force_cleanup_directory(path).await {
-            warn!("⚠️ Safe directory deletion failed (attempt {attempts}/{max}): {error}", attempts = attempts, max = MAX_ATTEMPTS, error = e.to_string());
+            warn!(
+                "⚠️ Safe directory deletion failed (attempt {attempts}/{max}): {error}",
+                attempts = attempts,
+                max = MAX_ATTEMPTS,
+                error = e.to_string()
+            );
 
             if attempts >= MAX_ATTEMPTS {
                 return Err(anyhow::anyhow!(t!(
                     "auto_upgrade_deploy.safe_delete_max_attempts",
-                    max = MAX_ATTEMPTS, path = path.display(), error = e.to_string()
+                    max = MAX_ATTEMPTS,
+                    path = path.display(),
+                    error = e.to_string()
                 )));
             }
         } else {
@@ -624,46 +753,41 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
     // 递归遍历并删除文件
     match std::fs::read_dir(path) {
         Ok(entries) => {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let entry_path = entry.path();
-                    let file_name = entry.file_name();
-                    let file_name_str = file_name.to_string_lossy();
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                let file_name = entry.file_name();
+                let file_name_str = file_name.to_string_lossy();
 
-                    // 排除指定目录，不进行删除
-                    if client_core::constants::docker::EXCLUDE_DIRS
-                        .contains(&file_name_str.as_ref())
-                        && entry_path.is_dir()
-                    {
-                        info!(path = %entry_path.display(), "📁 Skip protected directory");
-                        skipped_count += 1;
-                        continue;
+                // 排除指定目录，不进行删除
+                if client_core::constants::docker::EXCLUDE_DIRS.contains(&file_name_str.as_ref())
+                    && entry_path.is_dir()
+                {
+                    info!(path = %entry_path.display(), "📁 Skip protected directory");
+                    skipped_count += 1;
+                    continue;
+                }
+
+                if entry_path.is_dir() {
+                    // 递归删除子目录
+                    if let Err(e) = Box::pin(force_cleanup_directory(&entry_path)).await {
+                        warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete subdirectory");
+                        failed_items.push((entry_path.clone(), e.to_string()));
                     }
 
-                    if entry_path.is_dir() {
-                        // 递归删除子目录
-                        if let Err(e) = Box::pin(force_cleanup_directory(&entry_path)).await {
-                            warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete subdirectory");
-                            failed_items.push((entry_path.clone(), e.to_string()));
-                        }
-
-                        // 尝试删除空目录
-                        if let Err(e) = std::fs::remove_dir(&entry_path) {
-                            if e.kind() != std::io::ErrorKind::NotFound {
-                                warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete empty directory");
-                                failed_items.push((entry_path, e.to_string()));
-                            }
-                        } else {
-                            deleted_count += 1;
+                    // 尝试删除空目录
+                    if let Err(e) = std::fs::remove_dir(&entry_path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete empty directory");
+                            failed_items.push((entry_path, e.to_string()));
                         }
                     } else {
-                        if let Err(e) = std::fs::remove_file(&entry_path) {
-                            warn!(path = %entry_path.display(), error = %e, "📄 Failed to delete file");
-                            failed_items.push((entry_path, e.to_string()));
-                        } else {
-                            deleted_count += 1;
-                        }
+                        deleted_count += 1;
                     }
+                } else if let Err(e) = std::fs::remove_file(&entry_path) {
+                    warn!(path = %entry_path.display(), error = %e, "📄 Failed to delete file");
+                    failed_items.push((entry_path, e.to_string()));
+                } else {
+                    deleted_count += 1;
                 }
             }
         }
@@ -675,15 +799,27 @@ async fn force_cleanup_directory(path: &Path) -> Result<()> {
 
     // 报告清理结果
     if !failed_items.is_empty() {
-        warn!(failed_count = failed_items.len(), deleted_count = deleted_count, skipped_count = skipped_count, "⚠️ Directory cleanup completed, but some parts failed");
+        warn!(
+            failed_count = failed_items.len(),
+            deleted_count = deleted_count,
+            skipped_count = skipped_count,
+            "⚠️ Directory cleanup completed, but some parts failed"
+        );
         for (path, error) in failed_items.iter().take(5) {
             warn!("  - {}: {}", path.display(), error);
         }
         if failed_items.len() > 5 {
-            warn!("  ... and {count} more failed items", count = failed_items.len() - 5);
+            warn!(
+                "  ... and {count} more failed items",
+                count = failed_items.len() - 5
+            );
         }
     } else {
-        info!(deleted_count = deleted_count, skipped_count = skipped_count, "✅ Directory cleanup successful");
+        info!(
+            deleted_count = deleted_count,
+            skipped_count = skipped_count,
+            "✅ Directory cleanup successful"
+        );
     }
 
     Ok(())
@@ -712,11 +848,18 @@ async fn archive_diff_sql_file(diff_sql_path: &Path, status: &str) -> Result<()>
                 "no_exec" => t!("auto_upgrade_deploy.diff_sql_no_exec"),
                 _ => t!("auto_upgrade_deploy.diff_sql_archived"),
             };
-            info!("📝 {status} diff SQL file: {path}", status = status_desc, path = new_path.display());
+            info!(
+                "📝 {status} diff SQL file: {path}",
+                status = status_desc,
+                path = new_path.display()
+            );
             Ok(())
         }
         Err(e) => {
-            warn!("⚠️ Failed to archive diff SQL file: {error}", error = e.to_string());
+            warn!(
+                "⚠️ Failed to archive diff SQL file: {error}",
+                error = e.to_string()
+            );
             Ok(()) // 归档失败不影响主流程
         }
     }
@@ -733,7 +876,10 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         let history_dir = Path::new("history_sql");
         if !history_dir.exists() {
             fs::create_dir_all(history_dir)?;
-            info!("📁 Creating history SQL directory: {path}", path = history_dir.display());
+            info!(
+                "📁 Creating history SQL directory: {path}",
+                path = history_dir.display()
+            );
         }
 
         // 生成带时间戳的目录名
@@ -742,15 +888,24 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         let archive_path = history_dir.join(&archive_name);
 
         // 移动 temp_sql 目录到 history_sql（带降级处理）
-        match fs::rename(&temp_sql_dir, &archive_path) {
+        match fs::rename(temp_sql_dir, &archive_path) {
             Ok(_) => {
-                info!("📦 Archived old temp_sql directory to: {path}", path = archive_path.display());
+                info!(
+                    "📦 Archived old temp_sql directory to: {path}",
+                    path = archive_path.display()
+                );
             }
             Err(e) => {
-                warn!("⚠️ Failed to archive temp_sql directory: {error}, try to clean it directly", error = e.to_string());
+                warn!(
+                    "⚠️ Failed to archive temp_sql directory: {error}, try to clean it directly",
+                    error = e.to_string()
+                );
                 // 降级：直接删除旧目录
-                if let Err(e2) = fs::remove_dir_all(&temp_sql_dir) {
-                    warn!("⚠️ Failed to clean temp_sql directory: {error}, continue execution", error = e2.to_string());
+                if let Err(e2) = fs::remove_dir_all(temp_sql_dir) {
+                    warn!(
+                        "⚠️ Failed to clean temp_sql directory: {error}, continue execution",
+                        error = e2.to_string()
+                    );
                 } else {
                     info!("✅ The old temp_sql directory has been cleaned");
                 }
@@ -760,7 +915,10 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     // 创建临时SQL目录
     fs::create_dir_all(temp_sql_dir)?;
-    info!("📁 Creating temp SQL directory: {path}", path = temp_sql_dir.display());
+    info!(
+        "📁 Creating temp SQL directory: {path}",
+        path = temp_sql_dir.display()
+    );
 
     // 复制新版本的SQL文件（使用常量路径）
     let current_sql_path = Path::new(sql::CURRENT_SQL_PATH);
@@ -768,22 +926,31 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         // 先删除目标文件（如果存在），确保复制操作成功
         if new_sql_path.exists() {
             fs::remove_file(&new_sql_path)?;
-            info!("🗑️Old SQL file deleted: {path}", path = new_sql_path.display());
+            info!(
+                "🗑️Old SQL file deleted: {path}",
+                path = new_sql_path.display()
+            );
         }
 
-        fs::copy(current_sql_path, &new_sql_path)
-            .context(t!("auto_upgrade_deploy.copy_sql_failed",
-                src = current_sql_path.display(), dst = new_sql_path.display()))?;
+        fs::copy(current_sql_path, &new_sql_path).context(t!(
+            "auto_upgrade_deploy.copy_sql_failed",
+            src = current_sql_path.display(),
+            dst = new_sql_path.display()
+        ))?;
 
         // 验证文件复制成功
         if !new_sql_path.exists() {
             return Err(anyhow::anyhow!(t!(
                 "auto_upgrade_deploy.sql_copy_not_found",
-                dst = new_sql_path.display(), src = current_sql_path.display()
+                dst = new_sql_path.display(),
+                src = current_sql_path.display()
             )));
         }
 
-        info!("📄 Copied new version SQL file: {path}", path = new_sql_path.display());
+        info!(
+            "📄 Copied new version SQL file: {path}",
+            path = new_sql_path.display()
+        );
     } else {
         info!("📄 No SQL files in new version; skipping diff generation");
         return Ok(());
@@ -802,7 +969,7 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     // 会自动处理 USE 语句的查找和提取，无需手动处理
 
     // 从App配置中动态获取MySQL端口并建立连接
-    let compose_file = get_compose_file_path(&config_file);
+    let compose_file = get_compose_file_path(config_file);
     let env_file = client_core::constants::docker::get_env_file_path();
     let compose_file_str = compose_file
         .to_str()
@@ -819,7 +986,10 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     info!("🔌 Connecting to MySQL database...");
     if let Err(e) = executor.test_connection().await {
         error!(error = %e, port = sql::DEFAULT_MYSQL_CONTAINER_PORT, "❌ Database connection failed");
-        error!("🏃 Please make sure the MySQL container is running and port {port} is accessible", port = sql::DEFAULT_MYSQL_CONTAINER_PORT);
+        error!(
+            "🏃 Please make sure the MySQL container is running and port {port} is accessible",
+            port = sql::DEFAULT_MYSQL_CONTAINER_PORT
+        );
         return Err(e.into());
     }
 
@@ -835,12 +1005,19 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     if let Some(live_sql) = &diff_result.live_sql {
         let old_sql_path = temp_sql_dir.join(sql::OLD_SQL_FILE);
         fs::write(&old_sql_path, live_sql)?;
-        info!("📄 Saved online schema SQL file: {path}", path = old_sql_path.display());
+        info!(
+            "📄 Saved online schema SQL file: {path}",
+            path = old_sql_path.display()
+        );
     }
 
     // 保存差异SQL文件（无论是否有可执行SQL，都保存以便查看）
-    fs::write(&diff_sql_path, &diff_result.diff_sql).context(t!("auto_upgrade_deploy.save_diff_sql_failed"))?;
-    info!("📄 Diff SQL file saved: {path}", path = diff_sql_path.display());
+    fs::write(&diff_sql_path, &diff_result.diff_sql)
+        .context(t!("auto_upgrade_deploy.save_diff_sql_failed"))?;
+    info!(
+        "📄 Diff SQL file saved: {path}",
+        path = diff_sql_path.display()
+    );
 
     // 判断差异类型并输出相应提示
     if !diff_result.has_executable_sql {
@@ -877,7 +1054,11 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    info!(sql_lines = executable_lines.len(), has_warnings = diff_result.has_warnings, "🔄 Start database upgrade");
+    info!(
+        sql_lines = executable_lines.len(),
+        has_warnings = diff_result.has_warnings,
+        "🔄 Start database upgrade"
+    );
 
     // 如果同时包含警告，提示用户注意（这是混合场景：既有新增/修改，又有删除）
     if diff_result.has_warnings {
@@ -887,13 +1068,19 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         warn!("📄 See details: {path}", path = diff_sql_path.display());
     }
 
-    info!(retry_count = sql::DEFAULT_RETRY_COUNT, "🚀 Starting diff SQL execution");
+    info!(
+        retry_count = sql::DEFAULT_RETRY_COUNT,
+        "🚀 Starting diff SQL execution"
+    );
     match executor
         .execute_diff_sql_with_retry(&diff_result.diff_sql, sql::DEFAULT_RETRY_COUNT)
         .await
     {
         Ok(results) => {
-            info!(executed_statements = results.len(), "✅ Database upgraded successfully");
+            info!(
+                executed_statements = results.len(),
+                "✅ Database upgraded successfully"
+            );
             for result in results {
                 info!("  {}", result);
             }
@@ -938,36 +1125,62 @@ async fn fix_script_permissions() -> Result<()> {
 
                         // 如果没有执行权限，添加执行权限
                         if current_mode & 0o111 == 0 {
-                            info!("🔒 Fixed permissions: {path} (current: {current} -> target: 755)", path = path.display(), current = format!("{:o}", current_mode));
+                            info!(
+                                "🔒 Fixed permissions: {path} (current: {current} -> target: 755)",
+                                path = path.display(),
+                                current = format!("{:o}", current_mode)
+                            );
 
                             let new_permissions = std::fs::Permissions::from_mode(0o755);
                             if let Err(e) = std::fs::set_permissions(path, new_permissions) {
-                                warn!("⚠️ Failed to fix permission {path}: {error}", path = path.display(), error = e.to_string());
+                                warn!(
+                                    "⚠️ Failed to fix permission {path}: {error}",
+                                    path = path.display(),
+                                    error = e.to_string()
+                                );
                             } else {
                                 fixed_count += 1;
                                 info!("✅ Permission fixed: {path}", path = path.display());
                             }
                         } else {
-                            info!("✓ Permission is correct: {path} ({mode})", path = path.display(), mode = format!("{:o}", current_mode));
+                            info!(
+                                "✓ Permission is correct: {path} ({mode})",
+                                path = path.display(),
+                                mode = format!("{:o}", current_mode)
+                            );
                         }
                     }
 
                     #[cfg(not(unix))]
                     {
-                        info!("ℹ️ Non-Unix systems, skip permission fix: {path}", path = path.display());
+                        info!(
+                            "ℹ️ Non-Unix systems, skip permission fix: {path}",
+                            path = path.display()
+                        );
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️ Unable to read file metadata {path}: {error}", path = path.display(), error = e.to_string());
+                    warn!(
+                        "⚠️ Unable to read file metadata {path}: {error}",
+                        path = path.display(),
+                        error = e.to_string()
+                    );
                 }
             }
         } else {
-            info!("📄 The script file does not exist, skip: {path}", path = script_path);
+            info!(
+                "📄 The script file does not exist, skip: {path}",
+                path = script_path
+            );
         }
     }
 
     if total_count > 0 {
-        info!("🔧 Permission fix complete: {fixed}/{total} scripts fixed", fixed = fixed_count, total = total_count);
+        info!(
+            "🔧 Permission fix complete: {fixed}/{total} scripts fixed",
+            fixed = fixed_count,
+            total = total_count
+        );
     } else {
         info!("📄 No script files found that require permission fixes");
     }
@@ -985,18 +1198,29 @@ pub async fn check_and_install_nuwax_cli_update_early() -> Result<()> {
     // 检查更新
     let version_info = match check_for_updates().await {
         Ok(info) => {
-            info!("✅ Version check completed: current={current}, latest={latest}", current = info.current_version, latest = info.latest_version);
+            info!(
+                "✅ Version check completed: current={current}, latest={latest}",
+                current = info.current_version,
+                latest = info.latest_version
+            );
             info
         }
         Err(e) => {
-            error!("❌ Failed to check for updates: {error}", error = e.to_string());
+            error!(
+                "❌ Failed to check for updates: {error}",
+                error = e.to_string()
+            );
             return Err(e);
         }
     };
 
     // 如果有更新，进行安装
     if version_info.is_update_available {
-        info!("🚀 Found new version of nuwax-cli: {current} -> {latest}", current = version_info.current_version, latest = version_info.latest_version);
+        info!(
+            "🚀 Found new version of nuwax-cli: {current} -> {latest}",
+            current = version_info.current_version,
+            latest = version_info.latest_version
+        );
         info!("📥 Starting automatic update installation...");
 
         match install_release(
@@ -1006,17 +1230,166 @@ pub async fn check_and_install_nuwax_cli_update_early() -> Result<()> {
         .await
         {
             Ok(_) => {
-                info!("✅ nuwax-cli updated successfully! The program will restart to use the new version");
+                info!(
+                    "✅ nuwax-cli updated successfully! The program will restart to use the new version"
+                );
                 std::process::exit(0);
             }
             Err(e) => {
-                error!("❌ nuwax-cli automatic update failed: {error}", error = e.to_string());
-                error!("Please check the network connection or run manually: nuwax-cli check-update install");
+                error!(
+                    "❌ nuwax-cli automatic update failed: {error}",
+                    error = e.to_string()
+                );
+                error!(
+                    "Please check the network connection or run manually: nuwax-cli check-update install"
+                );
                 return Err(e);
             }
         }
     } else {
         info!("✅ nuwax-cli is already up to date");
+    }
+
+    Ok(())
+}
+
+/// 离线部署入口函数
+pub async fn run_offline_deploy(
+    app: &mut CliApp,
+    archive_path: PathBuf,
+    version: String,
+    frontend_port: Option<u16>,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+) -> Result<()> {
+    info!(
+        "📦 Starting offline deployment from: {path}",
+        path = archive_path.display()
+    );
+
+    // 1. 验证文件存在
+    if !archive_path.exists() {
+        return Err(anyhow::anyhow!(
+            "Archive file not found: {}. Please check the file path.",
+            archive_path.display()
+        ));
+    }
+
+    crate::utils::validate_archive_paths(&archive_path)
+        .context("Archive package validation failed")?;
+
+    // 2. 解析版本号
+    let version: client_core::version::Version =
+        version.parse().context("Invalid version format")?;
+
+    info!(
+        "   Target version: {version}",
+        version = version.to_string()
+    );
+
+    // 3. 检测是否首次部署
+    let is_first_deployment = is_first_deployment().await;
+
+    if is_first_deployment {
+        info!("🆕 First deployment detected, using fresh initialization");
+    } else {
+        info!("🔄 Upgrade deployment detected, services will be stopped first");
+
+        // 停止服务并等待
+        docker_service::stop_docker_services_and_wait(
+            app,
+            config_file.clone(),
+            project_name.clone(),
+        )
+        .await?;
+    }
+
+    // 4. 创建 DockerManager
+    let docker_manager = create_docker_manager(&config_file, &project_name)?;
+
+    // 5. 环境检测（Podman Desktop 需要预先创建挂载目录）
+    let runtime_env = docker_manager.get_runtime_environment();
+    if runtime_env.needs_special_handling() {
+        info!("⚠️ Windows Podman Desktop detected, pre-creating mount directories");
+        if let Err(e) = docker_manager.ensure_host_volumes_exist().await {
+            warn!(
+                "⚠️ Mount directory check/creation failed: {error}",
+                error = e.to_string()
+            );
+        }
+    }
+
+    // 6. 解压（全量升级方式）
+    info!("📦 Extracting Docker service package...");
+
+    let upgrade_strategy = UpgradeStrategy::FullUpgrade {
+        url: String::new(),
+        hash: String::new(),
+        signature: String::new(),
+        target_version: version.clone(),
+        download_type: client_core::upgrade_strategy::DownloadType::Full,
+    };
+
+    // 直接解压本地文件。先把旧 docker 目录改名备份，解压失败时恢复。
+    let docker_dir = std::path::Path::new("docker");
+    let backup_dir = create_docker_backup_path();
+    let had_existing_docker_dir = docker_dir.exists();
+    if had_existing_docker_dir {
+        info!("🧹 Moving existing docker directory to temporary backup...");
+        fs::rename(docker_dir, &backup_dir)
+            .context("Failed to backup existing docker directory")?;
+    }
+
+    if let Err(e) = crate::utils::extract_docker_service(&archive_path, &upgrade_strategy).await {
+        warn!("⚠️ Extract failed, restoring previous docker directory");
+        restore_docker_backup(&backup_dir, docker_dir)?;
+        return Err(e);
+    }
+
+    if had_existing_docker_dir {
+        restore_preserved_docker_dirs(&backup_dir, docker_dir)?;
+        if backup_dir.exists() {
+            fs::remove_dir_all(&backup_dir).context("Failed to remove docker backup directory")?;
+        }
+    }
+    info!("✅ Docker service package extracted");
+
+    // 7. 修复脚本权限
+    fix_script_permissions().await?;
+
+    // 8. 更新配置版本
+    let app_config_path = app.config_path.clone();
+    update_config_version(&mut app.config, &app_config_path, &version.to_string())?;
+
+    // 9. 部署服务
+    info!("🔄 Deploying Docker services...");
+    docker_service::deploy_docker_services(
+        app,
+        frontend_port,
+        config_file.clone(),
+        project_name.clone(),
+    )
+    .await?;
+
+    // 10. 启动服务
+    info!("▶️ Starting Docker services...");
+    docker_service::start_docker_services(app, config_file.clone(), project_name.clone()).await?;
+
+    // 11. 等待服务就绪
+    let compose_path = get_compose_file_path(&config_file);
+    if is_first_deployment {
+        info!("⏳ Waiting for all services to fully start...");
+    } else {
+        info!("⏳ Waiting for all services to fully start...");
+    }
+
+    if docker_utils::wait_for_compose_services_started(&compose_path, sql::OTHER_SERVICES_TIMEOUT)
+        .await?
+    {
+        info!("✅ Offline deployment completed successfully!");
+        info!("🎉 All services started successfully");
+    } else {
+        warn!("⚠️ Timed out waiting for services to start; please check status manually");
     }
 
     Ok(())
