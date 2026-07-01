@@ -3340,7 +3340,7 @@ checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
 
 [[package]]
 name = "nuwax-cli"
-version = "1.0.123"
+version = "1.0.124"
 dependencies = [
  "anyhow",
  "bollard",
@@ -3390,6 +3390,8 @@ dependencies = [
 [[package]]
 name = "nuwax-sqlparser"
 version = "0.63.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "762d4ede8469911720ff2122dd33a549a3ee30f9b55f560ac5d28ffb0b0a0ff0"
 dependencies = [
  "log",
  "recursive",

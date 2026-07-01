@@ -119,10 +119,7 @@ indicatif = "0.18"
 tokio-stream = "0.1"
 
 # SQL解析 依赖的库(nuwax fork of upstream sqlparser,支持 CREATE FULLTEXT/SPATIAL INDEX)
-# 开发期使用 path 依赖做集成测试;正式发布前需改成:
-#   sqlparser = { package = "nuwax-sqlparser", version = "0.63.0" }
-# 并先在 fork-datafusion-sqlparser-rs 仓库执行 `cargo publish`
-sqlparser = { package = "nuwax-sqlparser", path = "../fork-datafusion-sqlparser-rs" }
+sqlparser = { package = "nuwax-sqlparser", version = "0.63.0" }
 regex = "1.12"
 
 # --- OSS Dependencies ---
