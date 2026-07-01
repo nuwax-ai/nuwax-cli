@@ -285,7 +285,6 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PLAN: ${{ needs.plan.outputs.val }}
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
     steps:
       - name: Fetch npm packages
         uses: actions/download-artifact@v7
@@ -297,13 +296,22 @@ jobs:
         with:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
-      - run: |
-          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
-            pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
-            npm publish --access public "./npm/${pkg}"
-          done
+      - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          IS_PRERELEASE: ${{ fromJson(needs.plan.outputs.val).announcement_is_prerelease }}
+        run: |
+          NPM_TAG=""
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            NPM_TAG="--tag beta"
+            echo "Publishing prerelease to npm with dist-tag: beta"
+          else
+            echo "Publishing release to npm with dist-tag: latest"
+          fi
+          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
+            pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
+            npm publish --access public $NPM_TAG "./npm/${pkg}"
+          done
 
   custom-publish-crates-dist:
     needs:
