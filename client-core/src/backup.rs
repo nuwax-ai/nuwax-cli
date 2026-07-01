@@ -385,12 +385,10 @@ impl BackupManager {
                         e
                     );
                 }
-            } else {
-                if let Err(e) = tokio::fs::remove_file(&entry_path).await
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    warn!("Failed to remove file: {} - {}", entry_path.display(), e);
-                }
+            } else if let Err(e) = tokio::fs::remove_file(&entry_path).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!("Failed to remove file: {} - {}", entry_path.display(), e);
             }
         }
 

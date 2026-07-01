@@ -869,3 +869,138 @@ CREATE TABLE comments (
 
     assert!(diff_sql.contains("posts"));
 }
+
+#[test]
+fn test_fulltext_index_diff_standalone() {
+    // 验证 `CREATE FULLTEXT INDEX` 独立语句被识别并生成 ADD FULLTEXT KEY
+    let from_sql = r#"
+USE test_platform;
+
+CREATE TABLE published (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(255),
+    description TEXT,
+    PRIMARY KEY (id)
+);
+    "#;
+
+    let to_sql = r#"
+USE test_platform;
+
+CREATE TABLE published (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(255),
+    description TEXT,
+    PRIMARY KEY (id)
+);
+
+CREATE FULLTEXT INDEX ft_name_desc ON published (name, description);
+    "#;
+
+    let (diff_sql, _description) =
+        generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "2.0.0").unwrap();
+
+    assert!(
+        diff_sql.contains("ADD FULLTEXT KEY `ft_name_desc`"),
+        "expected FULLTEXT KEY diff, got: {diff_sql}"
+    );
+    assert!(
+        diff_sql.contains("`name`, `description`"),
+        "expected both columns in diff, got: {diff_sql}"
+    );
+}
+
+#[test]
+fn test_spatial_index_diff_standalone() {
+    let from_sql = r#"
+USE test_platform;
+
+CREATE TABLE geo_data (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    geom GEOMETRY NOT NULL,
+    PRIMARY KEY (id)
+);
+    "#;
+
+    let to_sql = r#"
+USE test_platform;
+
+CREATE TABLE geo_data (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    geom GEOMETRY NOT NULL,
+    PRIMARY KEY (id)
+);
+
+CREATE SPATIAL INDEX sp_geom ON geo_data (geom);
+    "#;
+
+    let (diff_sql, _description) =
+        generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "2.0.0").unwrap();
+
+    assert!(
+        diff_sql.contains("ADD SPATIAL KEY `sp_geom`"),
+        "expected SPATIAL KEY diff, got: {diff_sql}"
+    );
+}
+
+#[test]
+fn test_fulltext_index_unchanged_no_redo() {
+    // 当 old 和 new 都有相同 FULLTEXT 索引时,diff 不应再次 ADD
+    let from_sql = r#"
+USE test_platform;
+
+CREATE TABLE published (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(255),
+    description TEXT,
+    PRIMARY KEY (id)
+);
+
+CREATE FULLTEXT INDEX ft_name_desc ON published (name, description);
+    "#;
+
+    let to_sql = from_sql; // 完全相同
+
+    let (diff_sql, _description) =
+        generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "2.0.0").unwrap();
+
+    assert!(
+        diff_sql.trim().is_empty(),
+        "expected no diff when FULLTEXT unchanged, got: {diff_sql}"
+    );
+}
+
+#[test]
+fn test_fulltext_index_in_create_table() {
+    // 验证 `CREATE TABLE` 内部 FULLTEXT 约束形式也能被正确识别
+    let from_sql = r#"
+USE test_platform;
+
+CREATE TABLE published (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(255),
+    description TEXT,
+    PRIMARY KEY (id)
+);
+    "#;
+
+    let to_sql = r#"
+USE test_platform;
+
+CREATE TABLE published (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(255),
+    description TEXT,
+    PRIMARY KEY (id),
+    FULLTEXT INDEX ft_name_desc (name, description)
+);
+    "#;
+
+    let (diff_sql, _description) =
+        generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "2.0.0").unwrap();
+
+    assert!(
+        diff_sql.contains("ADD FULLTEXT KEY `ft_name_desc`"),
+        "expected in-table FULLTEXT to produce ADD FULLTEXT KEY, got: {diff_sql}"
+    );
+}

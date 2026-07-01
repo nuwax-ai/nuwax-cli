@@ -92,6 +92,10 @@ pub struct TableIndex {
     pub columns: Vec<String>,
     pub is_primary: bool,
     pub is_unique: bool,
+    /// MySQL: `CREATE FULLTEXT INDEX` / `CREATE SPATIAL INDEX` 标记
+    pub is_fulltext: bool,
+    /// MySQL: `CREATE FULLTEXT INDEX` / `CREATE SPATIAL INDEX` 标记
+    pub is_spatial: bool,
     pub index_type: Option<String>,
 }
 

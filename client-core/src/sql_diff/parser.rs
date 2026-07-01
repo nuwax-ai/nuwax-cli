@@ -1,7 +1,7 @@
 use super::types::{TableColumn, TableDefinition, TableIndex};
 use crate::error::DuckError;
 use regex::Regex;
-use sqlparser::ast::{ColumnDef, DataType, Statement, TableConstraint};
+use sqlparser::ast::{ColumnDef, DataType, FullTextOrSpatialKind, Statement, TableConstraint};
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::HashMap;
@@ -62,6 +62,8 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
                                 columns: primary_key_columns,
                                 is_primary: true,
                                 is_unique: true,
+                                is_fulltext: false,
+                                is_spatial: false,
                                 index_type: Some("PRIMARY".to_string()),
                             });
                         }
@@ -279,6 +281,8 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 columns: column_names,
                 is_primary: true,
                 is_unique: true,
+                is_fulltext: false,
+                is_spatial: false,
                 index_type: Some("PRIMARY".to_string()),
             }))
         }
@@ -295,6 +299,8 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 columns: column_names,
                 is_primary: false,
                 is_unique: true,
+                is_fulltext: false,
+                is_spatial: false,
                 index_type: Some("UNIQUE".to_string()),
             }))
         }
@@ -311,7 +317,39 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 columns: column_names,
                 is_primary: false,
                 is_unique: false,
+                is_fulltext: false,
+                is_spatial: false,
                 index_type: Some("INDEX".to_string()),
+            }))
+        }
+        // CREATE TABLE 内部的 FULLTEXT / SPATIAL 约束形式
+        TableConstraint::FulltextOrSpatial(ft) => {
+            let column_names = extract_index_columns(&ft.columns);
+            let index_name = ft
+                .opt_index_name
+                .as_ref()
+                .map(ident_to_string)
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}_{}",
+                        if ft.fulltext { "fulltext" } else { "spatial" },
+                        column_names.join("_")
+                    )
+                });
+            let (is_fulltext, index_type) = if ft.fulltext {
+                (true, "FULLTEXT".to_string())
+            } else {
+                (false, "SPATIAL".to_string())
+            };
+
+            Ok(Some(TableIndex {
+                name: index_name,
+                columns: column_names,
+                is_primary: false,
+                is_unique: false,
+                is_fulltext,
+                is_spatial: !ft.fulltext,
+                index_type: Some(index_type),
             }))
         }
         _ => Ok(None),
@@ -529,6 +567,24 @@ fn parse_standalone_indexes(
                         // 检查是否是 UNIQUE 索引
                         let is_unique = create_index.unique;
 
+                        // 提取 FULLTEXT / SPATIAL 标记(fork 版 sqlparser 支持)
+                        let (is_fulltext, is_spatial) = match &create_index.fulltext_or_spatial {
+                            Some(FullTextOrSpatialKind::Fulltext) => (true, false),
+                            Some(FullTextOrSpatialKind::Spatial) => (false, true),
+                            None => (false, false),
+                        };
+
+                        // 确定索引类型字符串
+                        let index_type = if is_fulltext {
+                            "FULLTEXT".to_string()
+                        } else if is_spatial {
+                            "SPATIAL".to_string()
+                        } else if is_unique {
+                            "UNIQUE".to_string()
+                        } else {
+                            "INDEX".to_string()
+                        };
+
                         // 查找对应的表
                         if let Some(table_def) = tables.get_mut(&table_name) {
                             // 检查是否已经存在同名索引
@@ -546,17 +602,15 @@ fn parse_standalone_indexes(
                                 columns: columns.clone(),
                                 is_primary: false,
                                 is_unique,
-                                index_type: if is_unique {
-                                    Some("UNIQUE".to_string())
-                                } else {
-                                    Some("INDEX".to_string())
-                                },
+                                is_fulltext,
+                                is_spatial,
+                                index_type: Some(index_type),
                             });
 
                             index_count += 1;
                             debug!(
-                                "添加独立索引: {} 到表 {} (列: {:?}, unique: {})",
-                                index_name, table_name, columns, is_unique
+                                "添加独立索引: {} 到表 {} (列: {:?}, unique: {}, fulltext: {}, spatial: {})",
+                                index_name, table_name, columns, is_unique, is_fulltext, is_spatial
                             );
                         } else {
                             warn!(
@@ -595,8 +649,9 @@ fn extract_create_index_statements(sql_content: &str) -> Result<Vec<String>, Duc
     let mut in_create_index = false;
 
     // 正则表达式只用于识别语句开始，不用于解析
-    let create_index_regex = Regex::new(r"(?i)^\s*CREATE\s+(UNIQUE\s+)?INDEX")
-        .map_err(|e| DuckError::custom(format!("正则表达式编译失败: {}", e)))?;
+    let create_index_regex =
+        Regex::new(r"(?i)^\s*CREATE\s+(UNIQUE\s+|FULLTEXT\s+|SPATIAL\s+)?INDEX")
+            .map_err(|e| DuckError::custom(format!("正则表达式编译失败: {}", e)))?;
 
     for line in sql_content.lines() {
         let trimmed = line.trim();

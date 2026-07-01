@@ -277,6 +277,28 @@ pub fn generate_index_sql(index: &TableIndex) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         )
+    } else if index.is_fulltext {
+        format!(
+            "FULLTEXT KEY `{}` ({})",
+            index.name,
+            index
+                .columns
+                .iter()
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else if index.is_spatial {
+        format!(
+            "SPATIAL KEY `{}` ({})",
+            index.name,
+            index
+                .columns
+                .iter()
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     } else if index.is_unique {
         format!(
             "UNIQUE KEY `{}` ({})",

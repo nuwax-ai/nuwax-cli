@@ -199,23 +199,21 @@ impl UpgradeStrategyManager {
                 target_version: self.manifest.version.clone(),
                 download_type: DownloadType::Full,
             })
+        } else if let Some(package_info) = &self.manifest.packages {
+            let full_info = &package_info.full;
+            debug!("Using generic full package: {}", &full_info.url);
+            Ok(UpgradeStrategy::FullUpgrade {
+                url: full_info.url.clone(),
+                hash: full_info.hash.clone(),
+                signature: full_info.signature.clone(),
+                target_version: self.manifest.version.clone(),
+                download_type: DownloadType::Full,
+            })
         } else {
-            if let Some(package_info) = &self.manifest.packages {
-                let full_info = &package_info.full;
-                debug!("Using generic full package: {}", &full_info.url);
-                Ok(UpgradeStrategy::FullUpgrade {
-                    url: full_info.url.clone(),
-                    hash: full_info.hash.clone(),
-                    signature: full_info.signature.clone(),
-                    target_version: self.manifest.version.clone(),
-                    download_type: DownloadType::Full,
-                })
-            } else {
-                //未找到对应架构的全量升级包，这里主动报错
-                Err(anyhow::anyhow!(
-                    "Full upgrade package for corresponding architecture not found"
-                ))
-            }
+            //未找到对应架构的全量升级包，这里主动报错
+            Err(anyhow::anyhow!(
+                "Full upgrade package for corresponding architecture not found"
+            ))
         }
     }
 

@@ -858,6 +858,7 @@ dependencies = [
  "infer",
  "mysql_async",
  "num_cpus",
+ "nuwax-sqlparser",
  "once_cell",
  "quick_cache",
  "regex",
@@ -870,7 +871,6 @@ dependencies = [
  "serde_yaml",
  "sha2 0.11.0",
  "shellexpand",
- "sqlparser",
  "sqlx",
  "tar",
  "tempfile",
@@ -3388,6 +3388,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nuwax-sqlparser"
+version = "0.63.0"
+dependencies = [
+ "log",
+ "recursive",
+]
+
+[[package]]
 name = "object"
 version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5038,16 +5046,6 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
-]
-
-[[package]]
-name = "sqlparser"
-version = "0.62.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c6d1b651dc4edf07eead2a0c6c78016ce971bc2c10da5266861b13f25e7cec"
-dependencies = [
- "log",
- "recursive",
 ]
 
 [[package]]

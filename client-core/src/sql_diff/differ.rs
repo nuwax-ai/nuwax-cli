@@ -213,6 +213,8 @@ fn generate_index_diffs(
     let indexes_semantically_equal = |idx1: &TableIndex, idx2: &TableIndex| -> bool {
         idx1.is_primary == idx2.is_primary
             && idx1.is_unique == idx2.is_unique
+            && idx1.is_fulltext == idx2.is_fulltext
+            && idx1.is_spatial == idx2.is_spatial
             && idx1.columns == idx2.columns
     };
 
@@ -249,6 +251,32 @@ fn generate_index_diffs(
             diffs.push(format!(
                 "ALTER TABLE `{}` ADD PRIMARY KEY ({});",
                 table_name,
+                idx_def
+                    .columns
+                    .iter()
+                    .map(|c| format!("`{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            stats.indexes_added += 1;
+        } else if idx_def.is_fulltext {
+            diffs.push(format!(
+                "ALTER TABLE `{}` ADD FULLTEXT KEY `{}` ({});",
+                table_name,
+                idx_name,
+                idx_def
+                    .columns
+                    .iter()
+                    .map(|c| format!("`{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            stats.indexes_added += 1;
+        } else if idx_def.is_spatial {
+            diffs.push(format!(
+                "ALTER TABLE `{}` ADD SPATIAL KEY `{}` ({});",
+                table_name,
+                idx_name,
                 idx_def
                     .columns
                     .iter()
