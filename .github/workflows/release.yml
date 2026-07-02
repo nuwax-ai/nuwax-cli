@@ -289,12 +289,13 @@ jobs:
           # 创建工作目录
           mkdir -p macos-binaries
           
-          # 提取 x86_64 版本
+          # 提取 x86_64 版本（tarball 含 nuwax-cli-bundle/ 顶层目录，供 npm postinstall 使用）
           if [ -f "artifacts/nuwax-cli-macos-amd64/nuwax-cli-macos-amd64.tar.gz" ]; then
             echo "✅ 找到 x86_64 版本"
             cd macos-binaries
             tar -xzf ../artifacts/nuwax-cli-macos-amd64/nuwax-cli-macos-amd64.tar.gz
-            mv nuwax-cli nuwax-cli-x86_64
+            mv nuwax-cli-bundle/nuwax-cli nuwax-cli-x86_64
+            rm -rf nuwax-cli-bundle
             cd ..
           else
             echo "❌ 未找到 x86_64 版本"
@@ -306,7 +307,8 @@ jobs:
             echo "✅ 找到 aarch64 版本"
             cd macos-binaries
             tar -xzf ../artifacts/nuwax-cli-macos-arm64/nuwax-cli-macos-arm64.tar.gz
-            mv nuwax-cli nuwax-cli-aarch64
+            mv nuwax-cli-bundle/nuwax-cli nuwax-cli-aarch64
+            rm -rf nuwax-cli-bundle
             cd ..
           else
             echo "❌ 未找到 aarch64 版本"
