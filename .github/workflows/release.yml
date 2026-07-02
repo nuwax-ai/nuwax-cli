@@ -82,63 +82,6 @@ jobs:
             echo "is_new_version=true" >> $GITHUB_OUTPUT
           fi
 
-  # 发布 npm latest dist-tag（正式发布）
-  publish-npm-latest:
-    name: Publish to npm (latest dist-tag)
-    runs-on: ubuntu-22.04
-    needs: [check-version]
-    if: needs.check-version.outputs.should_release == 'true'
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      VERSION: ${{ needs.check-version.outputs.version }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          submodules: recursive
-
-      - name: Install cargo-dist
-        shell: bash
-        run: |
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
-          dist --version
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '20.x'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Build npm package via dist
-        shell: bash
-        run: |
-          # dist 用 tag 来选择要发布的包；这里用 v<semver> 形式最稳定
-          dist build --tag="v${VERSION}" --artifacts=global --output-format=json > dist-manifest.json
-          echo "dist ran successfully"
-          jq -r '.upload_files[]' dist-manifest.json
-
-      - name: Publish npm package (latest)
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # 找出 dist 生成的 npm 包 tarball（通常是 *-npm-package.tar.gz）
-          mapfile -t PKGS < <(jq -r '.upload_files[] | select(endswith("-npm-package.tar.gz"))' dist-manifest.json)
-
-          if [ "${#PKGS[@]}" -eq 0 ]; then
-            echo "❌ 未找到 npm package 产物（*-npm-package.tar.gz）"
-            echo "上传文件列表如下："
-            jq -r '.upload_files[]' dist-manifest.json
-            exit 1
-          fi
-
-          for pkg in "${PKGS[@]}"; do
-            echo "==> npm publish --tag latest: ${pkg}"
-            npm publish --access public --tag latest "${pkg}"
-          done
-
   # Linux x86_64 使用 Docker 构建 (Ubuntu 20.04)
   build-linux-x86_64:
     name: Build Linux-x86_64 (Docker)
@@ -682,11 +625,75 @@ jobs:
             exit 1
           fi
 
+  # 发布 npm latest dist-tag（OSS 上传完成后再发布，安装时从阿里云 OSS 下载）
+  publish-npm-latest:
+    name: Publish to npm (latest dist-tag)
+    runs-on: ubuntu-22.04
+    needs: [check-version, upload-to-oss]
+    if: needs.check-version.outputs.should_release == 'true'
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.check-version.outputs.version }}
+      TAG_NAME: ${{ needs.check-version.outputs.tag_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install cargo-dist
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+          dist --version
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Build npm package via dist
+        shell: bash
+        run: |
+          dist build --tag="v${VERSION}" --artifacts=global --output-format=json > dist-manifest.json
+          echo "dist ran successfully"
+          jq -r '.upload_files[]' dist-manifest.json
+
+      - name: Patch npm package to download from OSS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t PKGS < <(jq -r '.upload_files[] | select(endswith("-npm-package.tar.gz"))' dist-manifest.json)
+          for pkg in "${PKGS[@]}"; do
+            node scripts/patch-npm-oss-package.mjs --channel latest --tag-name "${TAG_NAME}" "${pkg}"
+          done
+
+      - name: Publish npm package (latest)
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t PKGS < <(jq -r '.upload_files[] | select(endswith("-npm-package.tar.gz"))' dist-manifest.json)
+
+          if [ "${#PKGS[@]}" -eq 0 ]; then
+            echo "❌ 未找到 npm package 产物（*-npm-package.tar.gz）"
+            jq -r '.upload_files[]' dist-manifest.json
+            exit 1
+          fi
+
+          for pkg in "${PKGS[@]}"; do
+            echo "==> npm publish --tag latest: ${pkg}"
+            npm publish --access public --tag latest "${pkg}"
+          done
+
   # 清理构建缓存（可选）
   cleanup:
     name: Cleanup
     runs-on: ubuntu-latest
-    needs: [upload-to-oss]
+    needs: [upload-to-oss, publish-npm-latest]
     if: always()
     steps:
       - name: Delete artifacts
