@@ -76,9 +76,19 @@ jobs:
     runs-on: ubuntu-22.04
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Apply tag version for build (CI only)
+        shell: bash
+        run: |
+          echo "📋 二进制构建使用 tag 版本: ${VERSION}"
+          sed "s/^version = .*/version = \"${VERSION}\"/" nuwax-cli/Cargo.toml > nuwax-cli/Cargo.toml.tmp
+          mv nuwax-cli/Cargo.toml.tmp nuwax-cli/Cargo.toml
+          grep '^version = ' nuwax-cli/Cargo.toml
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -122,9 +132,19 @@ jobs:
     runs-on: ubuntu-24.04-arm
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Apply tag version for build (CI only)
+        shell: bash
+        run: |
+          echo "📋 二进制构建使用 tag 版本: ${VERSION}"
+          sed "s/^version = .*/version = \"${VERSION}\"/" nuwax-cli/Cargo.toml > nuwax-cli/Cargo.toml.tmp
+          mv nuwax-cli/Cargo.toml.tmp nuwax-cli/Cargo.toml
+          grep '^version = ' nuwax-cli/Cargo.toml
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -164,6 +184,8 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -197,6 +219,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Apply tag version for build (CI only)
+        shell: bash
+        run: |
+          echo "📋 二进制构建使用 tag 版本: ${VERSION}"
+          sed "s/^version = .*/version = \"${VERSION}\"/" nuwax-cli/Cargo.toml > nuwax-cli/Cargo.toml.tmp
+          mv nuwax-cli/Cargo.toml.tmp nuwax-cli/Cargo.toml
+          grep '^version = ' nuwax-cli/Cargo.toml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -625,7 +655,8 @@ jobs:
         run: |
           # cargo-dist 要求 package version 与 tag 一致；仅在 CI 临时覆盖，不修改仓库版本
           echo "📋 npm 构建使用 tag 版本: ${VERSION}"
-          sed -i "s/^version = .*/version = \"${VERSION}\"/" nuwax-cli/Cargo.toml
+          sed "s/^version = .*/version = \"${VERSION}\"/" nuwax-cli/Cargo.toml > nuwax-cli/Cargo.toml.tmp
+          mv nuwax-cli/Cargo.toml.tmp nuwax-cli/Cargo.toml
           grep '^version = ' nuwax-cli/Cargo.toml
 
       - name: Install cargo-dist
