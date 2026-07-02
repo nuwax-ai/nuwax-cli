@@ -20,6 +20,8 @@ jobs:
   check-version:
     name: Check Version and Decide Release
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       should_release: ${{ steps.version_check.outputs.should_release }}
       version: ${{ steps.version_check.outputs.version }}
@@ -34,9 +36,14 @@ jobs:
       - name: Read version from tag
         id: version_check
         run: |
-          # 从标签名提取版本号 (例如 v1.0.0 -> 1.0.0)
+          # 从标签名提取版本号
+          # - dev1.0.80 -> 1.0.80
+          # - dev1.0.125-beta.1 -> 1.0.125-beta.1
+          # - v1.0.0 -> 1.0.0 (兼容手动触发/历史标签)
           TAG_NAME="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG_NAME#v}"
+          VERSION="$TAG_NAME"
+          VERSION="${VERSION#dev}"
+          VERSION="${VERSION#v}"
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
@@ -62,6 +69,63 @@ jobs:
             echo "should_release=true" >> $GITHUB_OUTPUT
             echo "is_new_version=true" >> $GITHUB_OUTPUT
           fi
+
+  # 发布 npm beta dist-tag（用于测试验证）
+  publish-npm-beta:
+    name: Publish to npm (beta dist-tag)
+    runs-on: ubuntu-22.04
+    needs: [check-version]
+    if: needs.check-version.outputs.should_release == 'true'
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install cargo-dist
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+          dist --version
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Build npm package via dist
+        shell: bash
+        run: |
+          # dist 用 tag 来选择要发布的包；这里用 v<semver> 形式最稳定
+          dist build --tag="v${VERSION}" --artifacts=global --output-format=json > dist-manifest.json
+          echo "dist ran successfully"
+          jq -r '.upload_files[]' dist-manifest.json
+
+      - name: Publish npm package (beta)
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # 找出 dist 生成的 npm 包 tarball（通常是 *-npm-package.tar.gz）
+          mapfile -t PKGS < <(jq -r '.upload_files[] | select(endswith("-npm-package.tar.gz"))' dist-manifest.json)
+
+          if [ "${#PKGS[@]}" -eq 0 ]; then
+            echo "❌ 未找到 npm package 产物（*-npm-package.tar.gz）"
+            echo "上传文件列表如下："
+            jq -r '.upload_files[]' dist-manifest.json
+            exit 1
+          fi
+
+          for pkg in "${PKGS[@]}"; do
+            echo "==> npm publish --tag beta: ${pkg}"
+            npm publish --access public --tag beta "${pkg}"
+          done
 
   # Linux x86_64 使用 Docker 构建 (Ubuntu 20.04)
   build-linux-x86_64:
