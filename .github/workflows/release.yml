@@ -115,8 +115,10 @@ jobs:
           ls -la
           file nuwax-cli
           # Package as file
-          tar czf nuwax-cli-linux-amd64.tar.gz nuwax-cli
-          rm nuwax-cli
+          mkdir -p .pkg/nuwax-cli-bundle
+          cp nuwax-cli .pkg/nuwax-cli-bundle/
+          tar czf nuwax-cli-linux-amd64.tar.gz -C .pkg nuwax-cli-bundle
+          rm -rf nuwax-cli .pkg
           ls -la nuwax-cli-linux-amd64.tar.gz
           file nuwax-cli-linux-amd64.tar.gz
 
@@ -156,8 +158,10 @@ jobs:
             sh -c "cp /output/nuwax-cli /output-dir/"
           ls -la
           file nuwax-cli
-          tar czf nuwax-cli-linux-arm64.tar.gz nuwax-cli
-          rm nuwax-cli
+          mkdir -p .pkg/nuwax-cli-bundle
+          cp nuwax-cli .pkg/nuwax-cli-bundle/
+          tar czf nuwax-cli-linux-arm64.tar.gz -C .pkg nuwax-cli-bundle
+          rm -rf nuwax-cli .pkg
           ls -la nuwax-cli-linux-arm64.tar.gz
 
       - name: Upload artifact
@@ -239,8 +243,11 @@ jobs:
         if: matrix.platform.os != 'windows-latest'
         run: |
           cd target/${{ matrix.platform.target }}/release
+          mkdir -p ../../../.pkg/nuwax-cli-bundle
+          cp ${{ matrix.platform.bin }} ../../../.pkg/nuwax-cli-bundle/nuwax-cli
           tar czf ../../../${{ matrix.platform.archive_name }}.tar.gz \
-            ${{ matrix.platform.bin }}
+            -C ../../../.pkg nuwax-cli-bundle
+          rm -rf ../../../.pkg
           cd -
 
       - name: Package binary (Windows)
@@ -335,9 +342,10 @@ jobs:
 
       - name: Package universal binary
         run: |
-          cd target/universal-apple-darwin/release
-          tar czf ../../../nuwax-cli-macos-universal.tar.gz nuwax-cli
-          cd -
+          mkdir -p .pkg/nuwax-cli-bundle
+          cp target/universal-apple-darwin/release/nuwax-cli .pkg/nuwax-cli-bundle/
+          tar czf nuwax-cli-macos-universal.tar.gz -C .pkg nuwax-cli-bundle
+          rm -rf .pkg
           
           echo "=== 打包完成 ==="
           ls -la nuwax-cli-macos-universal.tar.gz
