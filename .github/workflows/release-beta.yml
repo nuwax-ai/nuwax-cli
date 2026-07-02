@@ -206,6 +206,13 @@ jobs:
       - name: Build binary
         run: |
           echo "=== 本地编译 for ${{ matrix.platform.target }} ==="
+          # Windows: 关闭 libduckdb-sys 的 unity build,
+          # 避免在 GitHub Actions Windows runner 上被新 MSVC 编译器 OOM kill
+          # (每个 ub_*.cpp 是聚合多 TU 的单文件,内存峰值极高)
+          if [[ "${{ matrix.platform.os }}" == "windows-latest" ]]; then
+            export LIBDUCKDB_UNITY_BUILD=0
+            echo "Windows: LIBDUCKDB_UNITY_BUILD=0 (OOM 缓解)"
+          fi
           cargo build --release --target ${{ matrix.platform.target }} -p nuwax-cli
         shell: bash
 

@@ -139,7 +139,16 @@ jobs:
         run: |
           ${{ matrix.packages_install }}
       - name: Build artifacts
+        # 强制 bash,以便跨平台一致地注入 Windows 专属环境变量
+        shell: bash
         run: |
+          # Windows: 关闭 libduckdb-sys 的 unity build,
+          # 避免在 GitHub Actions Windows runner 上被新 MSVC 编译器 OOM kill
+          # (每个 ub_*.cpp 是聚合多 TU 的单文件,内存峰值极高)
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            export LIBDUCKDB_UNITY_BUILD=0
+            echo "Windows: LIBDUCKDB_UNITY_BUILD=0 (OOM 缓解)"
+          fi
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
