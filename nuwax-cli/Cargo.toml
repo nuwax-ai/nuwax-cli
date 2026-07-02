@@ -1,13 +1,13 @@
 [package]
 name = "nuwax-cli"
-version = "1.0.124-beta.2"
-edition = "2024"
+version = "1.0.125"
 description = "Docker service management and upgrade CLI"
-authors = ["soddygo"]
-license = "MIT OR Apache-2.0"
-homepage = "https://nuwax.com/"
-repository = "https://github.com/nuwax-ai/nuwax-cli"
-documentation = "https://github.com/nuwax-ai/nuwax-cli"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
 readme = "../README.md"
 keywords = [
     "docker",
@@ -26,7 +26,7 @@ path = "src/main.rs"
 
 [dependencies]
 # 核心库
-client-core = { path = "../client-core", version = "0.1.8", features = ["indicatif"] }
+client-core = { workspace = true, features = ["indicatif"] }
 
 # 命令行参数解析
 clap = { workspace = true, features = ["derive"] }
@@ -67,9 +67,6 @@ which = { workspace = true }
 
 # 集成的 ducker Docker TUI
 ducker = { workspace = true }
-
-# Docker API 客户端
-bollard = { workspace = true }
 
 # HTTP 客户端
 reqwest = { workspace = true }

@@ -44,7 +44,7 @@ pub use rust_i18n::{set_locale, t};
 // 测试环境下自动初始化 rustls ring 加密提供者
 // 确保所有测试中的 reqwest 客户端可以正常进行 HTTPS 通信
 #[cfg(test)]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn init_test_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }

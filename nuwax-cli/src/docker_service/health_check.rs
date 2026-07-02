@@ -1,9 +1,7 @@
 use crate::docker_service::{DockerServiceError, DockerServiceResult};
-use bollard::Docker;
-use bollard::models::HealthStatusEnum;
-use bollard::query_parameters::{InspectContainerOptions, ListContainersOptions};
 use client_core::constants::timeout;
-use client_core::container::DockerManager;
+use client_core::container::{ContainerHealthStatus, DockerManager};
+use client_core::container::ComposeLabels;
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -103,23 +101,6 @@ impl RestartPolicy {
     }
 }
 
-/// Docker Compose 容器标签信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComposeLabels {
-    /// 项目名称
-    pub project: Option<String>,
-    /// 服务名称
-    pub service: Option<String>,
-    /// 容器编号
-    pub container_number: Option<String>,
-    /// 是否为一次性任务
-    pub oneoff: Option<bool>,
-    /// 配置文件路径
-    pub config_files: Option<String>,
-    /// 工作目录
-    pub working_dir: Option<String>,
-}
-
 /// 容器状态
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContainerStatus {
@@ -205,7 +186,7 @@ pub struct ContainerInfo {
     /// 启动时间
     pub uptime: Option<String>,
     /// 健康检查状态
-    pub health: Option<HealthStatusEnum>,
+    pub health: Option<ContainerHealthStatus>,
     /// 是否为一次性任务
     pub is_oneshot: bool,
     /// 重启策略
@@ -391,7 +372,7 @@ impl HealthReport {
         self.containers
             .iter()
             .filter_map(|c| c.health)
-            .filter(|&c| c == HealthStatusEnum::HEALTHY)
+            .filter(|&c| c == ContainerHealthStatus::Healthy)
             .count()
     }
 
@@ -774,74 +755,17 @@ impl HealthChecker {
     }
 
     /// 获取容器的Docker Compose标签信息
-    /// 使用bollard库直接从Docker API获取容器标签信息
     async fn get_container_labels(&self, container_name: &str) -> Option<ComposeLabels> {
-        match Docker::connect_with_socket_defaults() {
-            Ok(docker) => {
-                // 获取容器列表，查找指定容器
-                match docker
-                    .list_containers(Some(ListContainersOptions {
-                        all: true,
-                        ..Default::default()
-                    }))
-                    .await
-                {
-                    Ok(containers) => {
-                        for container in containers {
-                            // 检查容器名称是否匹配
-                            if let Some(names) = &container.names {
-                                let container_matches = names.iter().any(|name| {
-                                    // Docker容器名称通常以/开头，需要去掉
-                                    let clean_name = name.strip_prefix('/').unwrap_or(name);
-                                    clean_name == container_name
-                                });
-
-                                if container_matches {
-                                    if let Some(labels) = &container.labels {
-                                        return Some(ComposeLabels {
-                                            project: labels
-                                                .get("com.docker.compose.project")
-                                                .cloned(),
-                                            service: labels
-                                                .get("com.docker.compose.service")
-                                                .cloned(),
-                                            container_number: labels
-                                                .get("com.docker.compose.container-number")
-                                                .cloned(),
-                                            oneoff: labels
-                                                .get("com.docker.compose.oneoff")
-                                                .and_then(|v| v.parse::<bool>().ok())
-                                                .or_else(|| {
-                                                    labels
-                                                        .get("com.docker.compose.oneoff")
-                                                        .map(|v| v.to_lowercase() == "true")
-                                                }),
-                                            config_files: labels
-                                                .get("com.docker.compose.project.config_files")
-                                                .cloned(),
-                                            working_dir: labels
-                                                .get("com.docker.compose.project.working_dir")
-                                                .cloned(),
-                                        });
-                                    }
-                                    return None; // 找到容器但没有标签
-                                }
-                            }
-                        }
-                        None // 没有找到匹配的容器
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Bollard failed to get container list: {error}",
-                            error = e.to_string()
-                        );
-                        None
-                    }
-                }
-            }
+        match self
+            .docker_manager
+            .get_container_compose_labels(container_name)
+            .await
+        {
+            Ok(v) => v,
             Err(e) => {
                 warn!(
-                    "Bollard failed to connect to Docker: {error}",
+                    "Cannot get compose labels for container {container}: {error}",
+                    container = container_name,
                     error = e.to_string()
                 );
                 None
@@ -952,29 +876,20 @@ impl HealthChecker {
     }
 
     /// 获取Docker容器的健康检查状态
-    async fn get_container_health_status(&self, container_name: &str) -> Option<HealthStatusEnum> {
-        match Docker::connect_with_socket_defaults() {
-            Ok(docker) => {
-                match docker
-                    .inspect_container(container_name, None::<InspectContainerOptions>)
-                    .await
-                {
-                    Ok(container_info) => container_info
-                        .state
-                        .and_then(|state| state.health.and_then(|health| health.status)),
-                    Err(e) => {
-                        warn!(
-                            "Cannot get health status for container {container}: {error}",
-                            container = container_name,
-                            error = e.to_string()
-                        );
-                        None
-                    }
-                }
-            }
+    async fn get_container_health_status(
+        &self,
+        container_name: &str,
+    ) -> Option<ContainerHealthStatus> {
+        match self
+            .docker_manager
+            .get_container_health_status(container_name)
+            .await
+        {
+            Ok(v) => v,
             Err(e) => {
                 warn!(
-                    "Cannot connect to Docker for health check: {error}",
+                    "Cannot get health status for container {container}: {error}",
+                    container = container_name,
                     error = e.to_string()
                 );
                 None

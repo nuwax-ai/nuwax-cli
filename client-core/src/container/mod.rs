@@ -3,6 +3,7 @@ mod command;
 mod config;
 mod environment;
 mod image;
+mod labels;
 mod path_utils;
 mod service;
 pub mod types;
@@ -13,5 +14,6 @@ pub use environment::{
     ComposeCommandType, HostOs, PathFormat, RuntimeEnvironment, detect_compose_command_type,
     detect_runtime_environment, get_compose_command_type, set_compose_command_type,
 };
+pub use labels::{ComposeLabels, ContainerHealthStatus};
 pub use path_utils::{PathProcessor, PathUtilsError};
 pub use types::{DockerManager, ServiceConfig, ServiceInfo, ServiceStatus};
