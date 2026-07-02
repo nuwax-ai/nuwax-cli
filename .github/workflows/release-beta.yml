@@ -86,6 +86,14 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      - name: Apply tag version for dist (CI only)
+        shell: bash
+        run: |
+          # cargo-dist 要求 package version 与 tag 一致；仅在 CI 临时覆盖，不修改仓库版本
+          echo "📋 npm 构建使用 tag 版本: ${VERSION}"
+          sed -i "s/^version = .*/version = \"${VERSION}\"/" nuwax-cli/Cargo.toml
+          grep '^version = ' nuwax-cli/Cargo.toml
+
       - name: Install cargo-dist
         shell: bash
         run: |

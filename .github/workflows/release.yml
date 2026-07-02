@@ -52,6 +52,17 @@ jobs:
           echo "📋 检测到版本: ${VERSION}"
           echo "📋 对应标签: ${TAG_NAME}"
 
+          # 正式版发布：tag 版本必须与 nuwax-cli/Cargo.toml 完全一致
+          CARGO_VERSION=$(grep '^version = ' nuwax-cli/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "📋 Cargo.toml 版本: ${CARGO_VERSION}"
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "❌ 正式版发布要求 tag 版本与 nuwax-cli/Cargo.toml 完全一致"
+            echo "   tag 版本: ${VERSION}"
+            echo "   Cargo.toml: ${CARGO_VERSION}"
+            exit 1
+          fi
+          echo "✅ 版本校验通过"
+
           # 检查这个版本的 GitHub Release 是否已经存在
           if gh release view ${TAG_NAME} &>/dev/null; then
             echo "⚠️ 标签 ${TAG_NAME} 已存在"
