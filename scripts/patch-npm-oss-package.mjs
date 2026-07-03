@@ -103,6 +103,9 @@ function patchPackage(pkgPath, channel, tagName) {
       }
     }
 
+    // cargo-dist 0.32+ 使用 Node 内置模块，最低 Node 14.14；明确 engines 避免 Node 10 等旧版本误装
+    pkg.engines = { node: ">=14.14", npm: ">=6" };
+
     writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
 
     const outPath = `${pkgPath}.oss.tmp`;
