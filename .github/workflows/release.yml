@@ -114,19 +114,22 @@ jobs:
             sh -c "cp /output/nuwax-cli /output-dir/"
           ls -la
           file nuwax-cli
-          # Package as file
+          # OSS / 文档 / check-update：解压后直接是 nuwax-cli
+          tar czf nuwax-cli-linux-amd64.tar.gz nuwax-cli
+          # npm postinstall（tar --strip-components=1）专用包
           mkdir -p .pkg/nuwax-cli-bundle
           cp nuwax-cli .pkg/nuwax-cli-bundle/
-          tar czf nuwax-cli-linux-amd64.tar.gz -C .pkg nuwax-cli-bundle
+          tar czf nuwax-cli-linux-amd64.npm.tar.gz -C .pkg nuwax-cli-bundle
           rm -rf nuwax-cli .pkg
-          ls -la nuwax-cli-linux-amd64.tar.gz
-          file nuwax-cli-linux-amd64.tar.gz
+          ls -la nuwax-cli-linux-amd64.tar.gz nuwax-cli-linux-amd64.npm.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nuwax-cli-linux-amd64
-          path: nuwax-cli-linux-amd64.tar.gz
+          path: |
+            nuwax-cli-linux-amd64.tar.gz
+            nuwax-cli-linux-amd64.npm.tar.gz
 
   # Linux ARM64 使用 Docker 构建 (Ubuntu 20.04 on ubuntu-24.04-arm)
   build-linux-aarch64:
@@ -158,17 +161,20 @@ jobs:
             sh -c "cp /output/nuwax-cli /output-dir/"
           ls -la
           file nuwax-cli
+          tar czf nuwax-cli-linux-arm64.tar.gz nuwax-cli
           mkdir -p .pkg/nuwax-cli-bundle
           cp nuwax-cli .pkg/nuwax-cli-bundle/
-          tar czf nuwax-cli-linux-arm64.tar.gz -C .pkg nuwax-cli-bundle
+          tar czf nuwax-cli-linux-arm64.npm.tar.gz -C .pkg nuwax-cli-bundle
           rm -rf nuwax-cli .pkg
-          ls -la nuwax-cli-linux-arm64.tar.gz
+          ls -la nuwax-cli-linux-arm64.tar.gz nuwax-cli-linux-arm64.npm.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nuwax-cli-linux-arm64
-          path: nuwax-cli-linux-arm64.tar.gz
+          path: |
+            nuwax-cli-linux-arm64.tar.gz
+            nuwax-cli-linux-arm64.npm.tar.gz
 
   # Windows 和 macOS 使用标准 CI
   build:
@@ -243,9 +249,11 @@ jobs:
         if: matrix.platform.os != 'windows-latest'
         run: |
           cd target/${{ matrix.platform.target }}/release
+          tar czf ../../../${{ matrix.platform.archive_name }}.tar.gz \
+            ${{ matrix.platform.bin }}
           mkdir -p ../../../.pkg/nuwax-cli-bundle
           cp ${{ matrix.platform.bin }} ../../../.pkg/nuwax-cli-bundle/nuwax-cli
-          tar czf ../../../${{ matrix.platform.archive_name }}.tar.gz \
+          tar czf ../../../${{ matrix.platform.archive_name }}.npm.tar.gz \
             -C ../../../.pkg nuwax-cli-bundle
           rm -rf ../../../.pkg
           cd -
@@ -265,6 +273,7 @@ jobs:
           name: ${{ matrix.platform.archive_name }}
           path: |
             ${{ matrix.platform.archive_name }}.tar.gz
+            ${{ matrix.platform.archive_name }}.npm.tar.gz
             ${{ matrix.platform.archive_name }}.zip
           if-no-files-found: ignore
 
@@ -289,13 +298,12 @@ jobs:
           # 创建工作目录
           mkdir -p macos-binaries
           
-          # 提取 x86_64 版本（tarball 含 nuwax-cli-bundle/ 顶层目录，供 npm postinstall 使用）
+          # 提取 x86_64 版本（扁平 tar，解压后直接是 nuwax-cli）
           if [ -f "artifacts/nuwax-cli-macos-amd64/nuwax-cli-macos-amd64.tar.gz" ]; then
             echo "✅ 找到 x86_64 版本"
             cd macos-binaries
             tar -xzf ../artifacts/nuwax-cli-macos-amd64/nuwax-cli-macos-amd64.tar.gz
-            mv nuwax-cli-bundle/nuwax-cli nuwax-cli-x86_64
-            rm -rf nuwax-cli-bundle
+            mv nuwax-cli nuwax-cli-x86_64
             cd ..
           else
             echo "❌ 未找到 x86_64 版本"
@@ -307,8 +315,7 @@ jobs:
             echo "✅ 找到 aarch64 版本"
             cd macos-binaries
             tar -xzf ../artifacts/nuwax-cli-macos-arm64/nuwax-cli-macos-arm64.tar.gz
-            mv nuwax-cli-bundle/nuwax-cli nuwax-cli-aarch64
-            rm -rf nuwax-cli-bundle
+            mv nuwax-cli nuwax-cli-aarch64
             cd ..
           else
             echo "❌ 未找到 aarch64 版本"
@@ -344,19 +351,24 @@ jobs:
 
       - name: Package universal binary
         run: |
+          cd target/universal-apple-darwin/release
+          tar czf ../../../nuwax-cli-macos-universal.tar.gz nuwax-cli
+          cd ../../..
           mkdir -p .pkg/nuwax-cli-bundle
           cp target/universal-apple-darwin/release/nuwax-cli .pkg/nuwax-cli-bundle/
-          tar czf nuwax-cli-macos-universal.tar.gz -C .pkg nuwax-cli-bundle
+          tar czf nuwax-cli-macos-universal.npm.tar.gz -C .pkg nuwax-cli-bundle
           rm -rf .pkg
-          
+
           echo "=== 打包完成 ==="
-          ls -la nuwax-cli-macos-universal.tar.gz
+          ls -la nuwax-cli-macos-universal.tar.gz nuwax-cli-macos-universal.npm.tar.gz
 
       - name: Upload universal binary
         uses: actions/upload-artifact@v4
         with:
           name: nuwax-cli-macos-universal
-          path: nuwax-cli-macos-universal.tar.gz
+          path: |
+            nuwax-cli-macos-universal.tar.gz
+            nuwax-cli-macos-universal.npm.tar.gz
 
   # 发布到 GitHub Releases
   release:

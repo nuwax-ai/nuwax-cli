@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Patch cargo-dist npm package to download binaries from Alibaba Cloud OSS
- * instead of GitHub Releases.
+ * OSS 上同时存在两种 tar 包：
+ * - nuwax-cli-*.tar.gz        → 扁平结构，供文档 wget / check-update / latest.json
+ * - nuwax-cli-*.npm.tar.gz    → nuwax-cli-bundle/ 顶层目录，供 npm postinstall（tar --strip-components=1）
  *
  * Usage:
  *   node scripts/patch-npm-oss-package.mjs --channel beta|latest --tag-name <tag> <npm-package.tar.gz>
@@ -16,19 +17,19 @@ const OSS_BASE =
 
 const OSS_PLATFORM_ARTIFACTS = {
   "aarch64-apple-darwin": {
-    artifactName: "nuwax-cli-macos-arm64.tar.gz",
+    artifactName: "nuwax-cli-macos-arm64.npm.tar.gz",
     zipExt: ".tar.gz",
   },
   "x86_64-apple-darwin": {
-    artifactName: "nuwax-cli-macos-universal.tar.gz",
+    artifactName: "nuwax-cli-macos-universal.npm.tar.gz",
     zipExt: ".tar.gz",
   },
   "aarch64-unknown-linux-gnu": {
-    artifactName: "nuwax-cli-linux-arm64.tar.gz",
+    artifactName: "nuwax-cli-linux-arm64.npm.tar.gz",
     zipExt: ".tar.gz",
   },
   "x86_64-unknown-linux-gnu": {
-    artifactName: "nuwax-cli-linux-amd64.tar.gz",
+    artifactName: "nuwax-cli-linux-amd64.npm.tar.gz",
     zipExt: ".tar.gz",
   },
   "x86_64-pc-windows-msvc": {
