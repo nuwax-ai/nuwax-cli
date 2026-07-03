@@ -1,13 +1,20 @@
 use anyhow::{Context, Result};
 use chrono::DateTime;
+use client_core::constants::api::endpoints::{
+    CLI_VERSION_OSS_BETA, CLI_VERSION_OSS_PROD,
+};
+use client_core::ReleaseVersion;
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
+
+use crate::cli::CheckUpdateCommand;
 
 /// GitHub 仓库信息从 Cargo.toml 中的 repository 字段解析
 /// 在编译时从环境变量 CARGO_PKG_REPOSITORY 中提取
@@ -30,16 +37,15 @@ fn parse_github_repo() -> (&'static str, &'static str) {
     );
 }
 
-//cli 命令工具请求的地址 (阿里云 OSS)
-pub const CLI_API_URL: &str =
-    "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-cli/latest/latest.json";
-
-/// 获取完整的 CLI API URL
+/// 获取完整的 CLI API URL（根据 NUWAX_CLI_ENV 切换 prod/beta）
 pub fn get_cli_api_url() -> String {
-    CLI_API_URL.to_string()
+    let cli_env = std::env::var("NUWAX_CLI_ENV").unwrap_or_default();
+    if cli_env.eq_ignore_ascii_case("test") || cli_env.eq_ignore_ascii_case("testing") {
+        CLI_VERSION_OSS_BETA.to_string()
+    } else {
+        CLI_VERSION_OSS_PROD.to_string()
+    }
 }
-
-use crate::cli::CheckUpdateCommand;
 
 /// GitHub Release API 响应结构
 #[derive(Debug, Deserialize)]
@@ -332,24 +338,14 @@ pub async fn fetch_latest_version_multi_source() -> Result<GitHubRelease> {
 }
 
 /// 比较版本号
-pub fn compare_versions(current: &str, latest: &str) -> std::cmp::Ordering {
-    // 简单的版本比较，假设版本格式为 v1.2.3 或 1.2.3
-    let normalize_version = |v: &str| -> String { v.trim_start_matches('v').to_string() };
-
-    let current_norm = normalize_version(current);
-    let latest_norm = normalize_version(latest);
-
-    // 使用语义版本比较（简化版）
-    let parse_version = |v: &str| -> Vec<u32> {
-        v.split('.')
-            .map(|s| s.parse::<u32>().unwrap_or(0))
-            .collect()
-    };
-
-    let current_parts = parse_version(&current_norm);
-    let latest_parts = parse_version(&latest_norm);
-
-    current_parts.cmp(&latest_parts)
+pub fn compare_versions(current: &str, latest: &str) -> Ordering {
+    match (ReleaseVersion::parse(current), ReleaseVersion::parse(latest)) {
+        (Ok(a), Ok(b)) => a.cmp(&b),
+        _ => {
+            warn!("Failed to parse version, skip update comparison");
+            Ordering::Equal
+        }
+    }
 }
 
 /// 检查更新

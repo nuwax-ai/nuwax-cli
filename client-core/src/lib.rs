@@ -34,7 +34,9 @@ pub mod sql_diff;
 pub mod upgrade;
 pub mod upgrade_strategy;
 pub mod version;
+pub mod release_version;
 
+pub use release_version::ReleaseVersion;
 pub use database_manager::DatabaseManager;
 pub use error::*;
 

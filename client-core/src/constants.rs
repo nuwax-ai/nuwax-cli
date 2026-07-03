@@ -363,6 +363,14 @@ pub mod api {
         /// Docker版本JSON (OSS) - 测试/发布环境
         pub const DOCKER_VERSION_OSS_BETA: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/beta/latest.json";
 
+        /// CLI 版本检查 JSON (OSS) - 生产环境
+        pub const CLI_VERSION_OSS_PROD: &str =
+            "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-cli/latest/latest.json";
+
+        /// CLI 版本检查 JSON (OSS) - 测试环境
+        pub const CLI_VERSION_OSS_BETA: &str =
+            "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-cli/beta/latest.json";
+
         /// Docker完整服务包下载端点
         pub const DOCKER_DOWNLOAD_FULL: &str =
             "/api/v1/clients/downloads/docker/services/full/latest";

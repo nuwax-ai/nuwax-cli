@@ -34,9 +34,14 @@ jobs:
       - name: Read version from tag
         id: version_check
         run: |
-          # 从标签名提取版本号 (例如 v1.0.0 -> 1.0.0)
+          # 从标签名提取版本号
+          # - docker1.0.80 -> 1.0.80
+          # - docker1.0.125-beta.1 -> 1.0.125-beta.1
+          # - v1.0.0 -> 1.0.0 (兼容手动触发/历史标签)
           TAG_NAME="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG_NAME#v}"
+          VERSION="$TAG_NAME"
+          VERSION="${VERSION#docker}"
+          VERSION="${VERSION#v}"
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
@@ -463,6 +468,7 @@ jobs:
       OSS_BUCKET: "oss://nuwa-packages"
       OSS_CDN_BASE: "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com"
       TAG_NAME: ${{ needs.check-version.outputs.tag_name }}
+      VERSION: ${{ needs.check-version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -548,8 +554,8 @@ jobs:
 
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
           LATEST_JSON=$(jq -n \
-            --arg version "${TAG_NAME}" \
-            --arg notes "Nuwax CLI ${TAG_NAME} beta release" \
+            --arg version "v${VERSION}" \
+            --arg notes "Nuwax CLI ${VERSION} beta release" \
             --arg pub_date "$PUB_DATE" \
             --argjson platforms "$PLATFORMS" \
             '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}')
