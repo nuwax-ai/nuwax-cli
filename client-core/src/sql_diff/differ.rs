@@ -260,8 +260,13 @@ fn generate_index_diffs(
             ));
             stats.indexes_added += 1;
         } else if idx_def.is_fulltext {
+            let parser_clause = idx_def
+                .parser
+                .as_ref()
+                .map(|p| format!(" WITH PARSER {p}"))
+                .unwrap_or_default();
             diffs.push(format!(
-                "ALTER TABLE `{}` ADD FULLTEXT KEY `{}` ({});",
+                "ALTER TABLE `{}` ADD FULLTEXT KEY `{}` ({}){};",
                 table_name,
                 idx_name,
                 idx_def
@@ -269,7 +274,8 @@ fn generate_index_diffs(
                     .iter()
                     .map(|c| format!("`{c}`"))
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                parser_clause
             ));
             stats.indexes_added += 1;
         } else if idx_def.is_spatial {

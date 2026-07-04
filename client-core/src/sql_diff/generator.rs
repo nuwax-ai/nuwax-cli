@@ -278,15 +278,21 @@ pub fn generate_index_sql(index: &TableIndex) -> String {
                 .join(", ")
         )
     } else if index.is_fulltext {
+        let parser_clause = index
+            .parser
+            .as_ref()
+            .map(|p| format!(" WITH PARSER {p}"))
+            .unwrap_or_default();
         format!(
-            "FULLTEXT KEY `{}` ({})",
+            "FULLTEXT KEY `{}` ({}){}",
             index.name,
             index
                 .columns
                 .iter()
                 .map(|c| format!("`{c}`"))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            parser_clause
         )
     } else if index.is_spatial {
         format!(

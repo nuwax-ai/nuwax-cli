@@ -908,6 +908,47 @@ CREATE FULLTEXT INDEX ft_name_desc ON published (name, description);
         diff_sql.contains("`name`, `description`"),
         "expected both columns in diff, got: {diff_sql}"
     );
+    // 没有 WITH PARSER 时不应凭空生成该子句
+    assert!(
+        !diff_sql.contains("WITH PARSER"),
+        "expected no WITH PARSER clause, got: {diff_sql}"
+    );
+}
+
+#[test]
+fn test_fulltext_index_with_parser_diff() {
+    // 验证 `CREATE FULLTEXT INDEX ... WITH PARSER ngram` 的 parser 子句被透传到 diff
+    let from_sql = r#"
+USE test_platform;
+
+CREATE TABLE published (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(255),
+    description TEXT,
+    PRIMARY KEY (id)
+);
+    "#;
+
+    let to_sql = r#"
+USE test_platform;
+
+CREATE TABLE published (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(255),
+    description TEXT,
+    PRIMARY KEY (id)
+);
+
+CREATE FULLTEXT INDEX ft_name_desc ON published (name, description) WITH PARSER ngram;
+    "#;
+
+    let (diff_sql, _description) =
+        generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "2.0.0").unwrap();
+
+    assert!(
+        diff_sql.contains("ADD FULLTEXT KEY `ft_name_desc` (`name`, `description`) WITH PARSER ngram"),
+        "expected FULLTEXT KEY diff with WITH PARSER ngram clause, got: {diff_sql}"
+    );
 }
 
 #[test]

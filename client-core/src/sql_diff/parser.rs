@@ -1,7 +1,9 @@
 use super::types::{TableColumn, TableDefinition, TableIndex};
 use crate::error::DuckError;
 use regex::Regex;
-use sqlparser::ast::{ColumnDef, DataType, FullTextOrSpatialKind, Statement, TableConstraint};
+use sqlparser::ast::{
+    ColumnDef, DataType, FullTextOrSpatialKind, IndexOption, Statement, TableConstraint,
+};
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::HashMap;
@@ -65,6 +67,7 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
                                 is_fulltext: false,
                                 is_spatial: false,
                                 index_type: Some("PRIMARY".to_string()),
+                                parser: None,
                             });
                         }
 
@@ -284,6 +287,7 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 is_fulltext: false,
                 is_spatial: false,
                 index_type: Some("PRIMARY".to_string()),
+                parser: None,
             }))
         }
         TableConstraint::Unique(uq) => {
@@ -302,6 +306,7 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 is_fulltext: false,
                 is_spatial: false,
                 index_type: Some("UNIQUE".to_string()),
+                parser: None,
             }))
         }
         TableConstraint::Index(idx) => {
@@ -320,6 +325,7 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 is_fulltext: false,
                 is_spatial: false,
                 index_type: Some("INDEX".to_string()),
+                parser: None,
             }))
         }
         // CREATE TABLE 内部的 FULLTEXT / SPATIAL 约束形式
@@ -350,6 +356,7 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 is_fulltext,
                 is_spatial: !ft.fulltext,
                 index_type: Some(index_type),
+                parser: None,
             }))
         }
         _ => Ok(None),
@@ -585,6 +592,16 @@ fn parse_standalone_indexes(
                             "INDEX".to_string()
                         };
 
+                        // 提取 `WITH PARSER <name>` 子句（fork 版 sqlparser 0.63.1+ 支持，
+                        // 例如 FULLTEXT 索引常用 ngram parser 支持中日韩分词）
+                        let parser_name = create_index.index_options.iter().find_map(|opt| {
+                            if let IndexOption::WithParser(name) = opt {
+                                Some(ident_to_string(name))
+                            } else {
+                                None
+                            }
+                        });
+
                         // 查找对应的表
                         if let Some(table_def) = tables.get_mut(&table_name) {
                             // 检查是否已经存在同名索引
@@ -605,6 +622,7 @@ fn parse_standalone_indexes(
                                 is_fulltext,
                                 is_spatial,
                                 index_type: Some(index_type),
+                                parser: parser_name,
                             });
 
                             index_count += 1;
