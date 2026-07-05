@@ -952,6 +952,44 @@ CREATE FULLTEXT INDEX ft_name_desc ON published (name, description) WITH PARSER 
 }
 
 #[test]
+fn test_inline_fulltext_with_parser_versioned_comment() {
+    // 线上 `SHOW CREATE TABLE` 的真实输出：WITH PARSER 被包在 `/*!50100 */` 版本注释里，
+    // 且 FULLTEXT 以 CREATE TABLE 内联 KEY 形式存在（非 standalone CREATE INDEX）。
+    // 验证 fork-sqlparser 0.63.2+ 能解析内联 FULLTEXT 的 index_options，且 nuwax-cli
+    // 能提取 parser 名并透传到 diff（auto-upgrade-deploy live schema 的核心场景）。
+    let from_sql = r#"
+USE test_platform;
+
+CREATE TABLE published (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(255),
+    description TEXT,
+    PRIMARY KEY (id)
+);
+    "#;
+
+    let to_sql = r#"
+USE test_platform;
+
+CREATE TABLE published (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(255),
+    description TEXT,
+    PRIMARY KEY (id),
+    FULLTEXT KEY ft_name_desc (name, description) /*!50100 WITH PARSER `ngram` */
+);
+    "#;
+
+    let (diff_sql, _description) =
+        generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "2.0.0").unwrap();
+
+    assert!(
+        diff_sql.contains("ADD FULLTEXT KEY `ft_name_desc` (`name`, `description`) WITH PARSER ngram"),
+        "inline FULLTEXT KEY with versioned-comment WITH PARSER must propagate to diff, got: {diff_sql}"
+    );
+}
+
+#[test]
 fn test_spatial_index_diff_standalone() {
     let from_sql = r#"
 USE test_platform;
