@@ -98,8 +98,8 @@ pub struct TableIndex {
     pub is_spatial: bool,
     pub index_type: Option<String>,
     /// MySQL FULLTEXT 索引的 `WITH PARSER <name>` 子句，例如 `ngram`。
-    /// 仅 standalone `CREATE FULLTEXT INDEX` 语句会提取到该值；
-    /// 内联 `CREATE TABLE ... FULLTEXT KEY` 形式当前不提取（上游 parser 限制）。
+    /// standalone `CREATE FULLTEXT INDEX` 与内联 `CREATE TABLE ... FULLTEXT KEY`
+    /// 两种形式都会提取该值（fork 版 sqlparser 0.63.2+ 支持内联形式）。
     pub parser: Option<String>,
 }
 

@@ -348,6 +348,17 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 (false, "SPATIAL".to_string())
             };
 
+            // 提取 `WITH PARSER <name>` 子句（fork 版 sqlparser 0.63.2+ 支持，
+            // 例如 FULLTEXT 索引常用 ngram parser 支持中日韩分词）。
+            // `SHOW CREATE TABLE` 的内联 FULLTEXT KEY 形式也会走到这里。
+            let parser_name = ft.index_options.iter().find_map(|opt| {
+                if let IndexOption::WithParser(name) = opt {
+                    Some(ident_to_string(name))
+                } else {
+                    None
+                }
+            });
+
             Ok(Some(TableIndex {
                 name: index_name,
                 columns: column_names,
@@ -356,7 +367,7 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 is_fulltext,
                 is_spatial: !ft.fulltext,
                 index_type: Some(index_type),
-                parser: None,
+                parser: parser_name,
             }))
         }
         _ => Ok(None),

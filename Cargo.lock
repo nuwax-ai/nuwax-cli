@@ -3347,9 +3347,9 @@ dependencies = [
 
 [[package]]
 name = "nuwax-sqlparser"
-version = "0.63.1"
+version = "0.63.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daf35a77736fa33bcbcaea6d4ba9fe9b4349a24bf378fa23d2fc2fb25bfcbb44"
+checksum = "970b4050f5924addcee19a6a726d3b985bdd76eb4224d9dd93320cdcd09ebedc"
 dependencies = [
  "log",
  "recursive",
