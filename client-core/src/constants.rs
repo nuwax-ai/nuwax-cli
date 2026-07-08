@@ -238,12 +238,14 @@ pub mod docker {
     /// 这些目录包含用户数据或运行时生成的重要文件，在升级过程中必须保护：
     /// - `upload`: 用户上传的文件
     /// - `project_workspace`: 项目工作空间
+    /// - `computer-project-workspace`: 计算机项目工作空间
     /// - `project_zips`: 项目压缩包
     /// - `project_nginx`: Nginx配置
     /// - `project_init`: 项目初始化文件
     /// - `uv_cache`: UV缓存目录
     /// - `data`: 数据库和持久化数据
-    pub const EXCLUDE_DIRS: [&str; 8] = [
+    /// - `app-workspace`: 应用工作空间
+    pub const EXCLUDE_DIRS: [&str; 9] = [
         "upload",
         "project_workspace",
         "computer-project-workspace",
@@ -252,6 +254,7 @@ pub mod docker {
         "project_init",
         "uv_cache",
         "data",
+        "app-workspace",
     ];
 }
 
