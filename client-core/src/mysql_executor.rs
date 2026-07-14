@@ -4,6 +4,8 @@ use anyhow::{Context, Result, anyhow};
 use docker_compose_types as dct;
 use mysql_async::prelude::*;
 use mysql_async::{Opts, Pool, Row, Transaction, TxOpts, from_row};
+use std::collections::HashMap;
+use std::path::Path;
 
 /// MySQL容器异步差异SQL执行器
 /// 专为Duck Client自动升级部署设计
@@ -44,11 +46,18 @@ impl MySqlConfig {
             .and_then(|s| s.as_ref())
             .ok_or_else(|| anyhow!("'mysql' service not found in docker-compose.yml"))?;
 
-        let mut config_map = std::collections::HashMap::new();
+        // 加载 .env 变量表，用于 environment 值的 ${VAR} 插值。
+        // docker_compose_types 仅做纯 YAML 反序列化，不会像 `docker compose` 命令那样
+        // 自动解析 ${VAR} 引用；若不在此插值，读到的凭据将是字面量（如 "${MYSQL_USER}"），
+        // 导致 MySQL 认证失败（报 "connection closed"）。
+        let env_vars = load_env_vars(docker_manager.get_env_file());
+
+        let mut config_map = HashMap::new();
         if let dct::Environment::List(env_list) = &mysql_service.environment {
             for item in env_list {
                 if let Some((key, value)) = item.split_once('=') {
-                    config_map.insert(key.to_string(), value.to_string());
+                    let resolved = interpolate_vars(value, &env_vars);
+                    config_map.insert(key.to_string(), resolved);
                 }
             }
         }
@@ -87,21 +96,37 @@ impl MySqlConfig {
                 })?,
         };
 
+        let user = config_map
+            .get("MYSQL_USER")
+            .cloned()
+            .unwrap_or_else(|| "root".to_string());
+        let password = config_map
+            .get("MYSQL_PASSWORD")
+            .cloned()
+            .unwrap_or_else(|| "root".to_string());
+        let database = config_map
+            .get("MYSQL_DATABASE")
+            .cloned()
+            .unwrap_or_else(|| "agent_platform".to_string());
+
+        // Fail Fast：若关键凭据仍含未解析的 ${VAR}，说明 .env 缺少对应变量定义。
+        // 在此直接报错——否则拿字面量去认证，MySQL 只会回 "connection closed"，极难定位。
+        for (field, val) in [("user", &user), ("password", &password), ("database", &database)] {
+            if val.contains('$') {
+                return Err(anyhow!(
+                    "MySQL {field} 仍含未解析的变量引用 {val:?}：\
+                     请在 .env 文件（{}）中定义对应变量后重试",
+                    docker_manager.get_env_file().display()
+                ));
+            }
+        }
+
         Ok(MySqlConfig {
             host: "127.0.0.1".to_string(),
             port,
-            user: config_map
-                .get("MYSQL_USER")
-                .cloned()
-                .unwrap_or_else(|| "root".to_string()),
-            password: config_map
-                .get("MYSQL_PASSWORD")
-                .cloned()
-                .unwrap_or_else(|| "root".to_string()),
-            database: config_map
-                .get("MYSQL_DATABASE")
-                .cloned()
-                .unwrap_or_else(|| "agent_platform".to_string()),
+            user,
+            password,
+            database,
         })
     }
 
@@ -111,6 +136,121 @@ impl MySqlConfig {
             "mysql://{}:{}@{}:{}/{}",
             self.user, self.password, self.host, self.port, self.database
         )
+    }
+}
+
+/// 从 .env 文件加载变量表（KEY=VALUE）。
+///
+/// 文件不存在或不可读时返回空表（降级为不做插值，保持向后兼容）。
+fn load_env_vars(path: &Path) -> HashMap<String, String> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut vars = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || key.chars().any(char::is_whitespace) {
+            continue;
+        }
+        let value = strip_surrounding_quotes(value.trim());
+        vars.insert(key.to_string(), value);
+    }
+    vars
+}
+
+/// 去除字符串两侧成对的单/双引号
+fn strip_surrounding_quotes(value: &str) -> String {
+    let first = value.chars().next();
+    let last = value.chars().next_back();
+    match (first, last) {
+        (Some(q), Some(q2)) if q == q2 && (q == '"' || q == '\'') && value.len() > q.len_utf8() => {
+            value[q.len_utf8()..value.len() - q.len_utf8()].to_string()
+        }
+        _ => value.to_string(),
+    }
+}
+
+/// 对字符串做 docker compose 风格的 ${VAR} / $VAR 变量插值。
+///
+/// 支持：`${VAR}`、`$VAR`、`${VAR:-default}`（VAR 未设或为空→default）、
+/// `${VAR-default}`（VAR 未设→default）、`$$`（转义为字面 `$`）。
+/// 未定义且无默认值的变量替换为空字符串（与 `docker compose` 默认行为一致）。
+fn interpolate_vars(value: &str, vars: &HashMap<String, String>) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(dollar_idx) = rest.find('$') {
+        result.push_str(&rest[..dollar_idx]);
+        let after = &rest[dollar_idx + 1..];
+
+        // $$ → 字面 $
+        if let Some(remaining) = after.strip_prefix('$') {
+            result.push('$');
+            rest = remaining;
+            continue;
+        }
+
+        // ${VAR} / ${VAR:-default} / ${VAR-default}
+        if let Some(inner) = after.strip_prefix('{') {
+            if let Some(close) = inner.find('}') {
+                result.push_str(&resolve_var_spec(&inner[..close], vars));
+                rest = &inner[close + 1..];
+                continue;
+            }
+            // 未闭合的 ${，原样保留 $
+            result.push('$');
+            rest = after;
+            continue;
+        }
+
+        // $VAR（无括号；变量名以字母或下划线开头，后接字母/数字/下划线）
+        let starts_name = after
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_');
+        if starts_name {
+            let name_end = after
+                .char_indices()
+                .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+            if let Some(v) = vars.get(&after[..name_end]) {
+                result.push_str(v);
+            }
+            rest = &after[name_end..];
+            continue;
+        }
+
+        // 单独的 $（其后非变量名字符），原样保留
+        result.push('$');
+        rest = after;
+    }
+    result.push_str(rest);
+    result
+}
+
+/// 解析 `${...}` 内部规格：`VAR` / `VAR:-default` / `VAR-default`
+fn resolve_var_spec(inner: &str, vars: &HashMap<String, String>) -> String {
+    if let Some((name, default)) = inner.split_once(":-") {
+        match vars.get(name) {
+            Some(v) if !v.is_empty() => v.clone(),
+            _ => default.to_string(),
+        }
+    } else if let Some((name, default)) = inner.split_once('-') {
+        match vars.get(name) {
+            Some(v) => v.clone(),
+            None => default.to_string(),
+        }
+    } else {
+        vars.get(inner).cloned().unwrap_or_default()
     }
 }
 
@@ -354,6 +494,106 @@ pub struct ExecutionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_interpolate_vars_basic() {
+        let mut vars = HashMap::new();
+        vars.insert("MYSQL_USER".to_string(), "nuwax_test".to_string());
+        vars.insert("MYSQL_PASSWORD".to_string(), "nuwax_test_pass".to_string());
+        vars.insert("MYSQL_DATABASE".to_string(), "agent_platform".to_string());
+
+        // 复现 bug 现场：完整连接串里的 ${VAR} 必须被正确解析为真实凭据
+        let url = "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@127.0.0.1:13306/${MYSQL_DATABASE}";
+        assert_eq!(
+            interpolate_vars(url, &vars),
+            "mysql://nuwax_test:nuwax_test_pass@127.0.0.1:13306/agent_platform"
+        );
+
+        // 无括号 $VAR
+        assert_eq!(interpolate_vars("u=$MYSQL_USER", &vars), "u=nuwax_test");
+        // $$ 转义为字面 $
+        assert_eq!(interpolate_vars("price=$$5", &vars), "price=$5");
+        // 未定义变量 → 空字符串（docker compose 默认行为）
+        assert_eq!(interpolate_vars("[${NOPE}]", &vars), "[]");
+        // 单独的 $ 原样保留
+        assert_eq!(interpolate_vars("a$ b", &vars), "a$ b");
+    }
+
+    #[test]
+    fn test_interpolate_vars_defaults() {
+        let mut vars = HashMap::new();
+        vars.insert("EMPTY".to_string(), String::new());
+        vars.insert("SET".to_string(), "v".to_string());
+
+        // :- 未设 → default
+        assert_eq!(interpolate_vars("${MISSING:-def}", &vars), "def");
+        // :- 已设但为空 → default
+        assert_eq!(interpolate_vars("${EMPTY:-def}", &vars), "def");
+        // :- 已设且非空 → 值本身
+        assert_eq!(interpolate_vars("${SET:-def}", &vars), "v");
+        // - 未设 → default
+        assert_eq!(interpolate_vars("${MISSING-def}", &vars), "def");
+        // - 已设但为空 → 空值（注意与 :- 的区别：- 只看是否定义，不看是否为空）
+        assert_eq!(interpolate_vars("${EMPTY-def}", &vars), "");
+    }
+
+    #[test]
+    fn test_strip_surrounding_quotes() {
+        assert_eq!(strip_surrounding_quotes("\"hello\""), "hello");
+        assert_eq!(strip_surrounding_quotes("'hello'"), "hello");
+        assert_eq!(strip_surrounding_quotes("hello"), "hello");
+        // 单个/不成对引号不剥离
+        assert_eq!(strip_surrounding_quotes("\""), "\"");
+        assert_eq!(strip_surrounding_quotes("\"unmatched"), "\"unmatched");
+    }
+
+    #[test]
+    fn test_load_env_vars_from_fixture() {
+        // 直接读取 nuwax-cli 主 crate 的 fixtures/test.env（脱敏测试样本），
+        // 验证 load_env_vars 对真实 .env 文件的解析，以及 interpolate_vars 的 ${VAR} 插值。
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let fixture = std::path::Path::new(&manifest_dir).join("../nuwax-cli/fixtures/test.env");
+        assert!(
+            fixture.exists(),
+            "fixtures 文件不存在: {}（请确认 nuwax-cli/fixtures/test.env 已创建）",
+            fixture.display()
+        );
+
+        let vars = load_env_vars(&fixture);
+
+        // 1) load_env_vars 解析：账号密码应为 nuwax_test 前缀的测试值
+        assert_eq!(vars.get("MYSQL_USER").map(String::as_str), Some("nuwax_test"));
+        assert_eq!(vars.get("MYSQL_PASSWORD").map(String::as_str), Some("nuwax_test_pass"));
+        assert_eq!(vars.get("MYSQL_ROOT_PASSWORD").map(String::as_str), Some("nuwax_test_root"));
+        assert_eq!(vars.get("MYSQL_DATABASE").map(String::as_str), Some("agent_platform"));
+        assert_eq!(vars.get("REDIS_PASSWORD").map(String::as_str), Some("nuwax_test_redis"));
+        // 注释行不应被当作变量
+        assert!(!vars.contains_key("# Docker Registry 配置"));
+
+        // 2) interpolate_vars 插值：模拟 docker-compose 里 ${VAR} 引用解析为真实凭据
+        assert_eq!(interpolate_vars("${MYSQL_USER}", &vars), "nuwax_test");
+        assert_eq!(
+            interpolate_vars("${MYSQL_PASSWORD:-default}", &vars),
+            "nuwax_test_pass"
+        );
+        // 复现 for_container 拼出的连接串
+        let url = interpolate_vars(
+            "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@127.0.0.1:13306/${MYSQL_DATABASE}",
+            &vars,
+        );
+        assert_eq!(
+            url,
+            "mysql://nuwax_test:nuwax_test_pass@127.0.0.1:13306/agent_platform"
+        );
+    }
+
+    #[test]
+    fn test_load_env_vars_missing_file_degrades() {
+        // 不存在的文件 → 空 map（降级，不报错）
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let missing = std::path::Path::new(&manifest_dir).join("nuwax_definitely_not_exist.env");
+        assert!(load_env_vars(&missing).is_empty());
+    }
 
     #[tokio::test]
     async fn test_mysql_connection() {
