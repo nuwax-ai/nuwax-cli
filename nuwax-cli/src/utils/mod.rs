@@ -496,9 +496,7 @@ async fn extract_zip_archive(
             info!("   ⏱️  Elapsed: {:.2} seconds", elapsed.as_secs_f64());
         }
         UpgradeStrategy::PatchUpgrade {
-            patch_info,
-            download_type: _,
-            ..
+            patch_info, ..
         } => {
             // 增量升级：根据操作的文件和目录进行操作
             let change_files = patch_info.get_changed_files();
