@@ -2,6 +2,22 @@ use super::parser::parse_sql_tables;
 use super::*;
 
 #[test]
+fn changed_index_is_manual_only() {
+    let old = "CREATE TABLE users (id INT, name VARCHAR(20), KEY idx_user (id));";
+    let new = "CREATE TABLE users (id INT, name VARCHAR(20), KEY idx_user (name));";
+    let (diff, _) =
+        generate_schema_diff(Some(old), new, None, "new").expect("index diff should be generated");
+    assert!(diff.contains("manually drop old index"));
+    assert!(!diff.contains("ADD KEY `idx_user`"));
+}
+
+#[test]
+fn strict_parser_rejects_invalid_table() {
+    let invalid = "CREATE TABLE users (id INT, missing_definition);";
+    assert!(parse_sql_tables_strict(invalid).is_err());
+}
+
+#[test]
 fn test_simple_diff() {
     let from_sql = r#"
 -- 平台使用,定义mysql单独一个数据库
@@ -946,7 +962,8 @@ CREATE FULLTEXT INDEX ft_name_desc ON published (name, description) WITH PARSER 
         generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "2.0.0").unwrap();
 
     assert!(
-        diff_sql.contains("ADD FULLTEXT KEY `ft_name_desc` (`name`, `description`) WITH PARSER ngram"),
+        diff_sql
+            .contains("ADD FULLTEXT KEY `ft_name_desc` (`name`, `description`) WITH PARSER ngram"),
         "expected FULLTEXT KEY diff with WITH PARSER ngram clause, got: {diff_sql}"
     );
 }
@@ -984,7 +1001,8 @@ CREATE TABLE published (
         generate_schema_diff(Some(from_sql), to_sql, Some("1.0.0"), "2.0.0").unwrap();
 
     assert!(
-        diff_sql.contains("ADD FULLTEXT KEY `ft_name_desc` (`name`, `description`) WITH PARSER ngram"),
+        diff_sql
+            .contains("ADD FULLTEXT KEY `ft_name_desc` (`name`, `description`) WITH PARSER ngram"),
         "inline FULLTEXT KEY with versioned-comment WITH PARSER must propagate to diff, got: {diff_sql}"
     );
 }

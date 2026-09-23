@@ -235,7 +235,7 @@ pub mod docker {
 
     /// 升级时需要保留的目录列表（不会被删除或覆盖）
     ///
-    /// 这些目录包含用户数据或运行时生成的重要文件，在升级过程中必须保护：
+    /// 这些目录和配置文件包含用户数据或运行时配置，在升级过程中必须保护：
     /// - `upload`: 用户上传的文件
     /// - `project_workspace`: 项目工作空间
     /// - `computer-project-workspace`: 计算机项目工作空间
@@ -245,7 +245,9 @@ pub mod docker {
     /// - `uv_cache`: UV缓存目录
     /// - `data`: 数据库和持久化数据
     /// - `app-workspace`: 应用工作空间
-    pub const EXCLUDE_DIRS: [&str; 9] = [
+    /// - `.env`: 用户数据库凭据、服务端口及其他部署配置
+    /// - `logs`: 容器挂载的持久化服务日志
+    pub const EXCLUDE_DIRS: [&str; 11] = [
         "upload",
         "project_workspace",
         "computer-project-workspace",
@@ -255,6 +257,8 @@ pub mod docker {
         "uv_cache",
         "data",
         "app-workspace",
+        ".env",
+        "logs",
     ];
 }
 
@@ -552,14 +556,15 @@ pub mod timeout {
 
 /// SQL 相关常量
 pub mod sql {
-    /// SQL 差异执行默认重试次数
+    /// 兼容旧调用方；DDL 执行器不再进行整批重试。
+    #[deprecated(note = "DDL batches are not safely retryable")]
     pub const DEFAULT_RETRY_COUNT: u8 = 3;
 
     /// MySQL 容器默认映射端口
     pub const DEFAULT_MYSQL_CONTAINER_PORT: u16 = 13306;
 
-    /// MySQL 服务等待超时（秒）- 用于等待 MySQL 容器就绪
-    pub const MYSQL_READY_TIMEOUT: u64 = 60;
+    /// MySQL SQL 连接等待超时（秒），包含首次初始化脚本执行时间。
+    pub const MYSQL_READY_TIMEOUT: u64 = 300;
 
     /// 其他服务启动等待超时（秒）- SQL 升级后等待 Java 等服务
     pub const OTHER_SERVICES_TIMEOUT: u64 = 120;

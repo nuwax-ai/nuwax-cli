@@ -34,15 +34,14 @@ impl DockerServiceManager {
         config: Arc<AppConfig>,
         docker_manager: Arc<DockerManager>,
         work_dir: PathBuf,
-    ) -> Self {
+    ) -> DockerServiceResult<Self> {
         let architecture = detect_architecture();
 
         // 由于 DockerManager 实现了 Clone，我们可以安全地克隆它
-        let image_loader = ImageLoader::new(docker_manager.clone(), work_dir.clone())
-            .expect("Failed to create image loader");
+        let image_loader = ImageLoader::new(docker_manager.clone(), work_dir.clone())?;
         let health_checker = HealthChecker::new(docker_manager.clone());
 
-        Self {
+        Ok(Self {
             config,
             docker_manager,
             work_dir: work_dir.clone(),
@@ -52,7 +51,7 @@ impl DockerServiceManager {
             port_manager: PortManager::new(),
             script_permission_manager: ScriptPermissionManager::new(work_dir.clone()),
             directory_permission_manager: DirectoryPermissionManager::new(work_dir.clone()),
-        }
+        })
     }
 
     /// 获取当前系统架构
@@ -67,7 +66,16 @@ impl DockerServiceManager {
 
     /// 执行完整的服务部署流程
     pub async fn deploy_services(&mut self) -> DockerServiceResult<()> {
+        self.prepare_services().await?;
+        self.start_services().await?;
+        info!("Docker service deployment completed");
+        Ok(())
+    }
+
+    /// 仅准备服务环境和镜像，不启动任何 Compose 服务。
+    pub async fn prepare_services(&mut self) -> DockerServiceResult<()> {
         info!("Starting Docker service deployment...");
+        self.docker_manager.invalidate_compose_config_cache();
 
         // 1. 环境检查
         self.check_environment().await?;
@@ -94,10 +102,7 @@ impl DockerServiceManager {
         self.setup_image_tags_with_ducker_validation(&load_result.image_mappings)
             .await?;
 
-        // 7. 启动服务
-        self.start_services().await?;
-
-        info!("Docker service deployment completed");
+        info!("Docker service deployment prepared");
         Ok(())
     }
 

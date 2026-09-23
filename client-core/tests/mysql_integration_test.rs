@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
+use client_core::sql_diff::generate_live_schema_diff;
 use sqlx::mysql::MySqlPoolOptions;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -11,6 +12,42 @@ const TEST_COMPOSE_PROJECT: &str = "nuwax_mysql_integration";
 const TEST_MYSQL_SERVICE: &str = "mysql";
 const TEST_MYSQL_TIMEOUT: Duration = Duration::from_secs(90);
 const TEST_MYSQL_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+#[tokio::test]
+#[ignore = "requires TEST_MYSQL_URL pointing to a disposable MySQL instance"]
+async fn test_partial_ddl_failure_is_reconciled_by_live_rediff() -> Result<()> {
+    let url = std::env::var("TEST_MYSQL_URL").context("TEST_MYSQL_URL is required")?;
+    let config = mysql_config_from_url(&url)?;
+    let executor = MySqlExecutor::new(config);
+    let table = "nuwax_partial_ddl_recovery";
+    executor
+        .execute_single(&format!("DROP TABLE IF EXISTS `{table}`"))
+        .await?;
+
+    let attempted = format!(
+        "CREATE TABLE `{table}` (id INT NOT NULL, PRIMARY KEY (id));\n\
+         ALTER TABLE `{table}` ADD COLUMN id INT;"
+    );
+    let error = executor
+        .execute_diff_sql_once(&attempted)
+        .await
+        .err()
+        .ok_or_else(|| anyhow!("duplicate column should fail after the first DDL"))?;
+    assert!(error.to_string().contains("after 1 successful statements"));
+
+    let target =
+        format!("CREATE TABLE `{table}` (id INT NOT NULL, name VARCHAR(20), PRIMARY KEY (id));");
+    let remaining = generate_live_schema_diff(&executor, &target, "recovery").await?;
+    assert!(remaining.diff_sql.contains("ADD COLUMN `name`"));
+    executor.execute_diff_sql_once(&remaining.diff_sql).await?;
+
+    let final_diff = generate_live_schema_diff(&executor, &target, "recovery").await?;
+    assert!(!final_diff.has_executable_sql);
+    executor
+        .execute_single(&format!("DROP TABLE IF EXISTS `{table}`"))
+        .await?;
+    Ok(())
+}
 
 /// 测试 MySqlExecutor 的集成测试
 /// 这个测试会：
@@ -43,7 +80,7 @@ async fn test_mysql_executor_integration() -> Result<()> {
     root_config.password = "root".to_string();
 
     let root_executor = MySqlExecutor::new(root_config);
-    let grant_sql = format!("GRANT ALL PRIVILEGES ON *.* TO '{}'@'%'", &config.user);
+    let grant_sql = format!("GRANT ALL PRIVILEGES ON *.* TO '{}'@'%'", config.user);
     root_executor
         .execute_single(&grant_sql)
         .await

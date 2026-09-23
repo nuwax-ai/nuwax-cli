@@ -87,9 +87,7 @@ pub fn generate_mysql_diff(
     }
 
     if !stats.has_executable_operations() && stats.has_dangerous_operations() {
-        info!(
-            "Schema differences detected but only includes delete operation warnings, no executable SQL"
-        );
+        info!("Schema differences require manual changes, no executable SQL");
     }
 
     Ok((result, stats))
@@ -374,7 +372,7 @@ fn generate_index_diffs(
         }
     }
 
-    // 检查修改的索引（先警告删除，再添加新的）
+    // 同名索引的定义变化需要先删除旧索引；升级时仅给出人工处理提示。
     for (idx_name, new_idx) in &new_indexes {
         if let Some(old_idx) = old_indexes.get(idx_name)
             && old_idx != new_idx
@@ -404,43 +402,10 @@ fn generate_index_diffs(
             }
             stats.indexes_modified += 1;
 
-            // 再添加新索引
-            if new_idx.is_primary {
-                diffs.push(format!(
-                    "ALTER TABLE `{}` ADD PRIMARY KEY ({});",
-                    table_name,
-                    new_idx
-                        .columns
-                        .iter()
-                        .map(|c| format!("`{c}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            } else if new_idx.is_unique {
-                diffs.push(format!(
-                    "ALTER TABLE `{}` ADD UNIQUE KEY `{}` ({});",
-                    table_name,
-                    idx_name,
-                    new_idx
-                        .columns
-                        .iter()
-                        .map(|c| format!("`{c}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            } else {
-                diffs.push(format!(
-                    "ALTER TABLE `{}` ADD KEY `{}` ({});",
-                    table_name,
-                    idx_name,
-                    new_idx
-                        .columns
-                        .iter()
-                        .map(|c| format!("`{c}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
+            diffs.push(format!(
+                "-- After reviewing the old index, apply the new definition of `{}` manually",
+                new_idx.name
+            ));
         }
     }
 

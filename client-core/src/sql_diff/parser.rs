@@ -23,6 +23,20 @@ fn ident_to_string<T: ToString>(ident: &T) -> String {
 
 /// 解析SQL文件中的表结构
 pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefinition>, DuckError> {
+    parse_sql_tables_with_mode(sql_content, false)
+}
+
+/// 升级路径使用严格解析，避免跳过无法识别的表后生成错误迁移。
+pub fn parse_sql_tables_strict(
+    sql_content: &str,
+) -> Result<HashMap<String, TableDefinition>, DuckError> {
+    parse_sql_tables_with_mode(sql_content, true)
+}
+
+fn parse_sql_tables_with_mode(
+    sql_content: &str,
+    strict: bool,
+) -> Result<HashMap<String, TableDefinition>, DuckError> {
     let mut tables = HashMap::new();
 
     // 使用正则表达式找到 USE 语句的位置，然后从该位置开始解析后续的 CREATE TABLE 语句
@@ -91,6 +105,11 @@ pub fn parse_sql_tables(sql_content: &str) -> Result<HashMap<String, TableDefini
                 }
             }
             Err(e) => {
+                if strict {
+                    return Err(DuckError::custom(format!(
+                        "Failed to parse CREATE TABLE statement during upgrade: {e}; SQL: {create_table_sql}"
+                    )));
+                }
                 warn!(
                     "Failed to parse SQL statement: {} - error: {}",
                     create_table_sql, e

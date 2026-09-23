@@ -123,7 +123,12 @@ pub async fn generate_live_schema_diff(
     );
 
     // 解析目标模板
-    let to_tables = parse_sql_tables(to_sql)?;
+    let to_tables = super::parser::parse_sql_tables_strict(to_sql)?;
+    if to_tables.is_empty() {
+        return Err(DuckError::custom(
+            "Target init_mysql.sql contains no CREATE TABLE statements".to_string(),
+        ));
+    }
 
     // 抓取在线架构并生成差异（同时获取原始 SQL）
     let (live_tables, live_sql) = executor
@@ -141,7 +146,7 @@ pub async fn generate_live_schema_diff(
         format!("Online schema to {to_version}: no actual schema differences")
     } else if !has_executable_sql && has_warnings {
         format!(
-            "Online schema to {to_version}: only includes delete operation warnings, no executable SQL"
+            "Online schema to {to_version}: only includes manual-change warnings, no executable SQL"
         )
     } else {
         let executable_lines = diff_sql

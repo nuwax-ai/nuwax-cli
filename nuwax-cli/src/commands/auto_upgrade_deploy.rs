@@ -2,20 +2,22 @@ use crate::app::CliApp;
 use crate::cli::AutoUpgradeDeployCommand;
 use crate::commands::{backup, docker_service, update};
 use crate::docker_service::health_check::HealthChecker;
-use crate::docker_utils;
 use anyhow::{Context, Result};
 use client_core::constants::sql;
 use client_core::container::DockerManager;
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
 use client_core::sql_diff::generate_live_schema_diff;
+use client_core::sql_diff::parse_sql_tables_strict;
 use client_core::upgrade_strategy::UpgradeStrategy;
+use client_core::utils::archive::{self, ArchiveFormat};
 use rust_i18n::t;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// 获取docker-compose文件路径
 fn get_compose_file_path(config_file: &Option<PathBuf>) -> PathBuf {
@@ -47,6 +49,71 @@ fn create_docker_manager(
     )?))
 }
 
+fn validate_target_sql(sql_content: &str) -> Result<()> {
+    let tables =
+        parse_sql_tables_strict(sql_content).context("Failed to parse target MySQL DDL")?;
+    if tables.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Target init_mysql.sql contains no CREATE TABLE statements"
+        ));
+    }
+    Ok(())
+}
+
+/// 离线完整包在停止旧服务前必须能提供完整目标 DDL。
+fn validate_offline_archive_sql(archive_path: &Path) -> Result<()> {
+    fn is_target(path: &Path) -> bool {
+        let normalized = path.strip_prefix("docker").unwrap_or(path);
+        normalized == Path::new("config/init_mysql.sql")
+    }
+
+    let mut target_sql = None;
+    match archive::detect_format_by_magic(archive_path)? {
+        ArchiveFormat::Zip => {
+            let file = fs::File::open(archive_path)?;
+            let mut zip = zip::ZipArchive::new(file)?;
+            for idx in 0..zip.len() {
+                let mut entry = zip.by_index(idx)?;
+                let path = entry
+                    .enclosed_name()
+                    .ok_or_else(|| anyhow::anyhow!("Unsafe archive entry: {}", entry.name()))?;
+                if is_target(&path) {
+                    if target_sql.is_some() {
+                        return Err(anyhow::anyhow!(
+                            "Duplicate init_mysql.sql in offline archive"
+                        ));
+                    }
+                    let mut content = String::new();
+                    entry.read_to_string(&mut content)?;
+                    target_sql = Some(content);
+                }
+            }
+        }
+        ArchiveFormat::TarGz => {
+            let file = fs::File::open(archive_path)?;
+            let decoder = flate2::read::GzDecoder::new(file);
+            let mut tar = tar::Archive::new(decoder);
+            for entry in tar.entries()? {
+                let mut entry = entry?;
+                if is_target(&entry.path()?) {
+                    if target_sql.is_some() {
+                        return Err(anyhow::anyhow!(
+                            "Duplicate init_mysql.sql in offline archive"
+                        ));
+                    }
+                    let mut content = String::new();
+                    entry.read_to_string(&mut content)?;
+                    target_sql = Some(content);
+                }
+            }
+        }
+    }
+
+    let content = target_sql
+        .ok_or_else(|| anyhow::anyhow!("Offline archive is missing config/init_mysql.sql"))?;
+    validate_target_sql(&content)
+}
+
 /// 更新配置文件中的版本号并持久化
 ///
 /// 使用 Arc::make_mut 来获取可变引用，如果 Arc 有多个引用会自动克隆
@@ -73,6 +140,132 @@ fn update_config_version(
         version = version,
         "✅ Updated and saved the version in configuration file"
     );
+    Ok(())
+}
+
+async fn wait_for_mysql_connection(compose_path: &Path, env_path: &Path) -> Result<MySqlExecutor> {
+    let compose = compose_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Compose path is not valid UTF-8"))?;
+    let env = env_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Compose env path is not valid UTF-8"))?;
+    let config = MySqlConfig::for_container(Some(compose), Some(env))
+        .await
+        .context("Failed to resolve MySQL connection from Compose")?;
+    let executor = MySqlExecutor::new(config);
+    let timeout = Duration::from_secs(sql::MYSQL_READY_TIMEOUT);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_error = "no connection attempt completed".to_string();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow::anyhow!(
+                "MySQL was not connectable within {}s: {last_error}",
+                timeout.as_secs()
+            ));
+        }
+        let attempt_timeout = remaining.min(Duration::from_secs(10));
+        match tokio::time::timeout(attempt_timeout, executor.test_connection()).await {
+            Ok(Ok(())) => return Ok(executor),
+            Ok(Err(error)) => last_error = error.to_string(),
+            Err(_) => last_error = "connection attempt timed out".to_string(),
+        }
+        debug!(error = %last_error, "Waiting for MySQL to accept SQL connections");
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        sleep(remaining.min(Duration::from_secs(2))).await;
+    }
+}
+
+async fn run_staged_deployment(
+    app: &mut CliApp,
+    frontend_port: Option<u16>,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+    is_first_deployment: bool,
+    target_version: &str,
+) -> Result<()> {
+    let target_sql_path = Path::new(sql::CURRENT_SQL_PATH);
+    let target_sql = fs::read_to_string(target_sql_path)
+        .with_context(|| format!("Target MySQL DDL is missing: {}", target_sql_path.display()))?;
+    validate_target_sql(&target_sql)?;
+
+    let docker_manager = create_docker_manager(&config_file, &project_name)?;
+    docker_manager.invalidate_compose_config_cache();
+    if !is_first_deployment {
+        // stop_docker_services_and_wait 在没有运行容器时可能跳过 down；这里清理旧的已停止容器。
+        docker_manager
+            .stop_services()
+            .await
+            .context("Failed to remove stopped containers from the previous deployment")?;
+    }
+    docker_service::prepare_docker_services(app, frontend_port, config_file.clone(), project_name)
+        .await?;
+    // prepare_docker_services may update .env (frontend port).
+    docker_manager.invalidate_compose_config_cache();
+
+    let mysql_stage = docker_manager.get_service_dependency_closure("mysql")?;
+    let all_services = docker_manager.get_compose_service_names().await?;
+    info!("▶️ Starting MySQL and its Compose dependencies...");
+    docker_manager
+        .up_services(&["mysql".to_string()], false)
+        .await?;
+    let mysql_id_before = docker_manager.get_service_container_id("mysql").await?;
+    let executor = wait_for_mysql_connection(
+        docker_manager.get_compose_file(),
+        docker_manager.get_env_file(),
+    )
+    .await?;
+
+    if is_first_deployment {
+        info!("🆕 MySQL initialization completed; Live Diff is not required");
+    } else {
+        info!(
+            "🔄 MySQL is connectable; applying live schema differences before applications start"
+        );
+        execute_sql_diff_upgrade(&executor).await?;
+    }
+
+    let startup_layers = docker_manager.get_compose_startup_layers(&mysql_stage)?;
+    for layer in startup_layers {
+        info!(services = %layer.join(", "), "▶️ Starting next Compose dependency layer...");
+        docker_manager
+            .up_services_without_dependencies(&layer, true)
+            .await?;
+        docker_manager
+            .wait_for_compose_services_ready(
+                &layer,
+                Duration::from_secs(client_core::constants::timeout::HEALTH_CHECK_TIMEOUT),
+            )
+            .await?;
+    }
+
+    let mysql_id_after = docker_manager.get_service_container_id("mysql").await?;
+    if mysql_id_before != mysql_id_after {
+        return Err(anyhow::anyhow!(
+            "MySQL container changed while starting application services; refusing to mark deployment successful"
+        ));
+    }
+
+    let mut all_service_names: Vec<String> = all_services.into_iter().collect();
+    all_service_names.sort();
+    docker_manager
+        .wait_for_compose_services_ready(
+            &all_service_names,
+            Duration::from_secs(client_core::constants::timeout::HEALTH_CHECK_TIMEOUT),
+        )
+        .await?;
+    let health_checker = HealthChecker::new(docker_manager);
+    health_checker
+        .wait_for_services_ready(Duration::from_secs(
+            client_core::constants::timeout::HEALTH_CHECK_INTERVAL,
+        ))
+        .await
+        .context("Docker services did not become healthy after MySQL migration")?;
+
+    let app_config_path = app.config_path.clone();
+    update_config_version(&mut app.config, &app_config_path, target_version)?;
+    info!("✅ Deployment completed after MySQL migration and service health checks");
     Ok(())
 }
 
@@ -114,6 +307,12 @@ fn restore_preserved_docker_dirs(backup_dir: &Path, docker_dir: &Path) -> Result
         }
 
         let new_path = docker_dir.join(dir_name);
+        if dir_name == ".env" && old_path.is_file() && new_path.is_file() {
+            merge_preserved_env_file(&old_path, &new_path)?;
+            info!("🛡️ Preserved existing .env values and added missing package defaults");
+            continue;
+        }
+
         if new_path.exists() {
             if new_path.is_dir() {
                 fs::remove_dir_all(&new_path).with_context(|| {
@@ -131,6 +330,110 @@ fn restore_preserved_docker_dirs(backup_dir: &Path, docker_dir: &Path) -> Result
     }
 
     Ok(())
+}
+
+fn merge_preserved_env_file(preserved_path: &Path, package_path: &Path) -> Result<()> {
+    let preserved = fs::read_to_string(preserved_path).with_context(|| {
+        format!(
+            "Failed to read existing environment file: {}",
+            preserved_path.display()
+        )
+    })?;
+    let package = fs::read_to_string(package_path).with_context(|| {
+        format!(
+            "Failed to read package environment file: {}",
+            package_path.display()
+        )
+    })?;
+    let merged = merge_env_contents(&preserved, &package);
+    let permissions = fs::metadata(preserved_path)
+        .with_context(|| {
+            format!(
+                "Failed to inspect existing environment file: {}",
+                preserved_path.display()
+            )
+        })?
+        .permissions();
+    let mut temp_file = tempfile::NamedTempFile::new_in(
+        package_path
+            .parent()
+            .context("Package environment file has no parent directory")?,
+    )
+    .context("Failed to create temporary merged environment file")?;
+    temp_file
+        .write_all(merged.as_bytes())
+        .context("Failed to write merged environment file")?;
+    temp_file
+        .as_file()
+        .sync_all()
+        .context("Failed to flush merged environment file")?;
+    fs::set_permissions(temp_file.path(), permissions)
+        .context("Failed to preserve environment file permissions")?;
+
+    fs::remove_file(package_path).with_context(|| {
+        format!(
+            "Failed to replace package environment file: {}",
+            package_path.display()
+        )
+    })?;
+    temp_file
+        .persist(package_path)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            format!(
+                "Failed to install merged environment file: {}",
+                package_path.display()
+            )
+        })?;
+    fs::remove_file(preserved_path).with_context(|| {
+        format!(
+            "Failed to remove backed-up environment file: {}",
+            preserved_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn merge_env_contents(preserved: &str, package: &str) -> String {
+    let mut keys = preserved
+        .lines()
+        .filter_map(env_assignment_key)
+        .map(str::to_owned)
+        .collect::<std::collections::HashSet<_>>();
+    let mut merged = preserved.to_owned();
+
+    for line in package.lines() {
+        let Some(key) = env_assignment_key(line) else {
+            continue;
+        };
+        if keys.insert(key.to_owned()) {
+            if !merged.is_empty() && !merged.ends_with('\n') {
+                merged.push('\n');
+            }
+            merged.push_str(line);
+            merged.push('\n');
+        }
+    }
+
+    merged
+}
+
+fn env_assignment_key(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let assignment = line.strip_prefix("export ").unwrap_or(line);
+    let (key, _) = assignment.split_once('=')?;
+    let key = key.trim();
+    let mut characters = key.chars();
+    let first = characters.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic())
+        || !characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(key)
 }
 
 /// 运行自动升级部署相关命令的统一入口
@@ -192,26 +495,17 @@ pub async fn run_auto_upgrade_deploy(
     // 1. 获取最新版本信息并下载
     info!("📥 Downloading the latest Docker service version...");
 
-    // 获取最新版本信息
-    let latest_version = match app.api_client.get_enhanced_service_manifest().await {
-        Ok(enhanced_service_manifest) => {
-            let latest_version = enhanced_service_manifest.version.to_string();
-
-            info!(current_version = %app.config.get_docker_versions(), target_version = %latest_version, "📋 Version information detected");
-            latest_version
-        }
-        Err(e) => {
-            warn!(error = %e, fallback_version = %app.config.get_docker_versions(), "⚠️ Failed to fetch version info, falling back to configured version");
-            app.config.get_docker_versions()
-        }
-    };
-
-    // 下载服务包，但先不解压
+    // 下载策略只读取一次 manifest；部署版本从同一策略中取得，避免版本与包不一致。
     let upgrade_args = crate::cli::UpgradeArgs {
         force: false,
         check: false,
     };
     let upgrade_strategy = update::run_upgrade(app, upgrade_args).await?;
+    let target_version = match &upgrade_strategy {
+        UpgradeStrategy::FullUpgrade { target_version, .. }
+        | UpgradeStrategy::PatchUpgrade { target_version, .. }
+        | UpgradeStrategy::NoUpgrade { target_version } => target_version.to_string(),
+    };
 
     // 2. 🔍 检查部署类型：第一次部署 vs 升级部署
     let is_first_deployment = is_first_deployment().await;
@@ -222,12 +516,17 @@ pub async fn run_auto_upgrade_deploy(
         info!("🔄 Upgrade deployment detected, services will be stopped first");
 
         // 3. 🛑 停止服务并等待（使用统一的公共方法）
-        docker_service::stop_docker_services_and_wait(
+        let stopped = docker_service::stop_docker_services_and_wait(
             app,
             config_file.clone(),
             project_name.clone(),
         )
         .await?;
+        if !stopped {
+            return Err(anyhow::anyhow!(
+                "Timed out stopping old services; refusing to upgrade MySQL"
+            ));
+        }
     }
 
     // 5. 🔍 提前检查并创建挂载目录（重要：Windows Podman Desktop 需要）
@@ -327,18 +626,7 @@ pub async fn run_auto_upgrade_deploy(
             // 🔧 自动修复关键脚本文件权限
             fix_script_permissions().await?;
 
-            // 📝 更新配置文件中的Docker服务版本
-            if latest_version != app.config.get_docker_versions() {
-                info!(from_version = %app.config.get_docker_versions(), to_version = %latest_version, "📝 Updating Docker service version");
-
-                // 更新版本号并保存到配置文件
-                let app_config_path = app.config_path.clone();
-                update_config_version(&mut app.config, &app_config_path, &latest_version)?;
-            } else {
-                info!(version = %latest_version, "📝 Version is already latest; no update needed");
-            }
-
-            // 📊 SQL差异将在服务启动后通过 Live Diff 生成和执行
+            // 版本号在 MySQL 迁移及全部服务健康后提交。
         }
         Err(e) => {
             error!(
@@ -349,72 +637,15 @@ pub async fn run_auto_upgrade_deploy(
         }
     }
 
-    // 6. 🔄 自动部署服务
-    info!("🔄 Deploying Docker services...");
-    docker_service::deploy_docker_services(
+    run_staged_deployment(
         app,
         frontend_port,
-        config_file.clone(),
-        project_name.clone(),
+        config_file,
+        project_name,
+        is_first_deployment,
+        &target_version,
     )
-    .await?;
-
-    // 7. ▶️ 启动服务
-    info!("▶️ Starting Docker services...");
-    docker_service::start_docker_services(app, config_file.clone(), project_name.clone()).await?;
-
-    // 获取 compose 文件路径
-    let compose_path = get_compose_file_path(&config_file);
-
-    // 🔄 分阶段等待服务启动（解决 MySQL-Java 死锁问题）
-    // 死锁原因：Java 容器健康检查依赖 MySQL 表结构升级，但 SQL 升级要等所有服务就绪后才执行
-    // 解决方案：先等待 MySQL → 执行 SQL 升级 → 再等待其他服务
-    if !is_first_deployment {
-        // 阶段 1/2: 仅等待 MySQL 容器就绪
-        info!("⏳ Phase 1/2: Waiting for MySQL service readiness...");
-        let mysql_ready =
-            docker_utils::wait_for_mysql_ready(&compose_path, sql::MYSQL_READY_TIMEOUT).await?;
-
-        if mysql_ready {
-            info!("✅ MySQL service is ready");
-        } else {
-            warn!("⚠️ Timed out waiting for MySQL; still attempting SQL upgrade...");
-        }
-
-        // 阶段 2/2（前半部分）: 执行 SQL 升级
-        info!("🔄 Executing database upgrade...");
-        execute_sql_diff_upgrade(&config_file).await?;
-    }
-
-    // 等待所有服务完全启动（Java 等现在可以正常启动）
-    if is_first_deployment {
-        info!("⏳ Waiting for all services to fully start...");
-    } else {
-        info!("⏳ Phase 2/2: Wait for all services to fully start...");
-    }
-    if docker_utils::wait_for_compose_services_started(&compose_path, sql::OTHER_SERVICES_TIMEOUT)
-        .await?
-    {
-        info!("✅ Auto-upgrade deployment completed; services started successfully");
-        info!("🎉 Auto-upgrade deployment completed successfully");
-    } else {
-        warn!("⚠️ Timed out waiting for services to start; please check status manually");
-
-        // 最后再检查一次状态
-        match check_docker_service_status(app, &config_file, &project_name).await {
-            Ok(true) => {
-                info!("🔍 Final check: services appear to be running normally");
-            }
-            Ok(false) => {
-                info!("🔍 Final check: services may not be running properly");
-                info!("📊 Detailed status check:");
-                let _ = docker_service::check_docker_services_status(app).await;
-            }
-            Err(e) => warn!("🔍 Final check failed: {error}", error = e.to_string()),
-        }
-    }
-
-    Ok(())
+    .await
 }
 
 /// 预约延迟执行自动升级部署
@@ -582,39 +813,6 @@ pub async fn show_status(app: &mut CliApp) -> Result<()> {
     backup::run_list_backups(app).await?;
 
     Ok(())
-}
-
-/// 检查Docker服务状态（是否有服务在运行）
-///
-/// 返回 true 表示有服务在运行，false 表示没有服务在运行
-async fn check_docker_service_status(
-    _app: &mut CliApp,
-    config_file: &Option<PathBuf>,
-    project_name: &Option<String>,
-) -> Result<bool> {
-    let compose_path = get_compose_file_path(config_file);
-
-    // 如果compose文件不存在，直接返回false（服务未运行）
-    if !compose_path.exists() {
-        info!("📝 docker-compose.yml not found; services are not running");
-        return Ok(false);
-    }
-
-    // 使用统一的 DockerManager 创建逻辑
-    let docker_manager = create_docker_manager(config_file, project_name)?;
-    let health_checker = HealthChecker::new(docker_manager);
-    let report = health_checker.health_check().await?;
-
-    // 检查是否有运行中的容器（而不是检查是否所有服务都健康）
-    let running_count = report.get_running_count();
-
-    if running_count > 0 {
-        info!("🔍 Found {count} running services", count = running_count);
-        Ok(true)
-    } else {
-        info!("🔍 No running services found");
-        Ok(false)
-    }
 }
 
 /// 格式化时间间隔为可读字符串
@@ -836,7 +1034,7 @@ async fn archive_diff_sql_file(diff_sql_path: &Path, status: &str) -> Result<()>
     }
 
     let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%f");
     let new_name = format!("diff_sql_{}_{}.sql", status, timestamp);
     let new_path = parent.join(new_name);
 
@@ -866,7 +1064,7 @@ async fn archive_diff_sql_file(diff_sql_path: &Path, status: &str) -> Result<()>
 }
 
 /// 连接MySQL容器并执行差异SQL（Live Diff）
-async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
+async fn execute_sql_diff_upgrade(executor: &MySqlExecutor) -> Result<()> {
     let temp_sql_dir = Path::new(sql::TEMP_SQL_DIR);
     let diff_sql_path = temp_sql_dir.join(sql::DIFF_SQL_FILE);
     let new_sql_path = temp_sql_dir.join(sql::NEW_SQL_FILE);
@@ -952,8 +1150,10 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
             path = new_sql_path.display()
         );
     } else {
-        info!("📄 No SQL files in new version; skipping diff generation");
-        return Ok(());
+        return Err(anyhow::anyhow!(
+            "Target MySQL DDL is missing: {}",
+            current_sql_path.display()
+        ));
     }
 
     // 读取模板SQL（严格失败策略）
@@ -964,38 +1164,14 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         )));
     }
     let new_sql_content = fs::read_to_string(&new_sql_path)?;
+    validate_target_sql(&new_sql_content)?;
 
     // 注意：parse_sql_tables 内部的 extract_create_table_statements_with_regex
     // 会自动处理 USE 语句的查找和提取，无需手动处理
 
-    // 从App配置中动态获取MySQL端口并建立连接
-    let compose_file = get_compose_file_path(config_file);
-    let env_file = client_core::constants::docker::get_env_file_path();
-    let compose_file_str = compose_file
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!(t!("auto_upgrade_deploy.compose_path_to_string_failed")))?;
-    let env_file_str = env_file
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!(t!("auto_upgrade_deploy.env_path_to_string_failed")))?;
-
-    let config = MySqlConfig::for_container(Some(compose_file_str), Some(env_file_str))
-        .await
-        .context(t!("auto_upgrade_deploy.create_mysql_config_failed"))?;
-    let executor = MySqlExecutor::new(config);
-
-    info!("🔌 Connecting to MySQL database...");
-    if let Err(e) = executor.test_connection().await {
-        error!(error = %e, port = sql::DEFAULT_MYSQL_CONTAINER_PORT, "❌ Database connection failed");
-        error!(
-            "🏃 Please make sure the MySQL container is running and port {port} is accessible",
-            port = sql::DEFAULT_MYSQL_CONTAINER_PORT
-        );
-        return Err(e.into());
-    }
-
     // 基于在线架构与模板生成差异SQL
     info!("📊 Generating SQL differences based on online schema...");
-    let diff_result = generate_live_schema_diff(&executor, &new_sql_content, "target version")
+    let diff_result = generate_live_schema_diff(executor, &new_sql_content, "target version")
         .await
         .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?;
 
@@ -1023,9 +1199,9 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     if !diff_result.has_executable_sql {
         // 没有可执行SQL（可能有警告，也可能完全无差异）
         if diff_result.has_warnings {
-            // 情况1：只有删除操作警告，没有可执行的新增/修改SQL
-            info!("⚠️ Schema difference detected: only deletion operations (skipped)");
-            info!("💡 Deletion operations must be executed manually; see notes in diff file");
+            // 只有人工处理提示，没有可执行的新增/修改 SQL。
+            info!("⚠️ Schema difference detected: only manual changes (skipped)");
+            info!("💡 Manual changes are listed in the diff file");
         } else {
             // 情况2：完全没有差异（既没有可执行SQL，也没有警告）
             info!("📄 No database schema differences; no upgrade required");
@@ -1064,18 +1240,12 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     if diff_result.has_warnings {
         warn!("⚠️ Note: diff contains executable SQL and deletion warnings");
         warn!("✓ Add/modify operations will execute normally");
-        warn!("✗ Deletion operations were skipped and must be run manually");
+        warn!("✗ Manual changes were skipped and must be reviewed separately");
         warn!("📄 See details: {path}", path = diff_sql_path.display());
     }
 
-    info!(
-        retry_count = sql::DEFAULT_RETRY_COUNT,
-        "🚀 Starting diff SQL execution"
-    );
-    match executor
-        .execute_diff_sql_with_retry(&diff_result.diff_sql, sql::DEFAULT_RETRY_COUNT)
-        .await
-    {
+    info!("🚀 Starting one-pass diff SQL execution");
+    match executor.execute_diff_sql_once(&diff_result.diff_sql).await {
         Ok(results) => {
             info!(
                 executed_statements = results.len(),
@@ -1277,6 +1447,8 @@ pub async fn run_offline_deploy(
 
     crate::utils::validate_archive_paths(&archive_path)
         .context("Archive package validation failed")?;
+    validate_offline_archive_sql(&archive_path)
+        .context("Offline package MySQL DDL preflight failed")?;
 
     // 2. 解析版本号
     let version: client_core::version::Version =
@@ -1296,12 +1468,17 @@ pub async fn run_offline_deploy(
         info!("🔄 Upgrade deployment detected, services will be stopped first");
 
         // 停止服务并等待
-        docker_service::stop_docker_services_and_wait(
+        let stopped = docker_service::stop_docker_services_and_wait(
             app,
             config_file.clone(),
             project_name.clone(),
         )
         .await?;
+        if !stopped {
+            return Err(anyhow::anyhow!(
+                "Timed out stopping old services; refusing to upgrade MySQL"
+            ));
+        }
     }
 
     // 4. 创建 DockerManager
@@ -1348,49 +1525,141 @@ pub async fn run_offline_deploy(
 
     if had_existing_docker_dir {
         restore_preserved_docker_dirs(&backup_dir, docker_dir)?;
-        if backup_dir.exists() {
-            fs::remove_dir_all(&backup_dir).context("Failed to remove docker backup directory")?;
-        }
     }
     info!("✅ Docker service package extracted");
 
-    // 7. 修复脚本权限
-    fix_script_permissions().await?;
-
-    // 8. 更新配置版本
-    let app_config_path = app.config_path.clone();
-    update_config_version(&mut app.config, &app_config_path, &version.to_string())?;
-
-    // 9. 部署服务
-    info!("🔄 Deploying Docker services...");
-    docker_service::deploy_docker_services(
-        app,
-        frontend_port,
-        config_file.clone(),
-        project_name.clone(),
-    )
-    .await?;
-
-    // 10. 启动服务
-    info!("▶️ Starting Docker services...");
-    docker_service::start_docker_services(app, config_file.clone(), project_name.clone()).await?;
-
-    // 11. 等待服务就绪
-    let compose_path = get_compose_file_path(&config_file);
-    if is_first_deployment {
-        info!("⏳ Waiting for all services to fully start...");
-    } else {
-        info!("⏳ Waiting for all services to fully start...");
+    let target_version = version.to_string();
+    let deployment = async {
+        fix_script_permissions().await?;
+        run_staged_deployment(
+            app,
+            frontend_port,
+            config_file,
+            project_name,
+            is_first_deployment,
+            &target_version,
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = deployment {
+        if had_existing_docker_dir {
+            error!(backup_path = %backup_dir.display(), "Deployment failed; old package files were retained for inspection. MySQL data was not rolled back");
+        }
+        return Err(error);
     }
 
-    if docker_utils::wait_for_compose_services_started(&compose_path, sql::OTHER_SERVICES_TIMEOUT)
-        .await?
+    if had_existing_docker_dir
+        && backup_dir.exists()
+        && let Err(error) = fs::remove_dir_all(&backup_dir)
     {
-        info!("✅ Offline deployment completed successfully!");
-        info!("🎉 All services started successfully");
-    } else {
-        warn!("⚠️ Timed out waiting for services to start; please check status manually");
+        warn!(backup_path = %backup_dir.display(), %error, "Deployment succeeded, but old package directory could not be removed");
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod staged_deploy_tests {
+    use super::{restore_preserved_docker_dirs, validate_offline_archive_sql};
+    use anyhow::Result;
+    use flate2::{Compression, write::GzEncoder};
+    use std::{fs::File, io::Write, path::Path};
+
+    fn write_archive(path: &Path, sql: Option<&str>) -> Result<()> {
+        let encoder = GzEncoder::new(File::create(path)?, Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        if let Some(sql) = sql {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(sql.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive.append_data(&mut header, "docker/config/init_mysql.sql", sql.as_bytes())?;
+        }
+        archive.finish()?;
+        archive.into_inner()?.finish()?.flush()?;
+        Ok(())
+    }
+
+    #[test]
+    fn offline_archive_requires_parseable_target_sql() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = directory.path().join("bundle.tar.gz");
+
+        write_archive(&archive, None)?;
+        assert!(validate_offline_archive_sql(&archive).is_err());
+
+        write_archive(&archive, Some("CREATE TABLE users (id INT);"))?;
+        validate_offline_archive_sql(&archive)?;
+        Ok(())
+    }
+
+    #[test]
+    fn offline_zip_archive_accepts_target_sql() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = directory.path().join("bundle.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive)?);
+        zip.start_file(
+            "docker/config/init_mysql.sql",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(b"CREATE TABLE users (id INT);")?;
+        zip.finish()?;
+        validate_offline_archive_sql(&archive)
+    }
+
+    #[test]
+    fn offline_upgrade_preserves_existing_values_and_adds_package_env_defaults() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let backup = directory.path().join("docker.previous");
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(&backup)?;
+        std::fs::create_dir_all(&docker)?;
+        std::fs::write(
+            backup.join(".env"),
+            "# operator config\nMYSQL_PASSWORD=existing-test-value\nFRONTEND_HOST_PORT=8091",
+        )?;
+        std::fs::write(
+            docker.join(".env"),
+            "MYSQL_PASSWORD=package-default\nSURREALDB_USER=package-user\nSURREALDB_PASSWORD=package-password\n",
+        )?;
+
+        restore_preserved_docker_dirs(&backup, &docker)?;
+
+        let merged = std::fs::read_to_string(docker.join(".env"))?;
+        assert!(merged.contains("# operator config\n"));
+        assert!(merged.contains("MYSQL_PASSWORD=existing-test-value\n"));
+        assert!(merged.contains("FRONTEND_HOST_PORT=8091\n"));
+        assert!(merged.contains("SURREALDB_USER=package-user\n"));
+        assert!(merged.contains("SURREALDB_PASSWORD=package-password\n"));
+        assert!(!merged.contains("MYSQL_PASSWORD=package-default"));
+        assert!(!backup.join(".env").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn offline_upgrade_preserves_existing_service_logs() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let backup = directory.path().join("docker.previous");
+        let docker = directory.path().join("docker");
+        let old_logs = backup.join("logs/rcoder/project_logs/SYSTEM");
+        let package_logs = docker.join("logs/rcoder");
+        std::fs::create_dir_all(&old_logs)?;
+        std::fs::create_dir_all(&package_logs)?;
+        std::fs::write(old_logs.join("api.log"), "existing service log\n")?;
+        std::fs::write(
+            package_logs.join("package-placeholder.log"),
+            "package file\n",
+        )?;
+
+        restore_preserved_docker_dirs(&backup, &docker)?;
+
+        assert_eq!(
+            std::fs::read_to_string(docker.join("logs/rcoder/project_logs/SYSTEM/api.log"))?,
+            "existing service log\n"
+        );
+        assert!(!docker.join("logs/rcoder/package-placeholder.log").exists());
+        assert!(!backup.join("logs").exists());
+        Ok(())
+    }
 }

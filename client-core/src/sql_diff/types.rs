@@ -165,9 +165,12 @@ impl DiffStats {
             || self.indexes_modified > 0
     }
 
-    /// 是否有删除操作（危险操作）
+    /// 是否有需要人工处理的删除或同名索引修改
     pub fn has_dangerous_operations(&self) -> bool {
-        self.tables_dropped > 0 || self.columns_dropped > 0 || self.indexes_dropped > 0
+        self.tables_dropped > 0
+            || self.columns_dropped > 0
+            || self.indexes_dropped > 0
+            || self.indexes_modified > 0
     }
 
     /// 是否有可执行的操作（非删除操作）
@@ -176,7 +179,6 @@ impl DiffStats {
             || self.columns_added > 0
             || self.columns_modified > 0
             || self.indexes_added > 0
-            || self.indexes_modified > 0
     }
 
     /// 生成变更摘要

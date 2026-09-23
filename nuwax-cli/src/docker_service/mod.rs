@@ -54,7 +54,7 @@ impl DockerService {
             config,
             docker_manager.clone(),
             work_dir,
-        ))
+        )?)
     }
 }
 

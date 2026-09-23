@@ -87,6 +87,11 @@ impl DockerManager {
         let compose_path = self.compose_file.to_string_lossy().to_string();
         let mut cmd_args = vec!["compose"];
 
+        let env_path = self.env_file.to_string_lossy().to_string();
+        if self.env_file.exists() {
+            cmd_args.extend(&["--env-file", &env_path]);
+        }
+
         // 如果指定了项目名称，添加 -p 参数
         if let Some(ref project_name) = self.project_name {
             cmd_args.extend(&["-p", project_name]);
@@ -103,6 +108,11 @@ impl DockerManager {
     async fn run_docker_compose_standalone(&self, args: &[&str]) -> Result<std::process::Output> {
         let compose_path = self.compose_file.to_string_lossy().to_string();
         let mut cmd_args: Vec<&str> = vec![];
+
+        let env_path = self.env_file.to_string_lossy().to_string();
+        if self.env_file.exists() {
+            cmd_args.extend(&["--env-file", &env_path]);
+        }
 
         // 如果指定了项目名称，添加 -p 参数
         if let Some(ref project_name) = self.project_name {

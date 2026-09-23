@@ -11,5 +11,5 @@ mod backtick_normalization_tests;
 
 // 重新导出公共接口
 pub use generator::{generate_live_schema_diff, generate_schema_diff};
-pub use parser::parse_sql_tables;
+pub use parser::{parse_sql_tables, parse_sql_tables_strict};
 pub use types::{DiffStats, SchemaDiffResult, TableColumn, TableDefinition, TableIndex};

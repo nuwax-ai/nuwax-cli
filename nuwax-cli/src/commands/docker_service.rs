@@ -69,14 +69,14 @@ pub async fn run_docker_service_command(app: &CliApp, cmd: DockerServiceCommand)
     }
 }
 
-/// 部署 Docker 服务
-pub async fn deploy_docker_services(
+/// 准备 Docker 服务环境和镜像，但不启动容器。
+pub async fn prepare_docker_services(
     app: &CliApp,
     frontend_port: Option<u16>,
     config_file: Option<PathBuf>,
     project_name: Option<String>,
 ) -> Result<()> {
-    info!("🚀 Starting Docker service deployment...");
+    info!("🚀 Preparing Docker service deployment...");
 
     // 如果指定了端口，先设置端口配置
     if let Some(port) = frontend_port {
@@ -122,40 +122,12 @@ pub async fn deploy_docker_services(
         path = docker_service_manager.get_work_dir().display()
     );
 
-    // 执行完整的部署流程
-    match docker_service_manager.deploy_services().await {
-        Ok(_) => {
-            info!("✅ Docker services deployed successfully!");
-
-            // 显示服务状态
-            if let Ok(report) = docker_service_manager.health_check().await {
-                info!("📊 Service status overview:");
-                info!(
-                    "  • Overall status: {status}",
-                    status = report.finalize().display_name()
-                );
-                info!(
-                    "  • Running containers: {running}/{total}",
-                    running = report.get_running_count(),
-                    total = report.get_total_count()
-                );
-
-                if !report.containers.is_empty() {
-                    info!("  • Container details:");
-                    for container in &report.containers {
-                        info!(
-                            "    - {name} ({image}) - {status}",
-                            name = container.name,
-                            image = container.image,
-                            status = container.status.display_name()
-                        );
-                    }
-                }
-            }
-        }
+    // 只执行准备阶段；数据库迁移前不能等待全部服务健康。
+    match docker_service_manager.prepare_services().await {
+        Ok(_) => info!("✅ Docker services prepared successfully!"),
         Err(e) => {
             error!(
-                "❌ Docker service deployment failed: {error}",
+                "❌ Docker service preparation failed: {error}",
                 error = format!("{:?}", e)
             );
             return Err(anyhow::anyhow!(t!(

@@ -3,7 +3,7 @@ use crate::sql_diff::TableDefinition;
 use anyhow::{Context, Result, anyhow};
 use docker_compose_types as dct;
 use mysql_async::prelude::*;
-use mysql_async::{Opts, Pool, Row, Transaction, TxOpts, from_row};
+use mysql_async::{OptsBuilder, Pool, Row, from_row};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -22,6 +22,15 @@ pub struct MySqlConfig {
     pub user: String,
     pub password: String,
     pub database: String,
+}
+
+fn parse_short_published_port(port: &str, target_port: u16) -> Option<u16> {
+    let mut segments = port.rsplit(':');
+    let mapped_target = segments.next()?.parse::<u16>().ok()?;
+    if mapped_target != target_port {
+        return None;
+    }
+    segments.next()?.parse::<u16>().ok()
 }
 
 impl MySqlConfig {
@@ -65,14 +74,7 @@ impl MySqlConfig {
         let port = match &mysql_service.ports {
             dct::Ports::Short(ports_list) => ports_list
                 .iter()
-                .find_map(|p| {
-                    let parts: Vec<&str> = p.split(':').collect();
-                    if parts.len() == 2 && parts[1] == "3306" {
-                        parts[0].parse::<u16>().ok()
-                    } else {
-                        None
-                    }
-                })
+                .find_map(|p| parse_short_published_port(p, 3306))
                 .ok_or_else(|| {
                     anyhow!("No mapping to container port 3306 found in 'mysql' service")
                 })?,
@@ -111,7 +113,11 @@ impl MySqlConfig {
 
         // Fail Fast：若关键凭据仍含未解析的 ${VAR}，说明 .env 缺少对应变量定义。
         // 在此直接报错——否则拿字面量去认证，MySQL 只会回 "connection closed"，极难定位。
-        for (field, val) in [("user", &user), ("password", &password), ("database", &database)] {
+        for (field, val) in [
+            ("user", &user),
+            ("password", &password),
+            ("database", &database),
+        ] {
             if val.contains('$') {
                 return Err(anyhow!(
                     "MySQL {field} 仍含未解析的变量引用 {val:?}：\
@@ -128,14 +134,6 @@ impl MySqlConfig {
             password,
             database,
         })
-    }
-
-    /// 生成连接URL
-    fn to_url(&self) -> String {
-        format!(
-            "mysql://{}:{}@{}:{}/{}",
-            self.user, self.password, self.host, self.port, self.database
-        )
     }
 }
 
@@ -257,7 +255,12 @@ fn resolve_var_spec(inner: &str, vars: &HashMap<String, String>) -> String {
 impl MySqlExecutor {
     /// 创建新的执行器
     pub fn new(config: MySqlConfig) -> Self {
-        let opts = Opts::from_url(&config.to_url()).unwrap();
+        let opts = OptsBuilder::default()
+            .ip_or_hostname(config.host.clone())
+            .tcp_port(config.port)
+            .user(Some(config.user.clone()))
+            .pass(Some(config.password.clone()))
+            .db_name(Some(config.database.clone()));
         let pool = Pool::new(opts);
         Self { pool, config }
     }
@@ -276,76 +279,44 @@ impl MySqlExecutor {
         Ok(result.affected_rows())
     }
 
-    /// 执行差异SQL内容（多语句支持）
-    /// 自动处理注释和空行，支持事务回滚
+    /// 在同一连接上顺序执行差异 SQL。MySQL DDL 不支持整批事务回滚。
     pub async fn execute_diff_sql(&self, sql_content: &str) -> Result<Vec<String>, anyhow::Error> {
-        self.execute_diff_sql_with_retry(sql_content, 1).await
+        self.execute_diff_sql_once(sql_content).await
     }
 
-    /// 带重试机制的SQL执行
+    /// 保留旧接口签名；DDL 无法安全地整批重试，重试参数不再生效。
+    #[deprecated(note = "DDL batches are not safely retryable; use execute_diff_sql_once")]
     pub async fn execute_diff_sql_with_retry(
         &self,
         sql_content: &str,
-        max_retries: u8,
+        _max_retries: u8,
     ) -> Result<Vec<String>, anyhow::Error> {
-        let sql_lines = self.parse_sql_commands(sql_content);
-        let mut results = Vec::new();
-        let mut last_error: Option<mysql_async::Error> = None;
-
-        for attempt in 0..=max_retries {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
-                results.push(format!("🔄 Retrying attempt {attempt}/{max_retries}..."));
-            }
-
-            let mut conn = self.pool.get_conn().await?;
-            let mut tx = conn.start_transaction(TxOpts::default()).await?;
-
-            // 记录本次尝试前的日志数量，如果失败可以回滚
-            let results_len_before_attempt = results.len();
-
-            match self
-                .execute_in_transaction(&mut tx, &sql_lines, &mut results)
-                .await
-            {
-                Ok(_) => {
-                    tx.commit().await?;
-                    results.insert(0, "✅ Diff SQL executed successfully".to_string());
-                    return Ok(results);
-                }
-                Err(e) => {
-                    tx.rollback().await?;
-                    // 移除本次失败尝试中添加的日志
-                    results.truncate(results_len_before_attempt);
-                    results.push(format!("❌ Attempt {} failed: {}", attempt + 1, e));
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        Err(anyhow::anyhow!(
-            "❌ SQL execution failed after {} attempts. Last error: {}",
-            max_retries + 1,
-            last_error.unwrap()
-        ))
+        self.execute_diff_sql_once(sql_content).await
     }
 
-    /// 执行在事务中的差异SQL
-    async fn execute_in_transaction<'a>(
+    /// 出错即停，错误中包含已完成数量与失败语句；重跑时应先重新生成 Live Diff。
+    pub async fn execute_diff_sql_once(
         &self,
-        tx: &mut Transaction<'a>,
-        lines: &[String],
-        results: &mut Vec<String>,
-    ) -> Result<(), mysql_async::Error> {
-        for (idx, sql) in lines.iter().enumerate() {
+        sql_content: &str,
+    ) -> Result<Vec<String>, anyhow::Error> {
+        let statements = self.parse_sql_commands(sql_content);
+        let mut conn = self.pool.get_conn().await?;
+        let mut results = Vec::new();
+        for (idx, sql) in statements.iter().enumerate() {
             if sql.starts_with("--") || sql.trim().is_empty() {
                 continue;
             }
-
-            tx.query_drop(sql).await?;
+            conn.query_drop(sql).await.with_context(|| {
+                format!(
+                    "Diff SQL failed at statement {} after {} successful statements",
+                    idx + 1,
+                    results.len()
+                )
+            })?;
+            tracing::info!(statement_index = idx + 1, statement = %sql, "Diff SQL statement applied");
             results.push(format!("[{}] ✅ {}", idx + 1, sql));
         }
-        Ok(())
+        Ok(results)
     }
 
     /// 解析SQL内容为可执行的命令列表
@@ -401,7 +372,7 @@ impl MySqlExecutor {
     pub async fn fetch_live_schema_with_sql(
         &self,
     ) -> Result<(std::collections::HashMap<String, TableDefinition>, String), anyhow::Error> {
-        use crate::sql_diff::parse_sql_tables;
+        use crate::sql_diff::parse_sql_tables_strict;
 
         let mut conn = self.pool.get_conn().await?;
 
@@ -444,7 +415,7 @@ impl MySqlExecutor {
         }
 
         // 使用 sqlparser 解析 DDL，严格避免正则
-        let tables = parse_sql_tables(&create_sqls)
+        let tables = parse_sql_tables_strict(&create_sqls)
             .map_err(|e| anyhow::anyhow!(format!("Failed to parse online DDL: {}", e)))?;
 
         Ok((tables, create_sqls))
@@ -494,6 +465,16 @@ pub struct ExecutionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_short_mysql_port_with_bind_address() {
+        assert_eq!(parse_short_published_port("13306:3306", 3306), Some(13306));
+        assert_eq!(
+            parse_short_published_port("127.0.0.1:23306:3306", 3306),
+            Some(23306)
+        );
+        assert_eq!(parse_short_published_port("16379:6379", 3306), None);
+    }
 
     #[test]
     fn test_interpolate_vars_basic() {
@@ -562,11 +543,26 @@ mod tests {
         let vars = load_env_vars(&fixture);
 
         // 1) load_env_vars 解析：账号密码应为 nuwax_test 前缀的测试值
-        assert_eq!(vars.get("MYSQL_USER").map(String::as_str), Some("nuwax_test"));
-        assert_eq!(vars.get("MYSQL_PASSWORD").map(String::as_str), Some("nuwax_test_pass"));
-        assert_eq!(vars.get("MYSQL_ROOT_PASSWORD").map(String::as_str), Some("nuwax_test_root"));
-        assert_eq!(vars.get("MYSQL_DATABASE").map(String::as_str), Some("agent_platform"));
-        assert_eq!(vars.get("REDIS_PASSWORD").map(String::as_str), Some("nuwax_test_redis"));
+        assert_eq!(
+            vars.get("MYSQL_USER").map(String::as_str),
+            Some("nuwax_test")
+        );
+        assert_eq!(
+            vars.get("MYSQL_PASSWORD").map(String::as_str),
+            Some("nuwax_test_pass")
+        );
+        assert_eq!(
+            vars.get("MYSQL_ROOT_PASSWORD").map(String::as_str),
+            Some("nuwax_test_root")
+        );
+        assert_eq!(
+            vars.get("MYSQL_DATABASE").map(String::as_str),
+            Some("agent_platform")
+        );
+        assert_eq!(
+            vars.get("REDIS_PASSWORD").map(String::as_str),
+            Some("nuwax_test_redis")
+        );
         // 注释行不应被当作变量
         assert!(!vars.contains_key("# Docker Registry 配置"));
 

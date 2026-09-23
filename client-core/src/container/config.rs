@@ -113,6 +113,15 @@ impl DockerManager {
         Ok(compose_config)
     }
 
+    /// 升级包替换同一路径的 Compose 文件后，显式清除旧解析结果。
+    pub fn invalidate_compose_config_cache(&self) {
+        let cache_key = (
+            self.compose_file.display().to_string(),
+            self.env_file.display().to_string(),
+        );
+        COMPOSE_CACHE.remove(&cache_key);
+    }
+
     /// 检查服务是否是一次性任务（解析compose文件和名称模式判断）
     pub async fn is_oneshot_service(&self, service_name: &str) -> Result<bool> {
         // 使用已加载的compose_config，无需重新解析
@@ -165,6 +174,100 @@ impl DockerManager {
         }
 
         Ok(service_names)
+    }
+
+    /// 返回指定服务及其全部 Compose 前置服务。
+    pub fn get_service_dependency_closure(&self, service_name: &str) -> Result<HashSet<String>> {
+        fn visit(
+            name: &str,
+            services: &dct::Services,
+            visited: &mut HashSet<String>,
+        ) -> Result<()> {
+            if !visited.insert(name.to_string()) {
+                return Ok(());
+            }
+
+            let service = services
+                .0
+                .get(name)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| anyhow::anyhow!("Compose service not found: {name}"))?;
+            let dependencies: Vec<&str> = match &service.depends_on {
+                dct::DependsOnOptions::Simple(names) => names.iter().map(String::as_str).collect(),
+                dct::DependsOnOptions::Conditional(conditions) => {
+                    conditions.keys().map(String::as_str).collect()
+                }
+            };
+            for dependency in dependencies {
+                visit(dependency, services, visited)?;
+            }
+            Ok(())
+        }
+
+        let compose = self.load_compose_config()?;
+        let mut visited = HashSet::new();
+        visit(service_name, &compose.services, &mut visited)?;
+        Ok(visited)
+    }
+
+    /// 把非数据库阶段的服务按 depends_on 分层，供 --no-deps 启动时保持依赖顺序。
+    pub fn get_compose_startup_layers(
+        &self,
+        excluded: &HashSet<String>,
+    ) -> Result<Vec<Vec<String>>> {
+        let compose = self.load_compose_config()?;
+        let services = &compose.services.0;
+        let mut pending: HashSet<String> = services
+            .keys()
+            .filter(|name| !excluded.contains(*name))
+            .cloned()
+            .collect();
+        let mut started = excluded.clone();
+        let mut layers = Vec::new();
+
+        while !pending.is_empty() {
+            let mut layer = Vec::new();
+            for name in &pending {
+                let service = services
+                    .get(name)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| anyhow::anyhow!("Compose service not found: {name}"))?;
+                let dependencies: Vec<&str> = match &service.depends_on {
+                    dct::DependsOnOptions::Simple(names) => {
+                        names.iter().map(String::as_str).collect()
+                    }
+                    dct::DependsOnOptions::Conditional(conditions) => {
+                        conditions.keys().map(String::as_str).collect()
+                    }
+                };
+                for dependency in &dependencies {
+                    if !services.contains_key(*dependency) {
+                        return Err(anyhow::anyhow!(
+                            "Compose service {name} depends on missing service {dependency}"
+                        ));
+                    }
+                }
+                if dependencies
+                    .iter()
+                    .all(|dependency| started.contains(*dependency))
+                {
+                    layer.push(name.clone());
+                }
+            }
+            if layer.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Compose services have a dependency cycle: {:?}",
+                    pending
+                ));
+            }
+            layer.sort();
+            for name in &layer {
+                pending.remove(name);
+                started.insert(name.clone());
+            }
+            layers.push(layer);
+        }
+        Ok(layers)
     }
 
     /// 获取 docker-compose 项目名称
@@ -257,4 +360,35 @@ pub fn load_compose_config_with_env(compose_path: &Path, env_path: &Path) -> Res
     }
 
     Ok(compose_config)
+}
+
+#[cfg(test)]
+mod staged_deployment_tests {
+    use super::DockerManager;
+
+    #[test]
+    fn mysql_stage_includes_permission_fix_but_not_backend() -> anyhow::Result<()> {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let manager = DockerManager::with_project(
+            fixtures.join("docker-compose.yml"),
+            fixtures.join(".env"),
+            Some("staged-deploy-check".to_string()),
+        )?;
+        let stage = manager.get_service_dependency_closure("mysql")?;
+        assert!(stage.contains("mysql"));
+        assert!(stage.contains("mysql-permission-fix"));
+        assert!(!stage.contains("backend"));
+        let layers = manager.get_compose_startup_layers(&stage)?;
+        let layer_of = |service: &str| {
+            layers
+                .iter()
+                .position(|layer| layer.iter().any(|name| name == service))
+        };
+        assert!(layer_of("mysql").is_none());
+        assert!(layer_of("mysql-permission-fix").is_none());
+        assert!(layer_of("redis") < layer_of("backend"));
+        assert!(layer_of("milvus") < layer_of("backend"));
+        assert!(layer_of("backend") < layer_of("frontend"));
+        Ok(())
+    }
 }

@@ -8,6 +8,147 @@ use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
 impl DockerManager {
+    /// 创建并启动指定的 Compose 服务；默认保留依赖启动规则。
+    pub async fn up_services(&self, service_names: &[String], no_recreate: bool) -> Result<()> {
+        self.up_services_with_options(service_names, no_recreate, false)
+            .await
+    }
+
+    /// 已自行按依赖顺序分层时启动服务，阻止 Compose 再次运行数据库前置任务。
+    pub async fn up_services_without_dependencies(
+        &self,
+        service_names: &[String],
+        no_recreate: bool,
+    ) -> Result<()> {
+        self.up_services_with_options(service_names, no_recreate, true)
+            .await
+    }
+
+    async fn up_services_with_options(
+        &self,
+        service_names: &[String],
+        no_recreate: bool,
+        no_deps: bool,
+    ) -> Result<()> {
+        if service_names.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No Compose services were selected for startup"
+            ));
+        }
+
+        self.ensure_host_volumes_exist().await?;
+        let mut args = vec!["up", "-d"];
+        if no_recreate {
+            args.push("--no-recreate");
+        }
+        if no_deps {
+            args.push("--no-deps");
+        }
+        args.extend(service_names.iter().map(String::as_str));
+        let output = self.run_compose_command(&args).await?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "Failed to start Compose services [{}] (exit {:?}): stderr: {}; stdout: {}",
+                service_names.join(", "),
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            ));
+        }
+        Ok(())
+    }
+
+    /// 等待指定服务真正达到健康态，或其一次性任务成功结束。
+    pub async fn wait_for_compose_services_ready(
+        &self,
+        service_names: &[String],
+        timeout: Duration,
+    ) -> Result<()> {
+        let started_at = tokio::time::Instant::now();
+        loop {
+            let mut pending = Vec::new();
+            for name in service_names {
+                let output = self.run_compose_command(&["ps", "-a", "-q", name]).await?;
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "Failed to inspect Compose service {name}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                let ids = String::from_utf8(output.stdout)?;
+                let ids: Vec<&str> = ids.split_whitespace().collect();
+                if ids.is_empty() {
+                    pending.push(name.clone());
+                    continue;
+                }
+
+                let mut args = vec!["inspect", "--format", "{{json .State}}"];
+                args.extend(ids.iter().copied());
+                let inspect = self.run_docker_command(&args).await?;
+                if !inspect.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "Failed to inspect container for Compose service {name}: {}",
+                        String::from_utf8_lossy(&inspect.stderr)
+                    ));
+                }
+                let states = String::from_utf8(inspect.stdout)?;
+                let mut ready_count = 0;
+                for state_json in states.lines() {
+                    let state: serde_json::Value = serde_json::from_str(state_json)?;
+                    let running = state["Running"].as_bool().unwrap_or(false);
+                    let health = state["Health"]["Status"].as_str();
+                    let completed_oneshot = !running
+                        && state["Status"].as_str() == Some("exited")
+                        && state["ExitCode"].as_i64() == Some(0)
+                        && self.is_oneshot_service(name).await?;
+                    if (running && (health.is_none() || health == Some("healthy")))
+                        || completed_oneshot
+                    {
+                        ready_count += 1;
+                    } else if !running && state["Status"].as_str() == Some("exited") {
+                        return Err(anyhow::anyhow!(
+                            "Compose service {name} exited before it became ready (exit code: {})",
+                            state["ExitCode"]
+                        ));
+                    }
+                }
+                if ready_count != ids.len() {
+                    pending.push(name.clone());
+                }
+            }
+            if pending.is_empty() {
+                return Ok(());
+            }
+            if started_at.elapsed() >= timeout {
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for Compose services: {}",
+                    pending.join(", ")
+                ));
+            }
+            tokio::time::sleep(Duration::from_secs(timeout::HEALTH_CHECK_INTERVAL)).await;
+        }
+    }
+
+    /// 查询 Compose 项目中指定服务的容器 ID，用于确认迁移后数据库未被重建。
+    pub async fn get_service_container_id(&self, service_name: &str) -> Result<String> {
+        let output = self
+            .run_compose_command(&["ps", "-q", service_name])
+            .await?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "Failed to inspect Compose service {service_name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let id = String::from_utf8(output.stdout)?.trim().to_string();
+        if id.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Compose service {service_name} has no running container"
+            ));
+        }
+        Ok(id)
+    }
+
     /// 启动所有服务
     pub async fn start_services(&self) -> Result<()> {
         info!("🚀 Starting Docker services...");
