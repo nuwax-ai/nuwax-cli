@@ -13,7 +13,7 @@ documentation = "https://github.com/nuwax-ai/nuwax-cli"
 [workspace.dependencies]
 
 # 内部 crate
-client-core = { path = "client-core", version = "0.1.8", default-features = false }
+client-core = { path = "client-core", version = "0.1.10", default-features = false }
 
 # 集成的 ducker Docker TUI (v0.6.5 依赖 bollard ^0.20.1，与 0.21.0 不兼容)
 ducker = { version = "0.6.5" }
@@ -131,7 +131,7 @@ indicatif = "0.18"
 tokio-stream = "0.1"
 
 # SQL解析 依赖的库(nuwax fork of upstream sqlparser,支持 CREATE FULLTEXT/SPATIAL INDEX)
-sqlparser = { package = "nuwax-sqlparser", version = "0.63.2" }
+sqlparser = { package = "nuwax-sqlparser", version = "0.63.3" }
 regex = "1.13"
 
 # --- OSS Dependencies ---

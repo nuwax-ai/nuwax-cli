@@ -1,3 +1,21 @@
+/// 生成列定义（MySQL `GENERATED ALWAYS AS (expr) STORED/VIRTUAL`）
+///
+/// 注意：对存量表 ADD/MODIFY 为 STORED 生成列会触发全表重建，大表升级需评估耗时。
+#[derive(Debug, Clone)]
+pub struct GeneratedColumnDef {
+    /// 生成表达式（解析后已剥掉外层括号的内层表达式）
+    pub expr: String,
+    /// true = STORED；false = VIRTUAL（MySQL 缺省 VIRTUAL）
+    pub stored: bool,
+}
+
+impl PartialEq for GeneratedColumnDef {
+    fn eq(&self, other: &Self) -> bool {
+        self.stored == other.stored
+            && normalize_generated_expr(&self.expr) == normalize_generated_expr(&other.expr)
+    }
+}
+
 /// 表列定义
 #[derive(Debug, Clone)]
 pub struct TableColumn {
@@ -5,6 +23,10 @@ pub struct TableColumn {
     pub data_type: String,
     pub nullable: bool,
     pub default_value: Option<String>,
+    /// MySQL `ON UPDATE CURRENT_TIMESTAMP` 等自动更新表达式
+    pub on_update: Option<String>,
+    /// 生成列定义；普通列为 None
+    pub generated: Option<GeneratedColumnDef>,
     pub auto_increment: bool,
     pub comment: Option<String>,
 }
@@ -16,8 +38,10 @@ impl PartialEq for TableColumn {
             return false;
         }
 
-        // 数据类型比较（忽略大小写）
-        if self.data_type.to_uppercase() != other.data_type.to_uppercase() {
+        // 数据类型比较（语义归一化：忽略已弃用的显示宽度，但 TINYINT(1) 例外）
+        if normalize_type_for_compare(&self.data_type)
+            != normalize_type_for_compare(&other.data_type)
+        {
             return false;
         }
 
@@ -28,6 +52,16 @@ impl PartialEq for TableColumn {
 
         // auto_increment 必须匹配
         if self.auto_increment != other.auto_increment {
+            return false;
+        }
+
+        // ON UPDATE 语义比较（NOW()/LOCALTIME() 等同义词归一为 CURRENT_TIMESTAMP）
+        if normalize_on_update(&self.on_update) != normalize_on_update(&other.on_update) {
+            return false;
+        }
+
+        // 生成列必须匹配（表达式经归一化比较）
+        if self.generated != other.generated {
             return false;
         }
 
@@ -68,20 +102,176 @@ impl TableColumn {
     fn normalize_default_value(value: &str) -> String {
         let trimmed = value.trim();
 
-        // 移除数字周围的引号
-        if trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        // 移除数字周围的引号（数字无大小写语义）
+        if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
             let inner = &trimmed[1..trimmed.len() - 1];
             // 如果内容是纯数字，移除引号
-            if inner
-                .chars()
-                .all(|c| c.is_ascii_digit() || c == '-' || c == '.')
+            if !inner.is_empty()
+                && inner
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '-' || c == '.')
             {
                 return inner.to_string();
             }
+            // 引号内是字符串字面量：保留原始大小写，否则 'Pending' vs 'pending'
+            // 这类默认值大小写变化会被漏检（静默漂移）
+            return trimmed.to_string();
         }
 
-        // 统一大小写（对于关键字）
+        // 无引号：可能是关键字（CURRENT_TIMESTAMP/NULL/...），统一大小写
         trimmed.to_uppercase()
+    }
+}
+
+/// 类型语义归一化（仅用于差异比较，生成侧保留原始写法）：
+/// - 整数族剥显示宽度：MySQL 8.0.17+ 已弃用且 SHOW CREATE 不再输出，
+///   模板 `int(11)` 与线上 `int` 不应产生虚假 MODIFY；
+/// - `TINYINT(1)` 例外：布尔语义，与 `TINYINT` 视为不同；
+/// - 时间类型剥 `(0)` 精度（`DATETIME` ≡ `DATETIME(0)`）。
+fn normalize_type_for_compare(data_type: &str) -> String {
+    let upper = data_type.to_uppercase();
+
+    const INT_TYPES: [&str; 6] = [
+        "TINYINT",
+        "SMALLINT",
+        "MEDIUMINT",
+        "INT",
+        "INTEGER",
+        "BIGINT",
+    ];
+    for int_type in INT_TYPES {
+        let prefix = format!("{int_type}(");
+        let Some(rest) = upper.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some(close) = rest.find(')') else {
+            continue;
+        };
+        let width = &rest[..close];
+        let tail = rest[close + 1..].trim_start(); // 允许 " UNSIGNED" 后缀
+        if !width.is_empty() && width.chars().all(|c| c.is_ascii_digit()) {
+            // TINYINT(1) 保留宽度参与比较（布尔语义），其余整数宽度剥离
+            if int_type == "TINYINT" && width == "1" {
+                return upper;
+            }
+            return format!("{int_type}{tail}");
+        }
+    }
+
+    const TIME_TYPES: [&str; 4] = ["DATETIME", "TIMESTAMP", "TIME", "DATE"];
+    let without_precision = |name: &str| upper == format!("{name}(0)");
+    if TIME_TYPES.iter().any(|t| without_precision(t)) {
+        return upper.replace("(0)", "");
+    }
+
+    upper
+}
+
+/// ON UPDATE 表达式语义归一化（仅用于比较）：
+/// SHOW CREATE TABLE 恒输出 CURRENT_TIMESTAMP 形态；模板写 NOW()/LOCALTIME()/
+/// LOCALTIMESTAMP()（无精度参数）语义相同，不归一会导致线上部署每次都重复 MODIFY。
+fn normalize_on_update(on_update: &Option<String>) -> String {
+    let Some(value) = on_update else {
+        return String::new();
+    };
+    let upper = value.trim().to_uppercase();
+    match upper.as_str() {
+        "NOW()" | "NOW" | "LOCALTIME()" | "LOCALTIME" | "LOCALTIMESTAMP()" | "LOCALTIMESTAMP" => {
+            "CURRENT_TIMESTAMP".to_string()
+        }
+        _ => upper,
+    }
+}
+
+/// 生成列表达式归一化（仅用于比较）：
+/// SHOW CREATE TABLE 打印生成列时标识符带反引号、空格与关键字大小写由服务端控制、
+/// 整个表达式会多包一层括号（`((a + b))`）、字符串字面量前会加字符集引导符
+/// （`_utf8mb4'...'`）。与手写模板比较前依次归一：剥反引号、连续空白折叠为单空格、
+/// 单引号字符串字面量之外大小写折叠、剥字符集引导符、剥整体包裹的平衡括号。
+/// 残余差异方向是多报 MODIFY（安全侧），不会漏检。
+fn normalize_generated_expr(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len());
+    let mut in_string = false;
+    let mut last_was_space = false;
+
+    for ch in expr.chars() {
+        if in_string {
+            out.push(ch);
+            if ch == '\'' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => {
+                // 剥 SHOW CREATE 加在字符串字面量前的字符集引导符。
+                // 注意 Display 会把 `_utf8mb4'x'` 渲染为 `_utf8mb4 'x'`（引导符与
+                // 引号之间带空格），先 trim 尾部空白再匹配；截断后保留引导符前的
+                // 参数分隔空格，与模板形态对齐。
+                let trimmed_end = out.trim_end();
+                for introducer in ["_UTF8MB4", "_UTF8MB3", "_UTF8", "_LATIN1", "_BINARY"] {
+                    if trimmed_end.ends_with(introducer) {
+                        out.truncate(trimmed_end.len() - introducer.len());
+                        break;
+                    }
+                }
+                in_string = true;
+                last_was_space = false;
+                out.push(ch);
+            }
+            // 剥反引号：`col` 与 col 视为同一标识符
+            '`' => {}
+            c if c.is_whitespace() => {
+                if !last_was_space {
+                    out.push(' ');
+                    last_was_space = true;
+                }
+            }
+            c => {
+                last_was_space = false;
+                out.push(c.to_ascii_uppercase());
+            }
+        }
+    }
+
+    let mut result = out.trim().to_string();
+    while let Some(inner) = strip_balanced_outer_parens(&result) {
+        result = inner;
+    }
+    result
+}
+
+/// 整个表达式被一对平衡的括号包裹时剥掉这层（`((a))` → `a`）；
+/// 若首个闭合括号不在末尾（如 `(a) + (b)`），说明不是整体包裹，原样返回。
+fn strip_balanced_outer_parens(s: &str) -> Option<String> {
+    if !(s.starts_with('(') && s.ends_with(')') && s.len() >= 2) {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    for (i, ch) in s.chars().enumerate() {
+        if in_string {
+            if ch == '\'' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && i != s.len() - 1 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        Some(s[1..s.len() - 1].to_string())
+    } else {
+        None
     }
 }
 
@@ -111,6 +301,8 @@ pub struct TableDefinition {
     pub indexes: Vec<TableIndex>,
     pub engine: Option<String>,
     pub charset: Option<String>,
+    /// 表级 COLLATE（如 utf8mb4_0900_ai_ci）；缺省 None 表示未显式声明
+    pub collation: Option<String>,
 }
 
 /// SQL差异结果

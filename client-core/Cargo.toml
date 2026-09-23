@@ -1,6 +1,6 @@
 [package]
 name = "client-core"
-version = "0.1.9"
+version = "0.1.10"
 description = "Duck Client core library"
 edition.workspace = true
 authors.workspace = true

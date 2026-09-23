@@ -82,8 +82,14 @@ pub fn generate_mysql_diff(
     let result = diff_sql.join("\n");
 
     if !stats.has_changes() {
-        info!("No actual table structure differences found");
-        return Ok((String::new(), stats));
+        // diff_sql 前 3 个条目是固定头部注释；没有任何表级差异/警告时才返回空串。
+        // 表选项等警告仅在此时保留输出，避免被早退静默丢弃。
+        if diff_sql.len() <= 3 {
+            info!("No actual table structure differences found");
+            return Ok((String::new(), stats));
+        }
+        info!("Only manual-change warnings found, no executable table structure differences");
+        return Ok((result, stats));
     }
 
     if !stats.has_executable_operations() && stats.has_dangerous_operations() {
@@ -114,6 +120,34 @@ pub fn generate_table_diff(
     stats.indexes_added = index_stats.indexes_added;
     stats.indexes_dropped = index_stats.indexes_dropped;
     stats.indexes_modified = index_stats.indexes_modified;
+
+    // 比较表选项（ENGINE/CHARSET/COLLATE）：仅当两侧都显式声明时才比较，
+    // 一侧省略视为依赖默认值，不产生差异（手写模板常省略 COLLATE，
+    // 而 SHOW CREATE TABLE 恒显式输出，单侧比较会产生噪音）。
+    // 变更只输出人工处理警告，不自动生成 SQL：ENGINE/CHARSET/COLLATE 变更
+    // 需要 ALTER ... ENGINE / CONVERT TO CHARACTER SET，会重写数据或重建表。
+    // 刻意不进 DiffStats：计入 has_warnings 会把自动部署链路的纯选项差异
+    // 归档为 only-manual-changes，且该标志语义应保留给 DROP 类危险操作。
+    for (label, old_value, new_value) in [
+        ("ENGINE", &old_table.engine, &new_table.engine),
+        ("CHARSET", &old_table.charset, &new_table.charset),
+        ("COLLATION", &old_table.collation, &new_table.collation),
+    ] {
+        if let (Some(old_v), Some(new_v)) = (old_value, new_value)
+            && !old_v.eq_ignore_ascii_case(new_v)
+        {
+            tracing::warn!(
+                "⚠️  Table option {} for table `{}` differs (current: {}, target: {}); manual ALTER required, no SQL generated",
+                label,
+                new_table.name,
+                old_v,
+                new_v
+            );
+            diffs.push(format!(
+                "-- ⚠️  Warning: table option {label} differs (current: {old_v}, target: {new_v}); ENGINE/CHARSET/COLLATE changes need manual ALTER (CONVERT TO), no SQL generated for data safety"
+            ));
+        }
+    }
 
     (diffs, stats)
 }

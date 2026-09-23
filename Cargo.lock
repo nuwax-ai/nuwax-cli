@@ -839,7 +839,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "client-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3443,7 +3443,7 @@ checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
 
 [[package]]
 name = "nuwax-cli"
-version = "1.0.130"
+version = "1.0.131"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3491,9 +3491,9 @@ dependencies = [
 
 [[package]]
 name = "nuwax-sqlparser"
-version = "0.63.2"
+version = "0.63.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "970b4050f5924addcee19a6a726d3b985bdd76eb4224d9dd93320cdcd09ebedc"
+checksum = "9115a910bff6cf6be9fddfa2e815e2ebb694fd2a7f1ac20b5fd383e5b95c481b"
 dependencies = [
  "log",
  "recursive",

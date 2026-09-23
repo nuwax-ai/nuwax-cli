@@ -1,8 +1,9 @@
-use super::types::{TableColumn, TableDefinition, TableIndex};
+use super::types::{GeneratedColumnDef, TableColumn, TableDefinition, TableIndex};
 use crate::error::DuckError;
 use regex::Regex;
 use sqlparser::ast::{
-    ColumnDef, DataType, FullTextOrSpatialKind, IndexOption, Statement, TableConstraint,
+    ColumnDef, CreateTableOptions, DataType, FullTextOrSpatialKind, GeneratedExpressionMode,
+    IndexOption, SqlOption, Statement, TableConstraint,
 };
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
@@ -92,12 +93,18 @@ fn parse_sql_tables_with_mode(
                             }
                         }
 
+                        // 提取表选项（ENGINE/CHARSET/COLLATE）；
+                        // AUTO_INCREMENT 等 dump 计数器不属于 schema，不提取
+                        let (engine, charset, collation) =
+                            extract_table_options(&create_table.table_options);
+
                         let table_def = TableDefinition {
                             name: table_name.clone(),
                             columns: table_columns,
                             indexes: table_indexes,
-                            engine: None,  // 可以从原始SQL字符串中提取
-                            charset: None, // 可以从原始SQL字符串中提取
+                            engine,
+                            charset,
+                            collation,
                         };
 
                         tables.insert(table_name, table_def);
@@ -244,6 +251,8 @@ fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError>
 
     let mut nullable = true;
     let mut default_value = None;
+    let mut on_update = None;
+    let mut generated = None;
     let mut comment = None;
     let mut auto_increment = false;
 
@@ -255,6 +264,25 @@ fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError>
             }
             sqlparser::ast::ColumnOption::Default(expr) => {
                 default_value = Some(format_default_value(expr));
+            }
+            sqlparser::ast::ColumnOption::OnUpdate(expr) => {
+                // MySQL `ON UPDATE CURRENT_TIMESTAMP` / `current_timestamp(3)`；
+                // expr 的 Display 渲染即为合法 SQL 片段
+                on_update = Some(expr.to_string());
+            }
+            sqlparser::ast::ColumnOption::Generated {
+                generation_expr: Some(expr),
+                generation_expr_mode,
+                ..
+            } => {
+                // MySQL `GENERATED ALWAYS AS (expr) STORED/VIRTUAL` 与 `AS (expr)` 简写；
+                // 统一存归一化形态（是否 STORED），渲染时统一用 GENERATED ALWAYS 全写。
+                // generation_expr 为 None 的是其他方言的 sequence 选项，MySQL 不会出现，
+                // 由下方通配分支忽略。
+                generated = Some(GeneratedColumnDef {
+                    expr: expr.to_string(),
+                    stored: matches!(generation_expr_mode, Some(GeneratedExpressionMode::Stored)),
+                });
             }
             sqlparser::ast::ColumnOption::Comment(c) => {
                 comment = Some(c.clone());
@@ -287,6 +315,8 @@ fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError>
         data_type,
         nullable,
         default_value,
+        on_update,
+        generated,
         auto_increment,
         comment,
     })
@@ -311,9 +341,13 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
         }
         TableConstraint::Unique(uq) => {
             let column_names = extract_index_columns(&uq.columns);
+            // MySQL 方言 `UNIQUE KEY uk_x (...)` 的名字在 index_name 字段；
+            // ANSI `CONSTRAINT uk_x UNIQUE (...)` 的约束名在 name 字段。两者都取，
+            // 否则 MySQL 风格的唯一索引会丢失名字、被合成为 unique_<列名>。
             let index_name = uq
-                .name
+                .index_name
                 .as_ref()
+                .or(uq.name.as_ref())
                 .map(ident_to_string)
                 .unwrap_or_else(|| format!("unique_{}", column_names.join("_")));
 
@@ -458,64 +492,62 @@ fn format_default_value(expr: &sqlparser::ast::Expr) -> String {
 }
 
 /// 格式化数据类型
+///
+/// 直接使用 nuwax-sqlparser 的 Display 实现：对 MySQL 方言的全部类型变体
+/// （含 Unsigned 整型族、带显示宽度的整数、ENUM/BIT/VARBINARY 等）渲染合法 SQL。
+/// 此前手写 match 的兜底分支用 Debug 格式（`{:?}`），会把
+/// `DataType::BigIntUnsigned(None)` 之类的枚举名直接印进 DDL 产生非法 SQL，
+/// 且整数分支丢弃显示宽度（tinyint(1) 退化为 TINYINT）。
 fn format_data_type(data_type: &DataType) -> String {
-    match data_type {
-        DataType::Char(size) => {
-            if let Some(size) = size {
-                format!("CHAR({size})")
-            } else {
-                "CHAR".to_string()
-            }
-        }
-        DataType::Varchar(size) => {
-            if let Some(size) = size {
-                format!("VARCHAR({size})")
-            } else {
-                "VARCHAR".to_string()
-            }
-        }
-        DataType::Text => "TEXT".to_string(),
-        DataType::Int(_) => "INT".to_string(),
-        DataType::BigInt(_) => "BIGINT".to_string(),
-        DataType::TinyInt(_) => "TINYINT".to_string(),
-        DataType::SmallInt(_) => "SMALLINT".to_string(),
-        DataType::MediumInt(_) => "MEDIUMINT".to_string(),
-        DataType::Float(_) => "FLOAT".to_string(),
-        DataType::Double(_) => "DOUBLE".to_string(),
-        DataType::Decimal(exact_number_info) => match exact_number_info {
-            sqlparser::ast::ExactNumberInfo::PrecisionAndScale(precision, scale) => {
-                format!("DECIMAL({precision},{scale})")
-            }
-            sqlparser::ast::ExactNumberInfo::Precision(precision) => {
-                format!("DECIMAL({precision})")
-            }
-            sqlparser::ast::ExactNumberInfo::None => "DECIMAL".to_string(),
-        },
-        DataType::Boolean => "BOOLEAN".to_string(),
-        DataType::Date => "DATE".to_string(),
-        DataType::Time(_, _) => "TIME".to_string(),
-        DataType::Timestamp(_, _) => "TIMESTAMP".to_string(),
-        DataType::Datetime(_) => "DATETIME".to_string(),
-        DataType::JSON => "JSON".to_string(),
-        DataType::Enum(variants, _max_length) => {
-            // 正确处理 ENUM 变体
-            let enum_values: Vec<String> = variants
-                .iter()
-                .map(|variant| match variant {
-                    sqlparser::ast::EnumMember::Name(name) => format!("'{}'", name),
-                    sqlparser::ast::EnumMember::NamedValue(name, _expr) => {
-                        format!("'{}'", name)
-                    }
-                })
-                .collect();
+    data_type.to_string()
+}
 
-            if enum_values.is_empty() {
-                "ENUM()".to_string()
-            } else {
-                format!("ENUM({})", enum_values.join(","))
+/// 从 CREATE TABLE 表选项提取 ENGINE / CHARSET / COLLATE
+///
+/// MySQL dump 形如 `... ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`
+/// 解析为 `CreateTableOptions::Plain(Vec<SqlOption>)`：
+/// - `ENGINE=InnoDB` → `SqlOption::NamedParenthesizedList { key: "ENGINE", name: Some(...) }`
+/// - `DEFAULT CHARSET=x` / `CHARSET=x` / `CHARACTER SET=x` → `SqlOption::KeyValue`
+/// - `COLLATE=x` / `DEFAULT COLLATE=x` → `SqlOption::KeyValue`
+/// - `AUTO_INCREMENT=N` 是 dump 计数器而非 schema，忽略；ROW_FORMAT 等同样忽略。
+fn extract_table_options(
+    table_options: &CreateTableOptions,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let CreateTableOptions::Plain(options) = table_options else {
+        return (None, None, None);
+    };
+
+    let mut engine = None;
+    let mut charset = None;
+    let mut collation = None;
+
+    for option in options {
+        match option {
+            SqlOption::NamedParenthesizedList(npl) => {
+                if npl.name.is_some() && ident_to_string(&npl.key).eq_ignore_ascii_case("ENGINE") {
+                    engine = npl.name.as_ref().map(ident_to_string);
+                }
             }
+            SqlOption::KeyValue { key, value } => {
+                let key_upper = ident_to_string(key).to_uppercase();
+                if key_upper.contains("CHARSET") || key_upper.contains("CHARACTER SET") {
+                    charset = Some(option_value_to_string(value));
+                } else if key_upper.contains("COLLATE") {
+                    collation = Some(option_value_to_string(value));
+                }
+            }
+            _ => {}
         }
-        _ => format!("{data_type:?}"), // 对于其他类型，使用 Debug 格式
+    }
+
+    (engine, charset, collation)
+}
+
+/// 渲染表选项的值为字符串（charset/collation 值是标识符，剥反引号）
+fn option_value_to_string(value: &sqlparser::ast::Expr) -> String {
+    match value {
+        sqlparser::ast::Expr::Identifier(ident) => strip_backticks(&ident.to_string()),
+        other => other.to_string(),
     }
 }
 

@@ -239,6 +239,9 @@ pub fn generate_create_table_sql(table: &TableDefinition) -> String {
     if let Some(charset) = &table.charset {
         sql.push_str(&format!(" DEFAULT CHARSET={charset}"));
     }
+    if let Some(collation) = &table.collation {
+        sql.push_str(&format!(" COLLATE={collation}"));
+    }
 
     sql.push(';');
     sql
@@ -252,11 +255,26 @@ pub fn generate_column_sql(column: &TableColumn) -> String {
         sql.push_str(" NOT NULL");
     }
 
-    if let Some(default) = &column.default_value {
-        sql.push_str(&format!(
-            " DEFAULT {}",
-            format_default_value_for_sql(default)
-        ));
+    if let Some(generated) = &column.generated {
+        // 生成列：MySQL 不允许 DEFAULT / ON UPDATE，直接渲染生成子句。
+        // 统一用 GENERATED ALWAYS 全写（模板里 `AS (expr)` 简写在解析时已归一）。
+        let mode = if generated.stored {
+            "STORED"
+        } else {
+            "VIRTUAL"
+        };
+        sql.push_str(&format!(" GENERATED ALWAYS AS ({}) {mode}", generated.expr));
+    } else {
+        if let Some(default) = &column.default_value {
+            sql.push_str(&format!(
+                " DEFAULT {}",
+                format_default_value_for_sql(default)
+            ));
+        }
+
+        if let Some(on_update) = &column.on_update {
+            sql.push_str(&format!(" ON UPDATE {on_update}"));
+        }
     }
 
     if column.auto_increment {
