@@ -1524,3 +1524,36 @@ CREATE TABLE `t` (
         "默认值大小写变化必须被检出: {diff_sql}"
     );
 }
+
+#[test]
+fn regression_unsigned_integer_width_normalization() {
+    // MySQL 5.7 风格 dump（int(10) unsigned 带宽度）vs 8.0 SHOW CREATE / 手写模板
+    // （int unsigned 无宽度）必须语义等价，不产生虚假 MODIFY。
+    // 此前宽度剥离把后缀直接拼接，INT(11) UNSIGNED 归一化成 INTUNSIGNED 导致误报。
+    let old_sql = r#"
+USE app;
+CREATE TABLE `t` (`count` INT(10) UNSIGNED NOT NULL DEFAULT '0') ENGINE=InnoDB;
+    "#;
+    let new_sql = r#"
+USE app;
+CREATE TABLE `t` (`count` int unsigned NOT NULL DEFAULT '0') ENGINE=InnoDB;
+    "#;
+    let (diff_sql, _) =
+        generate_schema_diff(Some(old_sql), new_sql, Some("1.0.0"), "1.1.0").unwrap();
+    assert!(
+        !diff_sql.contains("MODIFY COLUMN"),
+        "int(10) unsigned 与 int unsigned 语义等价，不应产生 MODIFY: {diff_sql}"
+    );
+
+    // 宽度剥离不能把不同类型误判相等：int unsigned -> bigint unsigned 必须检出
+    let new_bigint = r#"
+USE app;
+CREATE TABLE `t` (`count` bigint unsigned NOT NULL DEFAULT '0') ENGINE=InnoDB;
+    "#;
+    let (diff_sql, _) =
+        generate_schema_diff(Some(old_sql), new_bigint, Some("1.0.0"), "1.1.0").unwrap();
+    assert!(
+        diff_sql.contains("MODIFY COLUMN"),
+        "int 与 bigint 类型变化必须检出: {diff_sql}"
+    );
+}

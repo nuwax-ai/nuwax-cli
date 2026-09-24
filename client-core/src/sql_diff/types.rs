@@ -148,13 +148,18 @@ fn normalize_type_for_compare(data_type: &str) -> String {
             continue;
         };
         let width = &rest[..close];
-        let tail = rest[close + 1..].trim_start(); // 允许 " UNSIGNED" 后缀
+        let tail = rest[close + 1..].trim(); // 允许 " UNSIGNED" 等后缀
         if !width.is_empty() && width.chars().all(|c| c.is_ascii_digit()) {
-            // TINYINT(1) 保留宽度参与比较（布尔语义），其余整数宽度剥离
+            // TINYINT(1) 保留宽度参与比较（布尔语义），其余整数宽度剥离。
+            // 后缀与类型名之间必须以单个空格连接，否则 `INT(11) UNSIGNED`
+            // 会归一化成 `INTUNSIGNED`，与 `INT UNSIGNED` 不等（虚假 MODIFY）。
             if int_type == "TINYINT" && width == "1" {
                 return upper;
             }
-            return format!("{int_type}{tail}");
+            if tail.is_empty() {
+                return int_type.to_string();
+            }
+            return format!("{int_type} {tail}");
         }
     }
 
