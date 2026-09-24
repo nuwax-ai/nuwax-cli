@@ -551,17 +551,16 @@ jobs:
           OSS_PREFIX="nuwax-cli/beta/${TAG_NAME}"
           echo "==> Uploading to OSS Beta: ${OSS_CDN_BASE}/${OSS_PREFIX}/"
 
-          for file in *.tar.gz *.zip; do
-            if [ -f "$file" ]; then
-              echo "Uploading: $file"
-              ossutil cp --force "$file" "${OSS_BUCKET}/${OSS_PREFIX}/${file}" \
-                --endpoint "$OSS_ENDPOINT" \
-                --region "$OSS_REGION" \
-                --access-key-id "$OSS_ACCESS_KEY_ID" \
-                --access-key-secret "$OSS_ACCESS_KEY_SECRET"
-              echo "✅ Uploaded: $file"
-            fi
-          done
+          # 并发上传：此前逐文件串行 cp，跨境链路（GHA 美国 runner -> 大陆 OSS）
+          # 实测有效吞吐仅 ~120KB/s、325MB 资产全程 46 分钟，每个文件还要重新
+          # 经历 TCP 慢启动爬坡。改为目录级上传：--jobs 并发多文件、--parallel
+          # 单文件分片并发，两条并发维度叠加提升慢链路吞吐。
+          ossutil cp --force --recursive --jobs 8 --parallel 4 ./ "${OSS_BUCKET}/${OSS_PREFIX}/" \
+            --endpoint "$OSS_ENDPOINT" \
+            --region "$OSS_REGION" \
+            --access-key-id "$OSS_ACCESS_KEY_ID" \
+            --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+          echo "✅ All assets uploaded"
 
       - name: Generate beta latest.json
         shell: bash
