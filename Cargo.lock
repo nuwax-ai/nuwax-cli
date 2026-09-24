@@ -3443,7 +3443,7 @@ checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
 
 [[package]]
 name = "nuwax-cli"
-version = "1.0.133"
+version = "1.0.134"
 dependencies = [
  "anyhow",
  "chrono",

@@ -553,9 +553,9 @@ jobs:
 
           # 并发上传：此前逐文件串行 cp，跨境链路（GHA 美国 runner -> 大陆 OSS）
           # 实测有效吞吐仅 ~120KB/s、325MB 资产全程 46 分钟，每个文件还要重新
-          # 经历 TCP 慢启动爬坡。改为目录级上传：--jobs 并发多文件、--parallel
-          # 单文件分片并发，两条并发维度叠加提升慢链路吞吐。
-          ossutil cp --force --recursive --jobs 8 --parallel 4 ./ "${OSS_BUCKET}/${OSS_PREFIX}/" \
+          # 经历 TCP 慢启动爬坡。改为目录级上传：--job 并发多文件、--parallel
+          # 单文件内并发（注意 ossutil v2 参数是单数 --job，不是 v1 的 --jobs）。
+          ossutil cp --force --recursive --job 8 --parallel 4 ./ "${OSS_BUCKET}/${OSS_PREFIX}/" \
             --endpoint "$OSS_ENDPOINT" \
             --region "$OSS_REGION" \
             --access-key-id "$OSS_ACCESS_KEY_ID" \
