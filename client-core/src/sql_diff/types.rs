@@ -321,7 +321,7 @@ pub struct SchemaDiffResult {
     pub live_sql: Option<String>,
     /// 是否有可执行的SQL语句
     pub has_executable_sql: bool,
-    /// 是否包含警告（删除操作）
+    /// 是否包含需要人工处理的警告
     pub has_warnings: bool,
 }
 
@@ -346,6 +346,8 @@ pub struct DiffStats {
     pub indexes_dropped: usize,
     /// 修改的索引数量
     pub indexes_modified: usize,
+    /// 需要人工处理的表选项变更数量
+    pub table_options_changed: usize,
 }
 
 impl DiffStats {
@@ -360,6 +362,7 @@ impl DiffStats {
             || self.indexes_added > 0
             || self.indexes_dropped > 0
             || self.indexes_modified > 0
+            || self.table_options_changed > 0
     }
 
     /// 是否有需要人工处理的删除或同名索引修改
@@ -368,6 +371,11 @@ impl DiffStats {
             || self.columns_dropped > 0
             || self.indexes_dropped > 0
             || self.indexes_modified > 0
+    }
+
+    /// 是否有人工处理提示，包括不会自动执行的表选项变更。
+    pub fn has_warnings(&self) -> bool {
+        self.has_dangerous_operations() || self.table_options_changed > 0
     }
 
     /// 是否有可执行的操作（非删除操作）
@@ -405,6 +413,9 @@ impl DiffStats {
         }
         if self.indexes_modified > 0 {
             parts.push(format!("修改索引({})", self.indexes_modified));
+        }
+        if self.table_options_changed > 0 {
+            parts.push(format!("表选项变更({}·警告)", self.table_options_changed));
         }
 
         if parts.is_empty() {

@@ -1,7 +1,7 @@
 use crate::docker_service::{DockerServiceError, DockerServiceResult};
 use client_core::constants::timeout;
-use client_core::container::{ContainerHealthStatus, DockerManager};
 use client_core::container::ComposeLabels;
+use client_core::container::{ContainerHealthStatus, DockerManager};
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;

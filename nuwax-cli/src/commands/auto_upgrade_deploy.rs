@@ -1238,7 +1238,7 @@ async fn execute_sql_diff_upgrade(executor: &MySqlExecutor) -> Result<()> {
 
     // 如果同时包含警告，提示用户注意（这是混合场景：既有新增/修改，又有删除）
     if diff_result.has_warnings {
-        warn!("⚠️ Note: diff contains executable SQL and deletion warnings");
+        warn!("⚠️ Note: diff contains executable SQL and manual-change warnings");
         warn!("✓ Add/modify operations will execute normally");
         warn!("✗ Manual changes were skipped and must be reviewed separately");
         warn!("📄 See details: {path}", path = diff_sql_path.display());

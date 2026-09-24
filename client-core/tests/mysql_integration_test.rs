@@ -43,6 +43,14 @@ async fn test_partial_ddl_failure_is_reconciled_by_live_rediff() -> Result<()> {
 
     let final_diff = generate_live_schema_diff(&executor, &target, "recovery").await?;
     assert!(!final_diff.has_executable_sql);
+
+    let manual_target = format!("{} ENGINE=MyISAM;", target.trim_end_matches(';'));
+    let manual_diff = generate_live_schema_diff(&executor, &manual_target, "manual").await?;
+    assert!(!manual_diff.has_executable_sql);
+    assert!(manual_diff.has_warnings);
+    assert!(manual_diff.diff_sql.contains("table option ENGINE differs"));
+    assert!(manual_diff.description.contains("manual-change warnings"));
+
     executor
         .execute_single(&format!("DROP TABLE IF EXISTS `{table}`"))
         .await?;

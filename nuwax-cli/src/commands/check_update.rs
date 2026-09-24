@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::DateTime;
-use client_core::constants::api::endpoints::{
-    CLI_VERSION_OSS_BETA, CLI_VERSION_OSS_PROD,
-};
 use client_core::ReleaseVersion;
+use client_core::constants::api::endpoints::{CLI_VERSION_OSS_BETA, CLI_VERSION_OSS_PROD};
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -339,7 +337,10 @@ pub async fn fetch_latest_version_multi_source() -> Result<GitHubRelease> {
 
 /// 比较版本号
 pub fn compare_versions(current: &str, latest: &str) -> Ordering {
-    match (ReleaseVersion::parse(current), ReleaseVersion::parse(latest)) {
+    match (
+        ReleaseVersion::parse(current),
+        ReleaseVersion::parse(latest),
+    ) {
         (Ok(a), Ok(b)) => a.cmp(&b),
         _ => {
             warn!("Failed to parse version, skip update comparison");

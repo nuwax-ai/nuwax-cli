@@ -66,6 +66,7 @@ pub fn generate_mysql_diff(
                     || table_stats.indexes_added > 0
                     || table_stats.indexes_dropped > 0
                     || table_stats.indexes_modified > 0
+                    || table_stats.table_options_changed > 0
                 {
                     stats.tables_modified += 1;
                 }
@@ -75,6 +76,7 @@ pub fn generate_mysql_diff(
                 stats.indexes_added += table_stats.indexes_added;
                 stats.indexes_dropped += table_stats.indexes_dropped;
                 stats.indexes_modified += table_stats.indexes_modified;
+                stats.table_options_changed += table_stats.table_options_changed;
             }
         }
     }
@@ -82,17 +84,11 @@ pub fn generate_mysql_diff(
     let result = diff_sql.join("\n");
 
     if !stats.has_changes() {
-        // diff_sql 前 3 个条目是固定头部注释；没有任何表级差异/警告时才返回空串。
-        // 表选项等警告仅在此时保留输出，避免被早退静默丢弃。
-        if diff_sql.len() <= 3 {
-            info!("No actual table structure differences found");
-            return Ok((String::new(), stats));
-        }
-        info!("Only manual-change warnings found, no executable table structure differences");
-        return Ok((result, stats));
+        info!("No actual table structure differences found");
+        return Ok((String::new(), stats));
     }
 
-    if !stats.has_executable_operations() && stats.has_dangerous_operations() {
+    if !stats.has_executable_operations() && stats.has_warnings() {
         info!("Schema differences require manual changes, no executable SQL");
     }
 
@@ -126,8 +122,7 @@ pub fn generate_table_diff(
     // 而 SHOW CREATE TABLE 恒显式输出，单侧比较会产生噪音）。
     // 变更只输出人工处理警告，不自动生成 SQL：ENGINE/CHARSET/COLLATE 变更
     // 需要 ALTER ... ENGINE / CONVERT TO CHARACTER SET，会重写数据或重建表。
-    // 刻意不进 DiffStats：计入 has_warnings 会把自动部署链路的纯选项差异
-    // 归档为 only-manual-changes，且该标志语义应保留给 DROP 类危险操作。
+    // 单独统计为人工处理提示，避免 Live Diff 把纯选项差异误报为无变化。
     for (label, old_value, new_value) in [
         ("ENGINE", &old_table.engine, &new_table.engine),
         ("CHARSET", &old_table.charset, &new_table.charset),
@@ -146,6 +141,7 @@ pub fn generate_table_diff(
             diffs.push(format!(
                 "-- ⚠️  Warning: table option {label} differs (current: {old_v}, target: {new_v}); ENGINE/CHARSET/COLLATE changes need manual ALTER (CONVERT TO), no SQL generated for data safety"
             ));
+            stats.table_options_changed += 1;
         }
     }
 

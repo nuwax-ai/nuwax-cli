@@ -51,7 +51,7 @@ pub fn generate_schema_diff(
             let to_tables = parse_sql_tables(to_sql)?;
 
             // 生成差异SQL
-            let (diff_sql, _stats) = generate_mysql_diff(&from_tables, &to_tables)?;
+            let (diff_sql, stats) = generate_mysql_diff(&from_tables, &to_tables)?;
 
             let description = if diff_sql.trim().is_empty() {
                 format!(
@@ -67,26 +67,32 @@ pub fn generate_schema_diff(
 
                 // 分析差异类型
                 let mut change_types = Vec::new();
-                if diff_sql.contains("CREATE TABLE") {
+                if stats.tables_added > 0 {
                     change_types.push("new tables");
                 }
-                if diff_sql.contains("DROP TABLE") {
+                if stats.tables_dropped > 0 {
                     change_types.push("dropped tables");
                 }
-                if diff_sql.contains("ALTER TABLE") && diff_sql.contains("ADD COLUMN") {
+                if stats.columns_added > 0 {
                     change_types.push("new columns");
                 }
-                if diff_sql.contains("ALTER TABLE") && diff_sql.contains("DROP COLUMN") {
+                if stats.columns_dropped > 0 {
                     change_types.push("dropped columns");
                 }
-                if diff_sql.contains("ALTER TABLE") && diff_sql.contains("MODIFY COLUMN") {
+                if stats.columns_modified > 0 {
                     change_types.push("modified columns");
                 }
-                if diff_sql.contains("ALTER TABLE") && diff_sql.contains("ADD KEY") {
+                if stats.indexes_added > 0 {
                     change_types.push("new indexes");
                 }
-                if diff_sql.contains("ALTER TABLE") && diff_sql.contains("DROP KEY") {
+                if stats.indexes_dropped > 0 {
                     change_types.push("dropped indexes");
+                }
+                if stats.indexes_modified > 0 {
+                    change_types.push("modified indexes");
+                }
+                if stats.table_options_changed > 0 {
+                    change_types.push("table option changes");
                 }
 
                 let change_summary = if change_types.is_empty() {
@@ -95,13 +101,22 @@ pub fn generate_schema_diff(
                     change_types.join(", ")
                 };
 
-                format!(
-                    "Version {} to {}: {} - generated {} lines of executable diff SQL",
-                    from_version.unwrap_or("unknown"),
-                    to_version,
-                    change_summary,
-                    lines_count
-                )
+                if !stats.has_executable_operations() && stats.has_warnings() {
+                    format!(
+                        "Version {} to {}: {} - only includes manual-change warnings, no executable SQL",
+                        from_version.unwrap_or("unknown"),
+                        to_version,
+                        change_summary
+                    )
+                } else {
+                    format!(
+                        "Version {} to {}: {} - generated {} lines of executable diff SQL",
+                        from_version.unwrap_or("unknown"),
+                        to_version,
+                        change_summary,
+                        lines_count
+                    )
+                }
             };
 
             info!("Diff generation completed: {}", description);
@@ -140,7 +155,7 @@ pub async fn generate_live_schema_diff(
 
     // 使用统计信息判断是否有可执行SQL和警告
     let has_executable_sql = stats.has_executable_operations();
-    let has_warnings = stats.has_dangerous_operations();
+    let has_warnings = stats.has_warnings();
 
     let description = if !stats.has_changes() {
         format!("Online schema to {to_version}: no actual schema differences")

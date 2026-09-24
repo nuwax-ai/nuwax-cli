@@ -7,6 +7,18 @@ use ducker::docker::{container::DockerContainer, util::new_local_docker_connecti
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
+fn compose_container_is_ready(state: &serde_json::Value, is_oneshot: bool) -> bool {
+    let running = state["Running"].as_bool().unwrap_or(false);
+    if is_oneshot {
+        return !running
+            && state["Status"].as_str() == Some("exited")
+            && state["ExitCode"].as_i64() == Some(0);
+    }
+
+    let health = state["Health"]["Status"].as_str();
+    running && (health.is_none() || health == Some("healthy"))
+}
+
 impl DockerManager {
     /// 创建并启动指定的 Compose 服务；默认保留依赖启动规则。
     pub async fn up_services(&self, service_names: &[String], no_recreate: bool) -> Result<()> {
@@ -92,18 +104,12 @@ impl DockerManager {
                     ));
                 }
                 let states = String::from_utf8(inspect.stdout)?;
+                let is_oneshot = self.is_oneshot_service(name).await?;
                 let mut ready_count = 0;
                 for state_json in states.lines() {
                     let state: serde_json::Value = serde_json::from_str(state_json)?;
                     let running = state["Running"].as_bool().unwrap_or(false);
-                    let health = state["Health"]["Status"].as_str();
-                    let completed_oneshot = !running
-                        && state["Status"].as_str() == Some("exited")
-                        && state["ExitCode"].as_i64() == Some(0)
-                        && self.is_oneshot_service(name).await?;
-                    if (running && (health.is_none() || health == Some("healthy")))
-                        || completed_oneshot
-                    {
+                    if compose_container_is_ready(&state, is_oneshot) {
                         ready_count += 1;
                     } else if !running && state["Status"].as_str() == Some("exited") {
                         return Err(anyhow::anyhow!(
@@ -686,5 +692,40 @@ impl DockerManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::compose_container_is_ready;
+    use serde_json::json;
+
+    #[test]
+    fn oneshot_must_finish_successfully_before_dependents_start() {
+        let running = json!({"Running": true, "Status": "running", "ExitCode": 0});
+        assert!(!compose_container_is_ready(&running, true));
+        let healthy = json!({"Running": true, "Status": "running", "ExitCode": 0,
+            "Health": {"Status": "healthy"}});
+        assert!(!compose_container_is_ready(&healthy, true));
+        let completed = json!({"Running": false, "Status": "exited", "ExitCode": 0});
+        assert!(compose_container_is_ready(&completed, true));
+        let failed = json!({"Running": false, "Status": "exited", "ExitCode": 1});
+        assert!(!compose_container_is_ready(&failed, true));
+    }
+
+    #[test]
+    fn persistent_service_requires_running_and_healthy_when_configured() {
+        let running = json!({"Running": true, "Status": "running"});
+        assert!(compose_container_is_ready(&running, false));
+        for health in ["starting", "unhealthy", "healthy"] {
+            let state = json!({"Running": true, "Health": {"Status": health}});
+            assert_eq!(
+                compose_container_is_ready(&state, false),
+                health == "healthy"
+            );
+        }
+        let exited = json!({"Running": false, "Status": "exited", "ExitCode": 0});
+        assert!(!compose_container_is_ready(&exited, false));
+        assert!(!compose_container_is_ready(&json!({}), false));
     }
 }

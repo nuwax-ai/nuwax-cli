@@ -1423,12 +1423,25 @@ CREATE TABLE `t` (
     PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
     "#;
-    let (diff_sql, _) =
+    let (diff_sql, description) =
         generate_schema_diff(Some(old_sql), new_sql, Some("1.0.0"), "1.1.0").unwrap();
     assert!(
         diff_sql.contains("table option COLLATION differs"),
         "显式声明的 collation 漂移必须给出警告: {diff_sql}"
     );
+    assert!(
+        description.contains("manual-change warnings"),
+        "{description}"
+    );
+    let (_, stats) = super::differ::generate_mysql_diff(
+        &parse_sql_tables(old_sql).unwrap(),
+        &parse_sql_tables(new_sql).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stats.table_options_changed, 1);
+    assert!(stats.has_changes());
+    assert!(stats.has_warnings());
+    assert!(!stats.has_executable_operations());
     assert!(
         !diff_sql.contains("ALTER TABLE"),
         "表选项变更不自动生成 SQL（需人工 CONVERT TO）: {diff_sql}"

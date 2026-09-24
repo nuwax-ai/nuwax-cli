@@ -30,15 +30,15 @@ pub mod downloader;
 pub mod error;
 pub mod mysql_executor;
 pub mod patch_executor;
+pub mod release_version;
 pub mod sql_diff;
 pub mod upgrade;
 pub mod upgrade_strategy;
 pub mod version;
-pub mod release_version;
 
-pub use release_version::ReleaseVersion;
 pub use database_manager::DatabaseManager;
 pub use error::*;
+pub use release_version::ReleaseVersion;
 
 // 导出 i18n 相关
 pub use rust_i18n::{set_locale, t};

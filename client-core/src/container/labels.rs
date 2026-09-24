@@ -28,7 +28,10 @@ pub enum ContainerHealthStatus {
 
 impl DockerManager {
     /// 从 Docker API 获取容器的 docker-compose labels（不要求容器一定在 compose 中）
-    pub async fn get_container_compose_labels(&self, container_name: &str) -> Result<Option<ComposeLabels>> {
+    pub async fn get_container_compose_labels(
+        &self,
+        container_name: &str,
+    ) -> Result<Option<ComposeLabels>> {
         match Docker::connect_with_socket_defaults() {
             Ok(docker) => {
                 let containers = docker
@@ -119,4 +122,3 @@ impl DockerManager {
         }
     }
 }
-
