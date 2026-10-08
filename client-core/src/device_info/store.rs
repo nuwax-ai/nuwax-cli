@@ -2,6 +2,7 @@
 //! 后续重采与之比对——漂移时维持冻结值（授权连续性优先），
 //! 仅显式 `--refresh` 才重新绑定（设计文档 §5）。
 
+use crate::atomic_file::{PermissionsPolicy, write_atomic};
 use crate::device_info::{CollectedDevice, Fingerprint, collect, fingerprint};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -148,7 +149,9 @@ pub(crate) fn resolve_with_collected(
             device_id: frozen.device_id.clone(),
             field_hashes: frozen.field_hashes.clone(),
         },
-        environment: frozen.environment.clone(),
+        // Only identity and its binding time are frozen. Resource limits and
+        // display information must describe the host at the current collection.
+        environment: current.environment.clone(),
         collected_at: frozen.collected_at.clone(),
         source: if drift.is_some() {
             ResolvedSource::FrozenDrifted
@@ -210,29 +213,9 @@ fn recompute_from_frozen(record: &FrozenRecord) -> String {
 
 /// 保存冻结文件（Unix 下权限 0600，仅当前用户可读写）
 pub fn save(path: &Path, record: &FrozenRecord) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create data dir: {}", parent.display()))?;
-    }
     let content = serde_json::to_string_pretty(record).context("Failed to serialize record")?;
-    std::fs::write(path, content)
-        .with_context(|| format!("Failed to write fingerprint file: {}", path.display()))?;
-    restrict_permissions(path);
-    Ok(())
-}
-
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o600);
-    if let Err(e) = std::fs::set_permissions(path, perms) {
-        warn!("Failed to chmod 600 on {}: {e}", path.display());
-    }
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) {
-    // Windows 依赖用户目录 ACL；冻结文件位于部署目录内，跟随目录权限
+    write_atomic(path, content.as_bytes(), PermissionsPolicy::Private)
+        .with_context(|| format!("Failed to save fingerprint file: {}", path.display()))
 }
 
 /// 字段级差异：changed / unreadable_now / newly_readable
@@ -351,6 +334,29 @@ mod tests {
         let second = resolve_with_collected(&path, &device, false).expect("second");
         assert_eq!(second.source, ResolvedSource::FrozenConfirmed);
         assert_eq!(first.fingerprint.device_id, second.fingerprint.device_id);
+    }
+
+    #[test]
+    fn environment_changes_preserve_identity_and_binding_time() {
+        let (_dir, path) = temp_path();
+        let before = test_collected(Some("aaa111"), Some("AA:BB:CC:DD:EE:FF"));
+        let first = resolve_with_collected(&path, &before, false).expect("freeze");
+        let mut current = before.clone();
+        current.environment.hostname = "renamed-host".into();
+        current.environment.cpu_cores = 16;
+        current.environment.memory_gb = 128;
+        current.environment.cpu_model = None;
+        let resolved = resolve_with_collected(&path, &current, false).expect("resolve");
+        assert_eq!(resolved.source, ResolvedSource::FrozenConfirmed);
+        assert_eq!(resolved.fingerprint, first.fingerprint);
+        assert_eq!(resolved.collected_at, first.collected_at);
+        assert_eq!(resolved.environment.hostname, "renamed-host");
+        assert_eq!(resolved.environment.cpu_cores, 16);
+        assert_eq!(resolved.environment.memory_gb, 128);
+        assert!(resolved.environment.cpu_model.is_none());
+        // The original snapshot stays available for local diagnostics.
+        let frozen = load_optional(&path).expect("load").expect("record");
+        assert_eq!(frozen.environment.cpu_cores, 8);
     }
 
     #[test]

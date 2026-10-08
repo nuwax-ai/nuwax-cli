@@ -22,8 +22,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate-device-fingerprint:
+    name: Cross-platform device fingerprint checks
+    uses: ./.github/workflows/device-fingerprint-checks.yml
+    permissions:
+      contents: read
+
   # 检查版本号和决定是否需要发布
   check-version:
+    needs: validate-device-fingerprint
     name: Check Version and Decide Release
     runs-on: ubuntu-latest
     env:

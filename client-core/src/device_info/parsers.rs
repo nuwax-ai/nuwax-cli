@@ -10,7 +10,9 @@ pub fn parse_wmic_value(output: &str, key: &str) -> Option<String> {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix(&prefix) {
             let value = rest.trim();
-            return normalize_serial_like(value);
+            if let Some(serial) = normalize_serial_like(value) {
+                return Some(serial);
+            }
         }
     }
     None
@@ -27,35 +29,64 @@ pub fn parse_powershell_single(output: &str) -> Option<String> {
 /// "AA-BB-CC-DD-EE-FF","\Device\Tcpip_{...}"
 /// "Media Disconnected","\Device\Tcpip_{...}"
 /// ```
-/// 取首个格式合法且已连接的物理地址
+/// 取首个格式合法且具有 TCP/IP transport 的地址。
+/// 断开的网卡仍会有合法 MAC，必须检查第二列；传输标识不依赖系统语言。
 pub fn parse_getmac_csv(output: &str) -> Option<String> {
     for line in output.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let Some(addr) = first_csv_field(trimmed) else {
+        let Some((addr, transport)) = two_csv_fields(trimmed) else {
             continue;
         };
-        if addr.eq_ignore_ascii_case("Media Disconnected") || addr.eq_ignore_ascii_case("N/A") {
+        const TRANSPORT_PREFIX: &str = "\\Device\\Tcpip_";
+        if !transport
+            .get(..TRANSPORT_PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TRANSPORT_PREFIX))
+            || transport.len() == TRANSPORT_PREFIX.len()
+        {
             continue;
         }
-        // 蓝牙等非以太网传输通常可由地址格式过滤；getmac 地址用 '-' 分隔
+        // getmac 地址用 '-' 分隔；零地址或广播地址不能作为设备身份。
         let cleaned = addr.replace(['-', ':'], "");
-        if cleaned.len() == 12 && cleaned.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Some(addr.to_string());
+        if cleaned.len() == 12
+            && cleaned.chars().all(|c| c.is_ascii_hexdigit())
+            && cleaned != "000000000000"
+            && !cleaned.eq_ignore_ascii_case("ffffffffffff")
+        {
+            return Some(addr);
         }
     }
     None
 }
 
-/// 取 CSV 双字段行（值带双引号）的首个字段；
-/// 完整的配对切分本身校验了行形状（两个引号包裹字段）
-fn first_csv_field(line: &str) -> Option<&str> {
-    let line = line.strip_prefix('"')?;
-    let (first, rest) = line.split_once("\",\"")?;
-    rest.strip_suffix('"')?;
-    Some(first)
+/// getmac 无 /v 时输出两个带引号的 CSV 字段，支持 CSV 的双引号转义。
+fn two_csv_fields(line: &str) -> Option<(String, String)> {
+    fn field(input: &str) -> Option<(String, &str)> {
+        let input = input.strip_prefix('"')?;
+        let mut value = String::new();
+        let mut characters = input.char_indices().peekable();
+        while let Some((index, character)) = characters.next() {
+            if character == '"' {
+                if characters.peek().is_some_and(|(_, next)| *next == '"') {
+                    characters.next();
+                    value.push('"');
+                } else {
+                    return Some((value, &input[index + 1..]));
+                }
+            } else {
+                value.push(character);
+            }
+        }
+        None
+    }
+    let (address, rest) = field(line)?;
+    let (transport, trailing) = field(rest.strip_prefix(',')?.trim_start())?;
+    if !trailing.trim().is_empty() {
+        return None;
+    }
+    Some((address, transport))
 }
 
 /// OEM 占位序列号视为缺失：空 / None / Default string / To be filled by O.E.M. 等
@@ -110,6 +141,18 @@ mod tests {
     }
 
     #[test]
+    fn wmic_skips_empty_and_placeholder_devices() {
+        assert_eq!(
+            parse_wmic_value(
+                "SerialNumber=\r\nSerialNumber=Default string\r\nSerialNumber=DISK-42\r\n",
+                "SerialNumber"
+            )
+            .as_deref(),
+            Some("DISK-42")
+        );
+    }
+
+    #[test]
     fn parses_powershell_single() {
         assert_eq!(
             parse_powershell_single("\r\nPF3XYZ99\r\n").as_deref(),
@@ -136,6 +179,32 @@ mod tests {
     fn getmac_skips_disconnected() {
         let only_disconnected = "\"Media Disconnected\",\"\\Device\\Tcpip_{D4}\"\r\n";
         assert_eq!(parse_getmac_csv(only_disconnected), None);
+    }
+
+    #[test]
+    fn getmac_valid_mac_with_disconnected_transport_is_skipped() {
+        let output = concat!(
+            "\"AA-BB-CC-11-22-33\",\"Media disconnected\"\r\n",
+            "\"11-22-33-44-55-66\",\"媒体已断开连接\"\r\n",
+            "\"00-00-00-00-00-00\",\"\\Device\\Tcpip_{ZERO}\"\r\n",
+            "\"22-33-44-55-66-77\",\"\\Device\\Tcpip_{CONNECTED}\"\r\n"
+        );
+        assert_eq!(
+            parse_getmac_csv(output).as_deref(),
+            Some("22-33-44-55-66-77")
+        );
+    }
+
+    #[test]
+    fn getmac_requires_exactly_two_csv_fields() {
+        assert_eq!(
+            parse_getmac_csv("\"AA-BB-CC-11-22-33\",\"\\Device\\Tcpip_{X}\",\"extra\""),
+            None
+        );
+        assert_eq!(
+            parse_getmac_csv("\"AA-BB-CC-11-22-33\",\"\\Device\\Tcpip_{X}"),
+            None
+        );
     }
 
     #[test]

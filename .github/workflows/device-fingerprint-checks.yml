@@ -1,0 +1,89 @@
+name: Device fingerprint checks
+
+'on':
+  pull_request:
+    paths:
+      - 'client-core/src/atomic_file.rs'
+      - 'client-core/src/device_info/**'
+      - 'client-core/src/container/**'
+      - 'client-core/src/constants.rs'
+      - 'client-core/src/mysql_executor.rs'
+      - 'nuwax-cli/src/utils/**'
+      - 'nuwax-cli/src/commands/docker_service.rs'
+      - 'nuwax-cli/src/commands/auto_upgrade_deploy.rs'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/device-fingerprint-checks.yml'
+  push:
+    branches: [test, main]
+    paths:
+      - 'client-core/src/atomic_file.rs'
+      - 'client-core/src/device_info/**'
+      - 'client-core/src/container/**'
+      - 'client-core/src/constants.rs'
+      - 'client-core/src/mysql_executor.rs'
+      - 'nuwax-cli/src/utils/**'
+      - 'nuwax-cli/src/commands/docker_service.rs'
+      - 'nuwax-cli/src/commands/auto_upgrade_deploy.rs'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/device-fingerprint-checks.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      # Match release builds: smaller C++ translation units prevent MSVC OOM.
+      LIBDUCKDB_UNITY_BUILD: ${{ matrix.os == 'windows-latest' && '0' || '1' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: device-fingerprint-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test atomic file replacement
+        run: cargo test --locked -p client-core atomic_file::tests
+      - name: Test fingerprints and platform collectors
+        run: 'cargo test --locked -p client-core device_info::'
+      - name: Test lossless env editing
+        run: cargo test --locked -p nuwax-cli utils::env_manager::tests
+      - name: Test device env injection
+        run: cargo test --locked -p nuwax-cli utils::device_env::tests
+      - name: Test Compose managed environment inheritance
+        run: cargo test --locked -p client-core managed_compose_environment_tests
+      - name: Test isolated Compose snapshots and cache invalidation
+        run: cargo test --locked -p client-core isolated_compose_environment_tests
+      - name: Test configured deployment paths
+        run: cargo test --locked -p nuwax-cli custom_deployment_paths_tests
+      - name: Test literal MySQL credentials and missing references
+        run: cargo test --locked -p client-core mysql_executor::tests
+      - name: Test native Compose interpolation
+        run: cargo test --locked -p client-core container::interpolation::tests

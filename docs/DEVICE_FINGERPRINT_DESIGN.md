@@ -165,6 +165,12 @@ device_id       = "v1:" + SHA-256(canonical)         // 64 hex
 3. **不一致（硬件变更）** → 默认**维持冻结的 device_id 不变**，仅把漂移详情记录进冻结文件的 `drift` 字段并打 warn 日志；授权连续性优先；
 4. 用户显式执行 `nuwax-cli device-info --refresh` 才接受新值重新冻结（对应"硬件变更需重新授权"的售后流程）。
 
+冻结范围仅包含身份原始值、字段哈希、`device_id` 和 `collected_at`。输出与注入的
+`environment` 每次采用当前采集结果，CPU/内存扩容和主机名修改无需 `--refresh`；
+冻结文件中的 `environment` 保留为首次采集快照。已有 v1 冻结文件无需迁移。
+冻结文件与 `.env` 均先在同目录写入临时文件并同步，再原子替换；写入失败保留有效旧文件。
+指纹文件保持 Unix `0600`，`.env` 保留原文件权限；通过符号链接访问时更新其目标并保留链接。
+
 复用 `client-core/src/container/environment.rs` 已有的 WSL 检测；检测到 `/.dockerenv` 时标记 `containerized: true` 并 warn（提示 nuwax-cli 被装进了容器，指纹是容器视角）。
 
 ## 6. 注入机制
@@ -191,7 +197,7 @@ DEVICE_INFO_CONTAINERIZED=false
 ```
 
 - **逐字段变量而非 JSON 字符串**：Java 侧经 yml 原生 map 占位符 + 宽松绑定直接映射到 `device.fields.*` / `device.info.*`，零 JSON 解析、零自定义 Converter；
-- 缺失字段（平台差异/权限）不写键，yml 占位符默认值兜底——即"未采集"的表达方式；
+- 缺失字段（平台差异/权限）不写键，并删除已有同名托管键的所有定义，yml 占位符默认值兜底——即"未采集"的表达方式；
 - 自由文本（hostname / cpu_model / collected_at）**单引号包裹**且写入前剔除单引号与控制字符，避免破坏 dotenvy / compose 解析；哈希与枚举值天然安全；
 - 环境变量只含哈希不含原始序列号；原始值仅存在于冻结文件（0600）中，支持排障时直接查看。
 
@@ -208,11 +214,15 @@ impl EnvManager {
 
 配套单测：新增键追加、已有键覆盖、注释与引号保留、幂等重复调用。
 
+EnvManager 保留原文件内容和变量位置，仅替换实际修改的值；其他字段的转义、
+引号、注释、多行值、BOM、CRLF 和尾换行均保持原样。新增 `remove_variable` 清除缺失字段，
+不通过重新序列化整个文件更新设备信息。
+
 ### 6.3 集成点（nuwax-cli）
 
 | 位置 | 时机 | 动作 |
 |---|---|---|
-| `commands/docker_service.rs::prepare_docker_services` | 部署准备阶段（首个部署与升级均经过） | 调用 `ensure_device_env(get_env_file_path())`：冻结文件加载/首次生成 → upsert 三个键 |
+| `commands/docker_service.rs::prepare_docker_services` | 部署准备阶段（首个部署与升级均经过） | 先选择 DockerManager，使用其实际 env/compose 路径调用注入入口：冻结文件加载/首次生成 → upsert 15 个托管变量（缺失键删除） |
 | `commands/docker_service.rs::start_docker_services` | 每次 `docker-service start` | 同上（幂等，秒级） |
 | `commands/auto_upgrade_deploy.rs` | offline-deploy | 复用 staged 部署路径 → 已被 `prepare_docker_services` 覆盖，无需单独改动 |
 
@@ -220,8 +230,10 @@ impl EnvManager {
 
 实现注意：
 
-1. `ensure_device_env` 写完 `.env` 后需使 DockerManager 的 compose 配置缓存失效——与 `update_frontend_port` 同一注意点（`prepare_docker_services` 调用方已有失效逻辑，`start_docker_services` 路径实现时需确认补齐）；
+1. 部署/启动先确定实际 DockerManager，再按其 `.env` 路径修改端口和注入；写完后使同一 compose/env 缓存键失效。独立 `device-info --apply` 保留部署根目录下的默认路径；
 2. upsert 每次写入的都是冻结文件中的真实值，因此部署/启动路径可**自愈**用户对 `DEVICE_*` 键的手改（升级流程对 `.env` 的"保留旧值"合并不影响——注入永远发生在合并之后）。
+3. Compose 解析使用局部环境变量映射，不导出到 CLI 进程。未托管变量遵循原生 Compose 的宿主环境优先级；15 个托管变量以当前文件为准，缺失字段不会继承旧进程值。插值在 YAML 解析后的字符串上执行，避免密码中的 ` #`、`: ` 等内容被当作语法；
+4. 启动 `docker compose` 与 `docker-compose` 子进程时重新读取托管变量，确保缓存预热或自动备份后的重启仍使用修复后的指纹。
 
 ### 6.4 build-agent-docker 改动
 

@@ -82,6 +82,10 @@ DEVICE_INFO_CONTAINERIZED=false
 
 注意：**缺失字段不写键**（如 macOS 没有 `DEVICE_FIELDS_DISK_SERIAL`），yml 占位符默认空串/默认值兜底——这就是"该平台未采集"的表达方式。
 
+CLI 再次注入时会删除已缺失字段的旧定义，避免刷新后 `DEVICE_ID` 与字段哈希不一致。
+已有 v1 身份与冻结时间继续保留；`hostname`、CPU 和内存等环境信息每次采用当前采集值，
+扩容无需重新绑定授权。
+
 ## 3. Java 侧绑定（原生 POJO，推荐）
 
 ```java
