@@ -822,11 +822,7 @@ impl HealthChecker {
 
                 #[cfg(windows)]
                 fn normalize_win_path(path: &str) -> &str {
-                    if path.starts_with(r"\\?\") {
-                        &path[4..]
-                    } else {
-                        path
-                    }
+                    path.strip_prefix(r"\\?\").unwrap_or(path)
                 }
 
                 #[cfg(windows)]

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
 use client_core::sql_diff::generate_live_schema_diff;
-use sqlx::mysql::MySqlPoolOptions;
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -83,9 +83,16 @@ async fn test_mysql_executor_integration() -> Result<()> {
     // 2.1. 使用 root 用户确保测试用户拥有所需权限
     println!("🔧 2.1. 使用 root 用户确保测试用户拥有权限...");
     let mut root_config = config.clone();
-    root_config.user = "root".to_string();
-    // 注意：这里我们假设 root 密码也是 'root'，这通常在 .env 文件中配置
-    root_config.password = "root".to_string();
+    if root_config.user != "root" {
+        root_config.user = "root".to_string();
+        root_config.password = if std::env::var_os("TEST_MYSQL_URL").is_some() {
+            std::env::var("TEST_MYSQL_ROOT_PASSWORD").context(
+                "TEST_MYSQL_ROOT_PASSWORD is required for an external non-root test user",
+            )?
+        } else {
+            "root".to_string()
+        };
+    }
 
     let root_executor = MySqlExecutor::new(root_config);
     let grant_sql = format!("GRANT ALL PRIVILEGES ON *.* TO '{}'@'%'", config.user);
@@ -128,14 +135,16 @@ async fn test_mysql_executor_integration() -> Result<()> {
 
     // 5. 连接数据库并验证结果
     println!("🔧 5. 连接数据库并验证结果...");
-    let db_url = format!(
-        "mysql://{}:{}@{}:{}/{}",
-        config.user, config.password, config.host, config.port, TEST_DB
-    );
+    let connection_options = MySqlConnectOptions::new()
+        .host(&config.host)
+        .port(config.port)
+        .username(&config.user)
+        .password(&config.password)
+        .database(TEST_DB);
 
     let pool = MySqlPoolOptions::new()
         .max_connections(1)
-        .connect(&db_url)
+        .connect_with(connection_options)
         .await
         .context("无法连接到测试数据库")?;
 
@@ -360,12 +369,14 @@ fn mysql_config_from_url(raw_url: &str) -> Result<MySqlConfig> {
         .ok_or_else(|| anyhow!("TEST_MYSQL_URL 缺少 host"))?
         .to_string();
     let port = url.port().unwrap_or(3306);
-    let user = url.username().to_string();
+    let options = mysql_async::Opts::from_url(raw_url)
+        .map_err(|_| anyhow!("TEST_MYSQL_URL 不是合法 MySQL 连接 URL"))?;
+    let user = options.user().unwrap_or_default().to_string();
     if user.is_empty() {
         return Err(anyhow!("TEST_MYSQL_URL 缺少用户名"));
     }
-    let password = url.password().unwrap_or_default().to_string();
-    let database = url.path().trim_start_matches('/').to_string();
+    let password = options.pass().unwrap_or_default().to_string();
+    let database = options.db_name().unwrap_or_default().to_string();
     if database.is_empty() {
         return Err(anyhow!("TEST_MYSQL_URL 缺少数据库名"));
     }
@@ -381,6 +392,17 @@ fn mysql_config_from_url(raw_url: &str) -> Result<MySqlConfig> {
 
 fn is_mysql_required() -> bool {
     std::env::var("TEST_MYSQL_REQUIRED").is_ok_and(|value| value == "1" || value == "true")
+}
+
+#[test]
+fn test_mysql_url_credentials_are_decoded_once() -> Result<()> {
+    let config = mysql_config_from_url(
+        "mysql://test%40user:p%40ss%3A%23%24%25E4@127.0.0.1:33316/disposable",
+    )?;
+    assert_eq!(config.user, "test@user");
+    assert_eq!(config.password, "p@ss:#$%E4");
+    assert_eq!(config.database, "disposable");
+    Ok(())
 }
 
 fn should_cleanup_mysql() -> bool {

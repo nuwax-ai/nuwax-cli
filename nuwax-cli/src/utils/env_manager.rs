@@ -96,7 +96,7 @@ impl EnvManager {
         } else {
             "\n"
         };
-        let assignment = Regex::new(r"^[ \t]*(?:export[ \t]+)?([\w.]+)[ \t]*=")?;
+        let assignment = Regex::new(r"^[ \t]*(?:export[ \t]+)?([\w.-]+)[ \t]*[=:]")?;
         // Windows editors can add a UTF-8 BOM. It belongs to the document,
         // not to its first key, and must survive even if that key is removed.
         let mut start = if content.starts_with('\u{feff}') {
@@ -294,23 +294,38 @@ impl EnvManager {
 /// Locate a logical assignment, including newlines inside quoted values.
 /// Return value end, record end including newline, and optional comment end.
 fn scan_rhs(content: &str, start: usize) -> Result<(usize, usize, Option<usize>)> {
-    let mut quote = None;
+    // Quotes delimit a value only at its beginning. In an unquoted value,
+    // apostrophes such as PASSWORD=let's-go are literal source characters.
+    let value_start =
+        start + content[start..].len() - content[start..].trim_start_matches([' ', '\t']).len();
+    let mut quote = content[value_start..]
+        .chars()
+        .next()
+        .filter(|character| matches!(character, '\'' | '"'));
     let mut escaped = false;
     let mut previous_whitespace = true;
-    for (offset, character) in content[start..].char_indices() {
+    let mut characters = content[start..].char_indices().peekable();
+    while let Some((offset, character)) = characters.next() {
         let index = start + offset;
+        if index == value_start && quote.is_some() {
+            previous_whitespace = false;
+            continue;
+        }
         if character == '\n' && quote.is_none() {
             return Ok((index, index + 1, None));
         }
         if escaped {
             escaped = false;
-        } else if character == '\\' && quote != Some('\'') {
+        } else if character == '\\'
+            && (quote == Some('"')
+                || (quote == Some('\'')
+                    && characters.peek().is_some_and(|(_, next)| *next == '\'')))
+        {
             escaped = true;
-        } else if Some(character) == quote {
+        } else if quote.is_some() && Some(character) == quote {
             quote = None;
         } else if quote.is_none() {
             match character {
-                '\'' | '"' => quote = Some(character),
                 '#' if previous_whitespace => {
                     let end = content[index..]
                         .find('\n')
@@ -343,7 +358,7 @@ fn scan_rhs(content: &str, start: usize) -> Result<(usize, usize, Option<usize>)
 /// Original source is always retained separately for untouched assignments.
 fn parse_value(raw: &str) -> (String, QuoteType) {
     if raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\'') {
-        return (raw[1..raw.len() - 1].to_string(), QuoteType::Single);
+        return (raw[1..raw.len() - 1].replace("\\'", "'"), QuoteType::Single);
     }
     if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
         let mut decoded = String::new();
@@ -463,11 +478,11 @@ pub fn load_env_variables(env_path: &Path) -> Result<HashMap<String, String>> {
 mod tests {
     use super::*;
     use std::fs;
-    use tempfile::NamedTempFile;
 
     #[test]
     fn injection_preserves_quoted_secrets_and_source_bytes() {
-        let file = NamedTempFile::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join(".env");
         let original = concat!(
             "  export MYSQL_PASSWORD = \"pa # ss\\\"C:\\\\tmp\\n\\$TOKEN\"  # keep me\r\n",
             "WINDOWS_PATH='C:\\work\\nuwax'\r\n",
@@ -475,25 +490,73 @@ mod tests {
             "MULTILINE='first # literal\r\nDEVICE_ID=inside-value\r\nlast'\r\n",
             "# Original comment\r\n"
         );
-        fs::write(file.path(), original).unwrap();
+        fs::write(&file, original).unwrap();
         let mut manager = EnvManager::new();
-        manager.load(file.path()).unwrap();
+        manager.load(&file).unwrap();
         assert!(manager.get_variable("DEVICE_ID").is_none());
         manager
             .upsert_variable("DEVICE_ID", "v1:new", QuoteType::None)
             .unwrap();
         manager.save().unwrap();
         assert_eq!(
-            fs::read_to_string(file.path()).unwrap(),
+            fs::read_to_string(&file).unwrap(),
             format!("{original}DEVICE_ID=v1:new\r\n")
         );
-        manager.load(file.path()).unwrap();
+        manager.load(&file).unwrap();
         manager
             .upsert_variable("DEVICE_ID", "v1:new", QuoteType::None)
             .unwrap();
         manager.save().unwrap();
         assert_eq!(
-            fs::read_to_string(file.path()).unwrap(),
+            fs::read_to_string(&file).unwrap(),
+            format!("{original}DEVICE_ID=v1:new\r\n")
+        );
+    }
+
+    #[test]
+    fn injection_preserves_escaped_single_quotes_and_unquoted_apostrophes() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join(".env");
+        let original = concat!(
+            "PASSWORD='Let\\'s go # literal' # comment\r\n",
+            "UNQUOTED=Let's go\r\n",
+            "MULTILINE='first\\'s line\r\nlast line'\r\n",
+            "WINDOWS_PATH=C:\\work\\dir\r\n"
+        );
+        fs::write(&file, original).unwrap();
+        for _ in 0..2 {
+            let mut manager = EnvManager::new();
+            manager.load(&file).unwrap();
+            assert_eq!(
+                manager.get_variable("PASSWORD").unwrap().value,
+                "Let's go # literal"
+            );
+            manager
+                .upsert_variable("DEVICE_ID", "v1:new", QuoteType::None)
+                .unwrap();
+            manager.save().unwrap();
+            assert_eq!(
+                fs::read_to_string(&file).unwrap(),
+                format!("{original}DEVICE_ID=v1:new\r\n")
+            );
+        }
+    }
+
+    #[test]
+    fn multiline_hyphenated_key_keeps_embedded_managed_assignment_literal() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join(".env");
+        let original = "PASS-WORD: 'first\r\nDEVICE_ID=inside-secret\r\nlast'\r\n";
+        fs::write(&file, original).unwrap();
+        let mut manager = EnvManager::new();
+        manager.load(&file).unwrap();
+        assert!(manager.get_variable("DEVICE_ID").is_none());
+        manager
+            .upsert_variable("DEVICE_ID", "v1:new", QuoteType::None)
+            .unwrap();
+        manager.save().unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
             format!("{original}DEVICE_ID=v1:new\r\n")
         );
     }
@@ -514,7 +577,7 @@ mod tests {
     #[test]
     fn removal_deletes_all_definitions_and_supports_reinsertion() {
         let mut manager = EnvManager::new();
-        manager.parse_content("DEVICE_FIELDS_DISK_SERIAL=stale\nOTHER=keep\nexport DEVICE_FIELDS_DISK_SERIAL=also_stale\n").unwrap();
+        manager.parse_content("DEVICE_FIELDS_DISK_SERIAL=stale\nOTHER=keep\nexport DEVICE_FIELDS_DISK_SERIAL=also_stale\nDEVICE_FIELDS_DISK_SERIAL: colon_stale\n").unwrap();
         assert!(manager.remove_variable("DEVICE_FIELDS_DISK_SERIAL"));
         assert!(!manager.remove_variable("NOT_PRESENT"));
         assert_eq!(manager.render().unwrap(), "OTHER=keep\n");
@@ -574,14 +637,15 @@ mod tests {
 
     #[test]
     fn edited_double_quotes_round_trip_with_dotenvy() {
-        let file = NamedTempFile::new().unwrap();
-        fs::write(file.path(), "VALUE=\"old\"\n").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join(".env");
+        fs::write(&file, "VALUE=\"old\"\n").unwrap();
         let value = "quote \" slash \\ dollar $TOKEN\nnext line";
         let mut manager = EnvManager::new();
-        manager.load(file.path()).unwrap();
+        manager.load(&file).unwrap();
         manager.set_variable("VALUE", value).unwrap();
         manager.save().unwrap();
-        let decoded: HashMap<_, _> = dotenvy::from_path_iter(file.path())
+        let decoded: HashMap<_, _> = dotenvy::from_path_iter(&file)
             .unwrap()
             .collect::<std::result::Result<_, _>>()
             .unwrap();
@@ -649,17 +713,18 @@ ESCAPED_VAR="hello\nworld"
 
     #[test]
     fn test_save_and_load() {
-        let temp_file = NamedTempFile::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let temp_file = directory.path().join(".env");
         let initial_content = r#"
 KEY1=VALUE1
 # A comment
 KEY2="old_value"
 KEY3='single_quoted'
 "#;
-        fs::write(temp_file.path(), initial_content).unwrap();
+        fs::write(&temp_file, initial_content).unwrap();
 
         let mut manager = EnvManager::new();
-        manager.load(temp_file.path()).unwrap();
+        manager.load(&temp_file).unwrap();
 
         // 修改一个变量
         manager.set_variable("KEY2", "new_value").unwrap();
@@ -668,7 +733,7 @@ KEY3='single_quoted'
         manager.save().unwrap();
 
         // 读回并验证
-        let final_content = fs::read_to_string(temp_file.path()).unwrap();
+        let final_content = fs::read_to_string(&temp_file).unwrap();
         let expected_content = r#"
 KEY1=VALUE1
 # A comment
@@ -695,19 +760,20 @@ KEY3='single_quoted'"#;
     fn test_set_variable_preserves_inline_comment() {
         // 回归测试：改值不丢行内注释（旧行为依赖 line_index 反查原始行，
         // get_original_line_str 恒返回空串，注释会静默丢失）
-        let temp_file = NamedTempFile::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let temp_file = directory.path().join(".env");
         fs::write(
-            temp_file.path(),
+            &temp_file,
             "FRONTEND_HOST_PORT=80 # default http port\nMYSQL_USER=agent\n",
         )
         .unwrap();
 
         let mut manager = EnvManager::new();
-        manager.load(temp_file.path()).unwrap();
+        manager.load(&temp_file).unwrap();
         manager.set_variable("FRONTEND_HOST_PORT", "8090").unwrap();
         manager.save().unwrap();
 
-        let content = fs::read_to_string(temp_file.path()).unwrap();
+        let content = fs::read_to_string(&temp_file).unwrap();
         assert_eq!(
             content.trim(),
             "FRONTEND_HOST_PORT=8090 # default http port\nMYSQL_USER=agent"
@@ -716,15 +782,12 @@ KEY3='single_quoted'"#;
 
     #[test]
     fn test_upsert_appends_new_key_with_marker() {
-        let temp_file = NamedTempFile::new().unwrap();
-        fs::write(
-            temp_file.path(),
-            "FRONTEND_HOST_PORT=80\nMYSQL_USER=agent\n",
-        )
-        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let temp_file = directory.path().join(".env");
+        fs::write(&temp_file, "FRONTEND_HOST_PORT=80\nMYSQL_USER=agent\n").unwrap();
 
         let mut manager = EnvManager::new();
-        manager.load(temp_file.path()).unwrap();
+        manager.load(&temp_file).unwrap();
         manager.ensure_marker("# --- managed ---");
         manager
             .upsert_variable("DEVICE_ID", "v1:abc123", QuoteType::None)
@@ -738,13 +801,13 @@ KEY3='single_quoted'"#;
             .unwrap();
         manager.save().unwrap();
 
-        let content = fs::read_to_string(temp_file.path()).unwrap();
+        let content = fs::read_to_string(&temp_file).unwrap();
         let expected = "FRONTEND_HOST_PORT=80\nMYSQL_USER=agent\n# --- managed ---\nDEVICE_ID=v1:abc123\nDEVICE_FIELDS='{\"machine_id\":\"h1\"}'";
         assert_eq!(content.trim(), expected);
 
         // 读回验证解析结果
         let mut reloaded = EnvManager::new();
-        reloaded.load(temp_file.path()).unwrap();
+        reloaded.load(&temp_file).unwrap();
         assert_eq!(
             reloaded.get_variable("DEVICE_ID").unwrap().value,
             "v1:abc123"
@@ -757,29 +820,31 @@ KEY3='single_quoted'"#;
 
     #[test]
     fn test_upsert_updates_existing_key_and_quote() {
-        let temp_file = NamedTempFile::new().unwrap();
-        fs::write(temp_file.path(), "DEVICE_ID=old\nOTHER=1\n").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let temp_file = directory.path().join(".env");
+        fs::write(&temp_file, "DEVICE_ID=old\nOTHER=1\n").unwrap();
 
         let mut manager = EnvManager::new();
-        manager.load(temp_file.path()).unwrap();
+        manager.load(&temp_file).unwrap();
         manager
             .upsert_variable("DEVICE_ID", "v1:new", QuoteType::None)
             .unwrap();
         manager.save().unwrap();
 
-        let content = fs::read_to_string(temp_file.path()).unwrap();
+        let content = fs::read_to_string(&temp_file).unwrap();
         // 更新在原位置，OTHER 不受影响
         assert_eq!(content.trim(), "DEVICE_ID=v1:new\nOTHER=1");
     }
 
     #[test]
     fn test_upsert_idempotent_and_marker_not_duplicated() {
-        let temp_file = NamedTempFile::new().unwrap();
-        fs::write(temp_file.path(), "A=1\n").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let temp_file = directory.path().join(".env");
+        fs::write(&temp_file, "A=1\n").unwrap();
 
         for _ in 0..2 {
             let mut manager = EnvManager::new();
-            manager.load(temp_file.path()).unwrap();
+            manager.load(&temp_file).unwrap();
             manager.ensure_marker("# --- managed ---");
             manager
                 .upsert_variable("DEVICE_ID", "v1:same", QuoteType::None)
@@ -787,7 +852,7 @@ KEY3='single_quoted'"#;
             manager.save().unwrap();
         }
 
-        let content = fs::read_to_string(temp_file.path()).unwrap();
+        let content = fs::read_to_string(&temp_file).unwrap();
         assert_eq!(content.trim(), "A=1\n# --- managed ---\nDEVICE_ID=v1:same");
         assert_eq!(content.matches("# --- managed ---").count(), 1);
     }

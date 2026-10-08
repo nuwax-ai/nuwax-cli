@@ -45,15 +45,30 @@ impl PathProcessor {
             path, self.path_format
         );
 
-        // 1. 初步清理路径
-        let cleaned_path = self.clean_path(path);
-
-        // 2. 根据环境转换路径格式
-        let formatted_path = match self.path_format {
-            PathFormat::Wsl2 => self.to_wsl2_format(&cleaned_path),
-            PathFormat::Windows => self.to_windows_format(&cleaned_path),
-            PathFormat::Posix => self.to_posix_format(&cleaned_path),
+        // Clamp foreign absolute-drive parents before mapping the drive under /mnt.
+        let bytes = path.as_bytes();
+        let drive_path = if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\')
+        {
+            let suffix = path[2..].replace('\\', "/");
+            let suffix = format!("/{}", suffix.trim_start_matches('/'));
+            let suffix = self.clean_path(&suffix).replace('\\', "/");
+            Some(format!("{}{}", &path[..2], suffix))
+        } else {
+            None
         };
+        let path = drive_path.as_deref().unwrap_or(path);
+
+        // Convert drive/root syntax before native component parsing.
+        let formatted_path = match self.path_format {
+            PathFormat::Wsl2 => self.to_wsl2_format(path),
+            PathFormat::Windows => self.to_windows_format(path),
+            PathFormat::Posix => self.to_posix_format(path),
+        };
+        let cleaned_path = self.clean_path(&formatted_path);
+        let formatted_path = self.convert_separators(&cleaned_path);
 
         debug!("✅ Path normalization complete: '{}'", formatted_path);
         Ok(formatted_path)
@@ -110,58 +125,25 @@ impl PathProcessor {
 
     /// 清理路径（移除多余的 ./ 和 //）
     fn clean_path(&self, path: &str) -> String {
-        let mut components: Vec<std::path::Component> = Vec::new();
-        let mut has_root = false;
-
+        let mut cleaned = PathBuf::new();
         for component in Path::new(path).components() {
             match component {
-                std::path::Component::CurDir => {
-                    // 跳过当前目录 .
-                    continue;
-                }
-                std::path::Component::RootDir => {
-                    // 记录存在根目录，但不立即添加
-                    has_root = true;
-                }
-                std::path::Component::ParentDir => {
-                    // 处理父目录 ..
-                    if let Some(last) = components.last()
-                        && *last != std::path::Component::RootDir
-                    {
-                        components.pop();
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => match cleaned.components().next_back() {
+                    Some(std::path::Component::Normal(_)) => {
+                        cleaned.pop();
                     }
-                }
-                _ => {
-                    components.push(component);
-                }
+                    _ if !cleaned.has_root() => cleaned.push(component.as_os_str()),
+                    _ => {}
+                },
+                _ => cleaned.push(component.as_os_str()),
             }
         }
-
-        let separator = std::path::MAIN_SEPARATOR_STR;
-        let cleaned = if has_root {
-            let prefix = if separator == "/" { "/" } else { "" };
-            format!(
-                "{}{}",
-                prefix,
-                components
-                    .iter()
-                    .map(|c| c.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join(separator)
-            )
-        } else {
-            components
-                .iter()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(separator)
-        };
-
         // 确保空路径返回 "."
-        if cleaned.is_empty() {
+        if cleaned.as_os_str().is_empty() {
             ".".to_string()
         } else {
-            cleaned
+            cleaned.to_string_lossy().into_owned()
         }
     }
 
@@ -253,7 +235,7 @@ impl PathProcessor {
                 .to_lowercase()
                 .next()
                 .unwrap_or_default();
-            let rest = &path[3..];
+            let rest = &path[2..];
             return format!("/mnt/{}{}", drive_letter, rest);
         }
 
@@ -377,7 +359,10 @@ mod tests {
         let processor = PathProcessor::new(HostOs::LinuxNative, PathFormat::Posix);
 
         assert_eq!(processor.clean_path("./data"), "data");
-        assert_eq!(processor.clean_path("data/./test"), "data/test");
+        assert_eq!(
+            processor.clean_path("data/./test"),
+            Path::new("data").join("test").to_string_lossy()
+        );
         assert_eq!(processor.clean_path("data/../test"), "test");
         // 空路径返回 "."
         assert_eq!(processor.clean_path("./"), ".");
@@ -390,5 +375,69 @@ mod tests {
 
         let processor_posix = PathProcessor::new(HostOs::LinuxNative, PathFormat::Posix);
         assert!(!processor_posix.needs_special_handling("/data"));
+    }
+
+    #[test]
+    fn relative_parents_and_absolute_roots_are_retained() {
+        let processor = PathProcessor::new(HostOs::LinuxNative, PathFormat::Posix);
+        assert_eq!(processor.normalize_path("../data").unwrap(), "../data");
+        assert_eq!(
+            processor.normalize_path("../../data").unwrap(),
+            "../../data"
+        );
+        assert_eq!(
+            processor.normalize_path("data/../../test").unwrap(),
+            "../test"
+        );
+        assert_eq!(processor.normalize_path("/../data").unwrap(), "/data");
+        assert_eq!(processor.normalize_path("/").unwrap(), "/");
+    }
+
+    #[test]
+    fn windows_drive_to_posix_retains_separator() {
+        let processor = PathProcessor::new(HostOs::LinuxNative, PathFormat::Posix);
+        assert_eq!(
+            processor.normalize_path("C:/Users/test").unwrap(),
+            "/mnt/c/Users/test"
+        );
+        assert_eq!(processor.normalize_path("C:/").unwrap(), "/mnt/c");
+    }
+
+    #[test]
+    fn absolute_drive_parents_cannot_escape_the_drive_mapping() {
+        for (format, expected) in [
+            (PathFormat::Posix, "/mnt/c/data"),
+            (PathFormat::Wsl2, "/mnt/c/data"),
+            (PathFormat::Windows, r"C:\data"),
+        ] {
+            let processor = PathProcessor::new(HostOs::LinuxNative, format);
+            for input in ["C:/../../data", r"C:\..\..\data", "C://../../data"] {
+                assert_eq!(
+                    processor.normalize_path(input).unwrap(),
+                    expected,
+                    "{input}"
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_drive_unc_and_rooted_paths_retain_roots() {
+        let processor = PathProcessor::new(HostOs::WindowsNative, PathFormat::Windows);
+        for (input, expected) in [
+            (r"C:\", r"C:\"),
+            (r"C:\a\..\..\test", r"C:\test"),
+            (r"\data", r"\data"),
+            (r"\\server\share\a\..\test", r"\\server\share\test"),
+        ] {
+            assert_eq!(processor.normalize_path(input).unwrap(), expected);
+        }
+        assert_eq!(
+            processor
+                .to_absolute_path(r"\data", Path::new(r"C:\workspace"))
+                .unwrap(),
+            PathBuf::from(r"C:\data")
+        );
     }
 }

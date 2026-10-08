@@ -509,51 +509,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mysql_connection() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        let compose_path = std::path::Path::new(&manifest_dir).join("fixtures/docker-compose.yml");
-        let env_path = std::path::Path::new(&manifest_dir).join("fixtures/.env");
-        let config = MySqlConfig::for_container(
-            Some(compose_path.to_str().unwrap()),
-            Some(env_path.to_str().unwrap()),
-        )
-        .await
-        .unwrap();
+    #[ignore = "requires TEST_MYSQL_URL pointing to a disposable MySQL database"]
+    async fn test_mysql_connection() -> Result<()> {
+        let url = std::env::var("TEST_MYSQL_URL").context("TEST_MYSQL_URL is required")?;
+        let options = mysql_async::Opts::from_url(&url)
+            .map_err(|_| anyhow::anyhow!("TEST_MYSQL_URL must be a valid MySQL URL"))?;
+        let database = options
+            .db_name()
+            .filter(|name| !name.is_empty())
+            .context("TEST_MYSQL_URL must name a disposable database")?;
+        let config = MySqlConfig {
+            host: options.ip_or_hostname().to_string(),
+            port: options.tcp_port(),
+            user: options
+                .user()
+                .context("TEST_MYSQL_URL requires a user")?
+                .to_string(),
+            password: options.pass().unwrap_or_default().to_string(),
+            database: database.to_string(),
+        };
         let executor = MySqlExecutor::new(config);
-        if executor.test_connection().await.is_ok() {
-            // 测试真实执行
-            executor
-                .execute_single("CREATE DATABASE IF NOT EXISTS test_db")
-                .await
-                .unwrap();
-
-            executor.execute_single("USE test_db").await.unwrap();
-
-            executor
-                .execute_single(
-                    "CREATE TABLE IF NOT EXISTS test_table (id INT PRIMARY KEY, name VARCHAR(255))",
-                )
-                .await
-                .unwrap();
-
-            let results = executor
-                .execute_diff_sql("CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100)); \
-                                 ALTER TABLE users ADD COLUMN email VARCHAR(255); \
-                                 CREATE INDEX idx_name ON users(name);")
-                .await
-                .unwrap();
-
-            assert!(!results.is_empty());
-            println!("✅ MySQL执行器测试通过");
-
-            // 清理
-            executor
-                .execute_single("DROP DATABASE IF EXISTS test_db")
-                .await
-                .unwrap();
-        } else {
-            println!("⚠️ MySQL容器未运行，跳过测试");
-        }
+        executor.test_connection().await?;
+        let table = format!("nuwax_connection_{}", uuid::Uuid::now_v7().simple());
+        let statements = format!(
+            "CREATE TABLE `{table}` (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100));\n\
+             ALTER TABLE `{table}` ADD COLUMN email VARCHAR(255);\n\
+             CREATE INDEX idx_name ON `{table}`(name);"
+        );
+        let execution = executor.execute_diff_sql(&statements).await;
+        // Clean the unique table even when a later DDL statement fails.
+        let cleanup = executor
+            .execute_single(&format!("DROP TABLE IF EXISTS `{table}`"))
+            .await;
+        let results = execution?;
+        cleanup?;
+        assert_eq!(results.len(), 3);
+        Ok(())
     }
 
     #[tokio::test]

@@ -1,7 +1,11 @@
-use crate::docker_service::error::{DockerServiceError, DockerServiceResult};
+#[cfg(unix)]
+use crate::docker_service::error::DockerServiceError;
+use crate::docker_service::error::DockerServiceResult;
 use std::fs;
 use std::path::PathBuf;
-use tracing::{debug, info, warn};
+#[cfg(unix)]
+use tracing::warn;
+use tracing::{debug, info};
 
 /// 目录权限管理器 - 配合 Docker init 容器处理权限
 ///
@@ -101,6 +105,8 @@ impl DirectoryPermissionManager {
             // Windows 上确保文件可读
             if let Ok(metadata) = fs::metadata(&mysql_cnf) {
                 let mut permissions = metadata.permissions();
+                // This Windows-only branch clears the readonly attribute; Unix modes are not changed.
+                #[allow(clippy::permissions_set_readonly_false)]
                 permissions.set_readonly(false);
                 fs::set_permissions(&mysql_cnf, permissions).ok();
             }

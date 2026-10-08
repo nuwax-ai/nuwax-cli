@@ -83,7 +83,15 @@ jobs:
         run: cargo test --locked -p client-core isolated_compose_environment_tests
       - name: Test configured deployment paths
         run: cargo test --locked -p nuwax-cli custom_deployment_paths_tests
+      - name: Test cross-platform path roots and parents
+        run: cargo test --locked -p client-core container::path_utils::tests
+      - name: Test short and long Compose mount sources
+        run: cargo test --locked -p client-core container::volumes::tests
+      - name: Test isolated mount directory creation
+        run: cargo test --locked -p client-core --test volumes_test
       - name: Test literal MySQL credentials and missing references
         run: cargo test --locked -p client-core mysql_executor::tests
       - name: Test native Compose interpolation
         run: cargo test --locked -p client-core container::interpolation::tests
+      - name: Test Compose environment file syntax
+        run: cargo test --locked -p client-core container::config::compose_env::tests

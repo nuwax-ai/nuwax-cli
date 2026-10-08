@@ -719,9 +719,13 @@ mod tests {
         File::create(dir.join("other.txt")).unwrap();
         File::create(dir.join("archive.zip")).unwrap(); // 不以 docker- 开头
 
-        // 查找应该返回第一个匹配的文件
+        // Directory iteration order depends on the filesystem. Either matching
+        // archive is valid; non-matching files must never be selected.
         let result = find_archive_file(dir);
-        assert_eq!(result, Some("docker-aarch64.zip".to_string()));
+        assert!(matches!(
+            result.as_deref(),
+            Some("docker-aarch64.zip" | "docker-x86_64.tar.gz")
+        ));
     }
 
     #[test]

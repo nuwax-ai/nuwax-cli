@@ -194,7 +194,10 @@ async fn test_parse_complex_actual_compose() {
 #[tokio::test]
 async fn test_cross_platform_compatibility() {
     let temp_dir = tempdir().unwrap();
-    let compose_path = temp_dir.path().join("docker-compose.yml");
+    // Keep parent-relative mounts within this disposable test root.
+    let deployment_dir = temp_dir.path().join("deployment");
+    fs::create_dir(&deployment_dir).unwrap();
+    let compose_path = deployment_dir.join("docker-compose.yml");
 
     // 创建测试用的docker-compose.yml文件 - 使用相对路径避免权限问题
     let compose_content = r#"
@@ -243,10 +246,13 @@ volumes:
     manager.ensure_host_volumes_exist().await.unwrap();
 
     // 验证嵌套目录被正确创建
-    let nested_paths = vec!["relative/path", "parent/relative", "subdir/nested"];
+    let nested_paths = vec![
+        deployment_dir.join("relative/path"),
+        temp_dir.path().join("parent/relative"),
+        deployment_dir.join("subdir/nested"),
+    ];
     for path in nested_paths {
-        let full_path = temp_dir.path().join(path);
-        assert!(full_path.exists(), "嵌套目录应该被创建: {path}");
+        assert!(path.exists(), "嵌套目录应该被创建: {}", path.display());
     }
 
     println!("跨平台兼容性测试通过，处理了{}个挂载点", mount_dirs.len());

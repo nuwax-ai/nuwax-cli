@@ -86,6 +86,15 @@ fn parse_reference(input: &str, start: usize) -> Result<Option<(Reference<'_>, u
                 _ => {}
             }
         }
+        // compose-go first looks for a balanced closing brace, then uses the
+        // last closing brace matched by its default-word pattern. This permits
+        // literal, unmatched '{' characters in defaults without changing how
+        // balanced literal braces and nested variable words are consumed.
+        let end = end.or_else(|| {
+            input[start + 2..]
+                .rfind('}')
+                .map(|offset| start + 2 + offset)
+        });
         let Some(end) = end else {
             bail!("Unterminated Compose variable expression");
         };
@@ -313,5 +322,26 @@ mod tests {
         assert!(!is_whole_reference("${SET}-suffix"));
         assert!(!is_whole_reference("$${SET}"));
         assert!(!is_whole_reference("plain text"));
+    }
+
+    #[test]
+    fn literal_open_braces_in_default_words_follow_native_compose() -> Result<()> {
+        for (expression, expected) in [
+            ("${UNSET:-{word}", "{word"),
+            ("${UNSET:-{word}}", "{word}"),
+            ("${SET:-{word}}", "value"),
+            ("${UNSET:-{${OTHER:-nested}}}", "{nested}"),
+            ("${SET:-{${OTHER:-nested}}}", "value"),
+            ("${UNSET:-$${word}}", "${word}"),
+            ("${SET:-$${word}}", "value"),
+            ("${SET:?{message}", "value"),
+        ] {
+            assert_eq!(
+                interpolate_env(expression, &lookup, MissingVariables::Error)?,
+                expected
+            );
+        }
+        assert!(interpolate_env("${UNSET:-${OTHER}", &lookup, MissingVariables::Error).is_err());
+        Ok(())
     }
 }

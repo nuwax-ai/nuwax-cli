@@ -1262,7 +1262,10 @@ async fn fix_script_permissions() -> Result<()> {
     // 需要修复权限的脚本文件列表
     let script_files = ["docker/config/docker-entrypoint.sh"];
 
+    #[cfg(unix)]
     let mut fixed_count = 0;
+    #[cfg(not(unix))]
+    let fixed_count = 0;
     let mut total_count = 0;
 
     for script_path in script_files.iter() {
@@ -1274,6 +1277,8 @@ async fn fix_script_permissions() -> Result<()> {
             // 检查当前权限
             match std::fs::metadata(path) {
                 Ok(metadata) => {
+                    #[cfg(not(unix))]
+                    let _ = metadata;
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;

@@ -15,6 +15,33 @@ pub struct MountInfo {
     pub is_bind_mount: bool,
 }
 
+// Drive-letter colons belong to a path, while later colons separate target/options.
+fn short_volume_parts(spec: &str) -> Option<(&str, &str, Option<&str>)> {
+    fn delimiter(path: &str) -> Option<usize> {
+        let bytes = path.as_bytes();
+        let drive_prefix = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\');
+        let offset = if drive_prefix { 2 } else { 0 };
+        path[offset..].find(':').map(|index| index + offset)
+    }
+    let source_end = delimiter(spec)?;
+    let source = &spec[..source_end];
+    let rest = &spec[source_end + 1..];
+    let (target, mode) = match delimiter(rest) {
+        Some(index) => {
+            let mode = &rest[index + 1..];
+            if mode.contains(':') {
+                return None;
+            }
+            (&rest[..index], Some(mode))
+        }
+        None => (rest, None),
+    };
+    Some((source, target, mode))
+}
+
 impl DockerManager {
     /// 确保所有宿主机挂载目录存在
     pub async fn ensure_host_volumes_exist(&self) -> Result<()> {
@@ -67,52 +94,43 @@ impl DockerManager {
     fn parse_volume_spec(&self, service_name: &str, volume: &dct::Volumes) -> Option<MountInfo> {
         match volume {
             dct::Volumes::Simple(volume_str) => {
-                let parts: Vec<&str> = volume_str.split(':').collect();
+                let (host_path, container_path, _mode) = short_volume_parts(volume_str)?;
 
-                match parts.len() {
-                    2 | 3 => {
-                        // 格式: host_path:container_path 或 host_path:container_path:mode
-                        let host_path = parts[0];
-                        let container_path = parts[1];
+                let is_bind = self.is_bind_mount_path(host_path);
 
-                        let is_bind = self.is_bind_mount_path(host_path);
-
-                        if is_bind {
-                            // 规范化路径（返回 Result）
-                            let normalized_host_path = match self.normalize_path(host_path) {
-                                Ok(path) => path,
-                                Err(e) => {
-                                    warn!("Path normalization failed: {}", e);
-                                    return None;
-                                }
-                            };
-
-                            // 将相对路径转换为相对于compose文件所在目录的绝对路径
-                            let host_path_buf = std::path::PathBuf::from(&normalized_host_path);
-                            let absolute_host_path = if host_path_buf.is_absolute() {
-                                normalized_host_path
-                            } else {
-                                match self.get_working_directory() {
-                                    Some(compose_dir) => compose_dir
-                                        .join(&normalized_host_path)
-                                        .to_string_lossy()
-                                        .to_string(),
-                                    None => {
-                                        return None;
-                                    }
-                                }
-                            };
-                            Some(MountInfo {
-                                service_name: service_name.to_string(),
-                                container_path: container_path.to_string(),
-                                host_path: Some(absolute_host_path),
-                                is_bind_mount: true,
-                            })
-                        } else {
-                            None
+                if is_bind {
+                    // 规范化路径（返回 Result）
+                    let normalized_host_path = match self.normalize_path(host_path) {
+                        Ok(path) => path,
+                        Err(e) => {
+                            warn!("Path normalization failed: {}", e);
+                            return None;
                         }
-                    }
-                    _ => None,
+                    };
+
+                    // 将相对路径转换为相对于compose文件所在目录的绝对路径
+                    let host_path_buf = std::path::PathBuf::from(&normalized_host_path);
+                    let absolute_host_path = if host_path_buf.is_absolute() {
+                        normalized_host_path
+                    } else {
+                        match self.get_working_directory() {
+                            Some(compose_dir) => compose_dir
+                                .join(&normalized_host_path)
+                                .to_string_lossy()
+                                .to_string(),
+                            None => {
+                                return None;
+                            }
+                        }
+                    };
+                    Some(MountInfo {
+                        service_name: service_name.to_string(),
+                        container_path: container_path.to_string(),
+                        host_path: Some(absolute_host_path),
+                        is_bind_mount: true,
+                    })
+                } else {
+                    None
                 }
             }
             dct::Volumes::Advanced(volume_def) => {
@@ -218,5 +236,96 @@ impl DockerManager {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::container::environment::{HostOs, PathFormat, RuntimeEnvironment};
+
+    #[test]
+    fn short_mounts_preserve_drive_colons_and_options() {
+        for (spec, expected) in [
+            (r"C:\data:/container", (r"C:\data", "/container", None)),
+            (
+                r"D:\data:/container:ro",
+                (r"D:\data", "/container", Some("ro")),
+            ),
+            (
+                "c:/data:/container:rw,z",
+                ("c:/data", "/container", Some("rw,z")),
+            ),
+            (
+                r"C:\data:D:\target:ro",
+                (r"C:\data", r"D:\target", Some("ro")),
+            ),
+            (
+                r"\\server\share:/container",
+                (r"\\server\share", "/container", None),
+            ),
+            ("/data:/container:z", ("/data", "/container", Some("z"))),
+            ("./data:/container", ("./data", "/container", None)),
+            (
+                "../data:/container:ro",
+                ("../data", "/container", Some("ro")),
+            ),
+            (
+                "named_volume:/container",
+                ("named_volume", "/container", None),
+            ),
+        ] {
+            assert_eq!(short_volume_parts(spec), Some(expected), "{spec}");
+        }
+        assert_eq!(short_volume_parts("/container"), None);
+        assert_eq!(short_volume_parts("./data:/container:ro:extra"), None);
+    }
+
+    #[test]
+    fn short_and_long_bind_sources_resolve_to_the_same_host_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime_env = if cfg!(windows) {
+            RuntimeEnvironment {
+                host_os: HostOs::WindowsNative,
+                path_format: PathFormat::Windows,
+            }
+        } else {
+            RuntimeEnvironment {
+                host_os: HostOs::LinuxNative,
+                path_format: PathFormat::Posix,
+            }
+        };
+        let manager = DockerManager {
+            compose_file: directory.path().join("compose.yml"),
+            env_file: directory.path().join(".env"),
+            project_name: None,
+            runtime_env,
+        };
+        for source in [r"C:\data", "C:/data", "./data", "../data", "/data"] {
+            let short = dct::Volumes::Simple(format!("{source}:/container:ro"));
+            let long: dct::Volumes = serde_json::from_value(serde_json::json!({
+                "type": "bind", "source": source, "target": "/container", "read_only": true,
+            }))
+            .unwrap();
+            let short = manager.parse_volume_spec("service", &short).unwrap();
+            let long = manager.parse_volume_spec("service", &long).unwrap();
+            assert_eq!(short.host_path, long.host_path, "{source}");
+            assert_eq!(short.container_path, "/container");
+            assert_eq!(long.container_path, "/container");
+            assert!(short.is_bind_mount && long.is_bind_mount);
+        }
+        assert!(
+            manager
+                .parse_volume_spec(
+                    "service",
+                    &dct::Volumes::Simple("named_volume:/container".into())
+                )
+                .is_none()
+        );
+        assert!(
+            manager
+                .parse_volume_spec("service", &dct::Volumes::Simple("/container".into()))
+                .is_none()
+        );
     }
 }

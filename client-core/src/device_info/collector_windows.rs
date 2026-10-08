@@ -63,15 +63,14 @@ fn read_dmi_serial() -> Option<String> {
             "-Command",
             "(Get-CimInstance Win32_BIOS).SerialNumber",
         ],
-    ) {
-        if let Some(v) = parsers::parse_powershell_single(&output) {
-            return Some(v);
-        }
+    ) && let Some(v) = parsers::parse_powershell_single(&output)
+    {
+        return Some(v);
     }
-    if let Some(output) = run_capture("wmic", &["bios", "get", "serialnumber", "/value"]) {
-        if let Some(v) = parsers::parse_wmic_value(&output, "SerialNumber") {
-            return Some(v);
-        }
+    if let Some(output) = run_capture("wmic", &["bios", "get", "serialnumber", "/value"])
+        && let Some(v) = parsers::parse_wmic_value(&output, "SerialNumber")
+    {
+        return Some(v);
     }
     // 主板序列号兜底（部分 OEM BIOS 为空但主板有序列号）
     run_capture(
@@ -94,10 +93,9 @@ fn read_disk_serial() -> Option<String> {
             "-Command",
             "Get-PhysicalDisk | Select-Object -First 1 -ExpandProperty SerialNumber",
         ],
-    ) {
-        if let Some(v) = parsers::parse_powershell_single(&output) {
-            return Some(v);
-        }
+    ) && let Some(v) = parsers::parse_powershell_single(&output)
+    {
+        return Some(v);
     }
     run_capture("wmic", &["diskdrive", "get", "SerialNumber", "/value"])
         .and_then(|output| parsers::parse_wmic_value(&output, "SerialNumber"))

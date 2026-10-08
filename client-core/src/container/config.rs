@@ -7,9 +7,11 @@ use docker_compose_types as dct;
 use quick_cache::sync::Cache;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Cursor;
 use std::path::Path;
 use tracing::{debug, info, warn};
+
+#[path = "compose_env.rs"]
+mod compose_env;
 
 // 缓存条目的结构
 #[derive(Debug, Clone)]
@@ -337,21 +339,19 @@ pub(crate) fn load_env_values(env_path: &Path) -> Result<HashMap<String, String>
             env_path.display()
         )
     })?;
-    let source = source.strip_prefix('\u{feff}').unwrap_or(&source);
-    let mut values = HashMap::new();
-    for (index, assignment) in dotenvy::Iter::new(Cursor::new(source)).enumerate() {
-        // dotenvy's LineParse includes the raw value; never include credentials
-        // in the error returned to deployment logs.
-        let (key, value) = assignment.map_err(|_| {
-            anyhow::anyhow!(
-                "Invalid assignment {} in Compose environment file: {}",
-                index + 1,
-                env_path.display()
-            )
-        })?;
-        values.insert(key, value);
-    }
-    Ok(values)
+    compose_env::parse_env_values(&source, &|key| {
+        if crate::constants::device_info::ENV_MANAGED_KEYS.contains(&key) {
+            None
+        } else {
+            std::env::var(key).ok()
+        }
+    })
+    .with_context(|| {
+        format!(
+            "Failed to parse Compose environment file: {}",
+            env_path.display()
+        )
+    })
 }
 
 fn compose_env_value(
@@ -446,20 +446,13 @@ fn interpolate_compose_value(
             }
         }
         Value::Mapping(mapping) => {
-            let mut expanded = serde_yaml::Mapping::new();
-            for (mut key, mut value) in std::mem::take(mapping) {
-                if let Value::String(raw) = &mut key {
-                    *raw = interpolate_scalar(raw, context)?;
-                }
+            // Native Compose interpolates mapping values, never keys. Dynamic
+            // environment/label names use the KEY=value sequence syntax.
+            for (key, value) in mapping.iter_mut() {
                 path.push(key.as_str().unwrap_or("<mapping-key>").to_string());
-                interpolate_compose_value(&mut value, path, context)?;
+                interpolate_compose_value(value, path, context)?;
                 path.pop();
-                anyhow::ensure!(
-                    expanded.insert(key, value).is_none(),
-                    "Duplicate interpolated Compose mapping key"
-                );
             }
-            *mapping = expanded;
         }
         Value::Tagged(tagged) => interpolate_compose_value(&mut tagged.value, path, context)?,
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -781,7 +774,7 @@ mod isolated_compose_environment_tests {
     }
 
     #[test]
-    fn interpolated_keys_cannot_silently_replace_each_other() -> Result<()> {
+    fn mapping_keys_remain_literal_while_values_and_sequence_keys_interpolate() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let compose = directory.path().join("compose.yml");
         let env_path = directory.path().join("keys.env");
@@ -791,9 +784,32 @@ mod isolated_compose_environment_tests {
         )?;
         std::fs::write(
             &compose,
-            "services:\n  backend:\n    image: alpine\n    labels:\n      '${NUWAX_LABEL_ONE}': first\n      '${NUWAX_LABEL_TWO}': second\n",
+            concat!(
+                "services:\n  backend:\n    image: alpine\n    labels:\n",
+                "      '${NUWAX_LABEL_ONE}': '${NUWAX_LABEL_TWO}'\n",
+                "      '${NUWAX_LABEL_TWO}': second\n",
+                "    environment:\n      '${NUWAX_LABEL_ONE}': '${NUWAX_LABEL_TWO}'\n",
+                "  sequence:\n    image: alpine\n",
+                "    environment: ['${NUWAX_LABEL_ONE}=${NUWAX_LABEL_TWO}']\n",
+                "    labels: ['${NUWAX_LABEL_ONE}=${NUWAX_LABEL_TWO}']\n"
+            ),
         )?;
-        assert!(load_compose_config_with_env(&compose, &env_path).is_err());
+        let config = load_compose_config_with_env(&compose, &env_path)?;
+        let backend = config.services.0["backend"].as_ref().unwrap();
+        let labels = serde_json::to_value(&backend.labels)?;
+        assert_eq!(labels["${NUWAX_LABEL_ONE}"], "duplicate");
+        assert_eq!(labels["${NUWAX_LABEL_TWO}"], "second");
+        let environment = serde_json::to_value(&backend.environment)?;
+        assert_eq!(environment["${NUWAX_LABEL_ONE}"], "duplicate");
+        let sequence = config.services.0["sequence"].as_ref().unwrap();
+        assert_eq!(
+            serde_json::to_value(&sequence.environment)?,
+            serde_json::json!(["duplicate=duplicate"])
+        );
+        assert_eq!(
+            serde_json::to_value(&sequence.labels)?,
+            serde_json::json!(["duplicate=duplicate"])
+        );
         Ok(())
     }
 

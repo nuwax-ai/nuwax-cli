@@ -430,7 +430,13 @@ mod tests {
                 target_version,
                 ..
             } => {
-                assert_eq!(url, "https://example.com/aarch64/docker.zip");
+                assert_eq!(
+                    url,
+                    format!(
+                        "https://example.com/{}/docker.zip",
+                        Architecture::detect().as_str()
+                    )
+                );
                 assert_eq!(target_version, "0.0.13.2".parse::<Version>().unwrap());
             }
             _ => panic!("应该选择全量升级策略"),
