@@ -89,15 +89,6 @@ pub struct Fingerprint {
     pub field_hashes: BTreeMap<String, String>,
 }
 
-/// 注入 DEVICE_INFO 的载荷：环境信息扁平化 + 指纹版本与冻结时间
-#[derive(Debug, Clone, Serialize)]
-pub struct DeviceInfoPayload {
-    #[serde(flatten)]
-    pub environment: DeviceEnvironment,
-    pub fingerprint_version: usize,
-    pub collected_at: String,
-}
-
 /// 在当前宿主机上采集设备信息。
 ///
 /// Fail Fast 边界：四个身份字段全部缺失时返回错误——说明宿主机环境异常，

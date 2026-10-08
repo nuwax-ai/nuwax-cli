@@ -4,7 +4,6 @@
 
 use anyhow::{Context, Result};
 use client_core::constants::device_info as consts;
-use client_core::device_info::DeviceInfoPayload;
 use client_core::device_info::store::{self, ResolvedFingerprint};
 use rust_i18n::t;
 use std::path::{Path, PathBuf};
@@ -47,27 +46,90 @@ pub fn ensure_device_env_at(env_path: &Path, refresh: bool) -> Result<DeviceEnvO
     let resolved =
         store::resolve(&freeze_path, refresh).context("Failed to resolve device fingerprint")?;
 
-    let fields_json = serde_json::to_string(&resolved.fingerprint.field_hashes)
-        .context("Failed to serialize device fields")?;
-    let payload = build_info_payload(&resolved);
-    let info_json = serde_json::to_string(&payload).context("Failed to serialize device info")?;
-
     let mut env_manager = EnvManager::new();
     env_manager
         .load(env_path)
         .with_context(|| format!("Failed to load .env: {}", env_path.display()))?;
     env_manager.ensure_marker(consts::ENV_MANAGED_MARKER);
+
+    // 逐字段写入（设计文档 §6.1：Java 侧经 yml 原生 map 占位符 + 宽松绑定读取，
+    // 零 JSON 解析）。缺失字段不写键——yml 占位符默认空串即"未采集"
     env_manager.upsert_variable(
         consts::ENV_KEY_DEVICE_ID,
         resolved.device_id(),
         QuoteType::None,
     )?;
+    upsert_field_hash(
+        &mut env_manager,
+        consts::ENV_KEY_FIELD_MACHINE_ID,
+        consts::FIELD_MACHINE_ID,
+        &resolved,
+    )?;
+    upsert_field_hash(
+        &mut env_manager,
+        consts::ENV_KEY_FIELD_DMI_UUID,
+        consts::FIELD_DMI_UUID,
+        &resolved,
+    )?;
+    upsert_field_hash(
+        &mut env_manager,
+        consts::ENV_KEY_FIELD_DISK_SERIAL,
+        consts::FIELD_DISK_SERIAL,
+        &resolved,
+    )?;
+    upsert_field_hash(
+        &mut env_manager,
+        consts::ENV_KEY_FIELD_PRIMARY_MAC,
+        consts::FIELD_PRIMARY_MAC,
+        &resolved,
+    )?;
+
+    let env = &resolved.environment;
+    // 自由文本（可能含空格/特殊字符）用单引号包裹并清洗（§6.1）
     env_manager.upsert_variable(
-        consts::ENV_KEY_DEVICE_FIELDS,
-        &fields_json,
+        consts::ENV_KEY_INFO_HOSTNAME,
+        &sanitize_display(&env.hostname),
         QuoteType::Single,
     )?;
-    env_manager.upsert_variable(consts::ENV_KEY_DEVICE_INFO, &info_json, QuoteType::Single)?;
+    env_manager.upsert_variable(consts::ENV_KEY_INFO_OS, &env.os, QuoteType::None)?;
+    env_manager.upsert_variable(consts::ENV_KEY_INFO_ARCH, &env.arch, QuoteType::None)?;
+    if let Some(cpu_model) = env.cpu_model.as_deref().map(sanitize_display) {
+        env_manager.upsert_variable(
+            consts::ENV_KEY_INFO_CPU_MODEL,
+            &cpu_model,
+            QuoteType::Single,
+        )?;
+    }
+    env_manager.upsert_variable(
+        consts::ENV_KEY_INFO_CPU_CORES,
+        &env.cpu_cores.to_string(),
+        QuoteType::None,
+    )?;
+    env_manager.upsert_variable(
+        consts::ENV_KEY_INFO_MEMORY_GB,
+        &env.memory_gb.to_string(),
+        QuoteType::None,
+    )?;
+    env_manager.upsert_variable(
+        consts::ENV_KEY_INFO_FINGERPRINT_VERSION,
+        &consts::FP_VERSION.to_string(),
+        QuoteType::None,
+    )?;
+    env_manager.upsert_variable(
+        consts::ENV_KEY_INFO_COLLECTED_AT,
+        &sanitize_display(&resolved.collected_at),
+        QuoteType::Single,
+    )?;
+    env_manager.upsert_variable(
+        consts::ENV_KEY_INFO_WSL,
+        env.wsl.to_string().as_str(),
+        QuoteType::None,
+    )?;
+    env_manager.upsert_variable(
+        consts::ENV_KEY_INFO_CONTAINERIZED,
+        env.containerized.to_string().as_str(),
+        QuoteType::None,
+    )?;
     env_manager
         .save()
         .with_context(|| format!("Failed to save .env: {}", env_path.display()))?;
@@ -96,6 +158,19 @@ pub fn ensure_device_env_at(env_path: &Path, refresh: bool) -> Result<DeviceEnvO
     })
 }
 
+/// 写入单个身份字段哈希；字段未采集（不在 field_hashes 中）则跳过
+fn upsert_field_hash(
+    env_manager: &mut EnvManager,
+    env_key: &str,
+    field_name: &str,
+    resolved: &ResolvedFingerprint,
+) -> Result<()> {
+    if let Some(hash) = resolved.fingerprint.field_hashes.get(field_name) {
+        env_manager.upsert_variable(env_key, hash, QuoteType::None)?;
+    }
+    Ok(())
+}
+
 /// 展示类自由文本清洗：值被单引号包裹写入 .env，内嵌 `'` 或控制字符
 /// 会破坏 dotenvy / compose 解析（设计文档 §6.1）
 fn sanitize_display(raw: &str) -> String {
@@ -104,18 +179,6 @@ fn sanitize_display(raw: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
-}
-
-fn build_info_payload(resolved: &ResolvedFingerprint) -> DeviceInfoPayload {
-    // 展示类自由文本写入 .env 前需清洗（单引号包裹，内嵌 `'`/控制字符会破坏解析）
-    let mut environment = resolved.environment.clone();
-    environment.hostname = sanitize_display(&environment.hostname);
-    environment.cpu_model = environment.cpu_model.as_deref().map(sanitize_display);
-    DeviceInfoPayload {
-        environment,
-        fingerprint_version: consts::FP_VERSION,
-        collected_at: resolved.collected_at.clone(),
-    }
 }
 
 #[cfg(test)]

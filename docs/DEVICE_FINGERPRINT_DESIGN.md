@@ -32,17 +32,15 @@ backend 容器内的 Java 应用需要感知**宿主机**的设备信息，用�
 │      │                                                           │
 │      ▼                                                           │
 │  EnvManager.upsert → docker/.env                                 │
-│      DEVICE_ID / DEVICE_FIELDS / DEVICE_INFO                     │
+│      DEVICE_ID + DEVICE_FIELDS_* / DEVICE_INFO_* (逐字段)         │
 └──────────────────────────────────────────────────────────────────┘
                │ docker compose 读取 .env
                ▼
-   backend.environment:  - DEVICE_ID=${DEVICE_ID} ...
+   backend.environment:  - DEVICE_ID=${DEVICE_ID} - DEVICE_FIELDS_* ...
                │
                ▼
-   Spring 宽松绑定(无需改 yml):
-     device.id     ← DEVICE_ID
-     device.fields ← DEVICE_FIELDS
-     device.info   ← DEVICE_INFO
+   application-external.yml 原生 map 占位符 + Spring 宽松绑定:
+     device.id / device.fields.machine_id / device.info.hostname ...
 ```
 
 模块分层（SOLID）：
@@ -135,7 +133,7 @@ device_id       = "v1:" + SHA-256(canonical)         // 64 hex
 
 ### 4.3 宽容匹配策略（Java / 服务端执行，此处仅约定数据）
 
-`.env` 中携带**逐字段哈希**（`DEVICE_FIELDS`），授权绑定时服务端记录的是字段哈希集合而非单一 device_id：
+`.env` 中携带**逐字段哈希**（`DEVICE_FIELDS_*`），授权绑定时服务端记录的是字段哈希集合而非单一 device_id：
 
 - `machine_id` **或** `dmi_uuid` 匹配 → 判定同一设备（换网卡/数据盘不掉授权）；
 - 其余情况 ≥2/4 匹配 → 同一设备（覆盖重装系统 + 换主板这种低频组合）;
@@ -176,13 +174,26 @@ device_id       = "v1:" + SHA-256(canonical)         // 64 hex
 ```dotenv
 # --- Managed by nuwax-cli: device fingerprint, DO NOT EDIT ---
 DEVICE_ID=v1:3fa8c0...（64 hex）
-DEVICE_FIELDS='{"machine_id":"...","dmi_uuid":"...","disk_serial":"...","primary_mac":"..."}'
-DEVICE_INFO='{"hostname":"prod-1","os":"linux","arch":"x86_64","cpu_model":"...","cpu_cores":8,"memory_gb":64,"fingerprint_version":1,"collected_at":"...","wsl":false,"containerized":false}'
+DEVICE_FIELDS_MACHINE_ID=<64 hex>
+DEVICE_FIELDS_DMI_UUID=<64 hex>          # 缺失字段不写该键
+DEVICE_FIELDS_DISK_SERIAL=<64 hex>
+DEVICE_FIELDS_PRIMARY_MAC=<64 hex>
+DEVICE_INFO_HOSTNAME='prod-web-01'       # 自由文本单引号包裹并清洗
+DEVICE_INFO_OS=linux
+DEVICE_INFO_ARCH=x86_64
+DEVICE_INFO_CPU_MODEL='Intel(R) Xeon(R) ...'
+DEVICE_INFO_CPU_CORES=8
+DEVICE_INFO_MEMORY_GB=64
+DEVICE_INFO_FINGERPRINT_VERSION=1
+DEVICE_INFO_COLLECTED_AT='2026-10-08T10:00:00+08:00'
+DEVICE_INFO_WSL=false
+DEVICE_INFO_CONTAINERIZED=false
 ```
 
-- `FIELDS` / `INFO` 为 JSON，**用单引号包裹**（dotenvy 与 docker compose 均剥单引号、保留内部双引号，已验证 EnvManager 的 `QuoteType::Single` 路径支持）；
-- `INFO` 内的自由文本（hostname、cpu_model）写入前需**剔除单引号与控制字符**——值被单引号包裹，内嵌 `'` 会破坏 dotenvy/compose 解析；`FIELDS` 全是 hex 哈希天然安全；
-- `FIELDS` 只含哈希不含原始序列号，降低敏感信息暴露面；`device-info` 命令输出同样只含哈希，原始值仅存在于冻结文件（0600）中，支持排障时直接查看该文件。
+- **逐字段变量而非 JSON 字符串**：Java 侧经 yml 原生 map 占位符 + 宽松绑定直接映射到 `device.fields.*` / `device.info.*`，零 JSON 解析、零自定义 Converter；
+- 缺失字段（平台差异/权限）不写键，yml 占位符默认值兜底——即"未采集"的表达方式；
+- 自由文本（hostname / cpu_model / collected_at）**单引号包裹**且写入前剔除单引号与控制字符，避免破坏 dotenvy / compose 解析；哈希与枚举值天然安全；
+- 环境变量只含哈希不含原始序列号；原始值仅存在于冻结文件（0600）中，支持排障时直接查看。
 
 ### 6.2 EnvManager 扩展（nuwax-cli）
 
@@ -214,15 +225,11 @@ impl EnvManager {
 
 ### 6.4 build-agent-docker 改动
 
-`docker/docker-compose.yml` backend 服务 environment 追加三个透传：
-
-```yaml
-      - DEVICE_ID=${DEVICE_ID}
-      - DEVICE_FIELDS=${DEVICE_FIELDS}
-      - DEVICE_INFO=${DEVICE_INFO}
-```
-
-`application-external.yml` **无需任何改动**：配置前缀定为 `device.*`，Spring Boot 的宽松绑定（relaxed binding）自动把环境变量 `DEVICE_ID` 映射到 `device.id`、`DEVICE_FIELDS` 映射到 `device.fields`、`DEVICE_INFO` 映射到 `device.info`，不需要 yml 占位符中转；`device` 前缀已核验与该文件既有键（含顶层扁平键 `license`）无冲突。授权密钥的配置命名与透传由 Java 团队自行决定，不在本方案范围内。完整契约见 §13。
+`docker/docker-compose.yml` backend 服务 environment 追加逐字段透传（15 个变量），
+`docker/config/application-external.yml` 追加 `device:` 原生 map 声明块（占位符形式，
+与文件既有 `${ENV:default}` 惯例一致，示例见 §13.1）。两处均已落地在 build-agent-docker。
+`device` 前缀已核验与该文件既有键（含顶层扁平键 `license`）无冲突。授权密钥的配置命名与
+透传由 Java 团队自行决定，不在本方案范围内。完整契约见 §13。
 
 （旧版 nuwax-cli 部署时环境变量缺失 → Java 侧拿到 null → 机器信息视为未提供，Java 侧自行决定降级行为。）
 
@@ -330,15 +337,20 @@ nuwax-cli device-info --apply --refresh   # 忽略冻结重新采集后写入（
 
 ### 13.1 提供的配置项总览
 
-Java 通过 **`device` 前缀**读取，环境变量经 Spring Boot 宽松绑定自动映射（`DEVICE_ID` → `device.id`），**不需要 yml 占位符**：
+Java 通过 **`device` 前缀**读取；application-external.yml 以原生 map 占位符声明（部署包已包含），
+环境变量经 Spring 宽松绑定写入对应键，Java 侧纯原生 POJO 绑定、零 JSON 解析：
 
 | 配置项 | 环境变量 | 类型 | 用途 |
 |---|---|---|---|
 | `device.id` | `DEVICE_ID` | String | 机器的**主标识**，严格绑定用 |
-| `device.fields` | `DEVICE_FIELDS` | JSON String | 逐字段哈希，**宽容匹配**用 |
-| `device.info` | `DEVICE_INFO` | JSON String | 展示 / 限额 / 排障，**不参与身份判定** |
+| `device.fields.machine_id` | `DEVICE_FIELDS_MACHINE_ID` | String(64 hex) | 身份哈希，宽容匹配用 |
+| `device.fields.dmi_uuid` | `DEVICE_FIELDS_DMI_UUID` | String(64 hex) | 同上（可选缺失） |
+| `device.fields.disk_serial` | `DEVICE_FIELDS_DISK_SERIAL` | String(64 hex) | 同上（可选缺失） |
+| `device.fields.primary_mac` | `DEVICE_FIELDS_PRIMARY_MAC` | String(64 hex) | 同上（可选缺失） |
+| `device.info.*` | `DEVICE_INFO_*`（11 个） | String/int/bool | 展示 / 限额 / 排障，**不参与身份判定** |
 | （交叉验证） | 挂载文件 `/etc/host-machine-id` | 文件 | 防篡改校验，可选，仅 Linux 宿主（见 §13.6） |
 
+完整对接说明（含 yml/绑定代码示例）：`docs/JAVA_DEVICE_INFO_INTEGRATION.md`。
 选 `device` 前缀：已核验与 Java 项目现有配置代码、application-external.yml 既有键（含顶层扁平键 `license`）、compose 环境变量均无冲突；本方案不引入任何 `license` 命名空间的配置。
 
 ### 13.2 `device.id`
@@ -354,20 +366,19 @@ Java 通过 **`device` 前缀**读取，环境变量经 Spring Boot 宽松绑定
 - CLI 冻结机制保证它**不会自动变化**（硬件变更后默认维持旧值，仅 `device-info --refresh` 显式重新绑定）；
 - 前缀 `v1` 为指纹算法版本，Java 遇到未知前缀（如未来的 `v2`）应按"未知版本"策略处理（告警/拒绝，不要当普通字符串比对）。
 
-### 13.3 `device.fields`
+### 13.3 `device.fields.*`
 
-```json
-{
-  "machine_id":  "3fb59a395a93a73cfdf93528db13642d25fa7ed166c201be8f59ca9232c8aff9",
-  "dmi_uuid":    "c8743baf574a672e72e17e4eb99507b12600982e4eec8acb7cd2930320084ba4",
-  "disk_serial": "f28d3bca917672d4d3c52eb6aa9476941451de660f0229ce805e80bb07984cbd",
-  "primary_mac": "035f79cf6426abcb5701c1fea6128a48ca00c6d673dda11fe917eff3065ada37"
-}
-```
+各键值 = `SHA-256(规范化后的原始值)`，64 位小写 hex：
 
-- 值 = `SHA-256(规范化后的原始值)`，64 位小写 hex；
-- **四个键都是可选的**：macOS 无 `disk_serial`、部分 ARM 板无 `dmi_uuid` 属正常。**键缺失 = 该平台未采集，不是篡改，不算不匹配**；
-- 解析必须容忍**未知键**（前向兼容，未来 v2 加字段）。
+| 配置键 | 环境变量 |
+|---|---|
+| `device.fields.machine_id` | `DEVICE_FIELDS_MACHINE_ID` |
+| `device.fields.dmi_uuid` | `DEVICE_FIELDS_DMI_UUID` |
+| `device.fields.disk_serial` | `DEVICE_FIELDS_DISK_SERIAL` |
+| `device.fields.primary_mac` | `DEVICE_FIELDS_PRIMARY_MAC` |
+
+- **四个键都是可选的**：macOS 无 `disk_serial`、部分 ARM 板无 `dmi_uuid` 属正常（该环境变量不写入，yml 默认空串）。**键为空 = 该平台未采集，不是篡改，不算不匹配**；
+- 若绑定 `Map` 而非 POJO：环境变量的宽松绑定会额外产生点分别名键（`machine.id`），值相同，匹配计数时只认下划线键（推荐 POJO 绑定规避，见对接文档）。
 
 字段稳定性语义（匹配策略的依据）：
 
@@ -388,31 +399,17 @@ Java 通过 **`device` 前缀**读取，环境变量经 Spring Boot 宽松绑定
    c. 否则                                                 → 新机器, 拒绝并提示重新授权
 ```
 
-### 13.4 `device.info`
+### 13.4 `device.info.*`
 
-```json
-{
-  "hostname": "prod-web-01",
-  "os": "linux",
-  "arch": "x86_64",
-  "cpu_model": "Intel(R) Xeon(R) Platinum 8269CY CPU @ 2.50GHz",
-  "cpu_cores": 8,
-  "memory_gb": 64,
-  "fingerprint_version": 1,
-  "collected_at": "2026-10-08T10:00:00+08:00",
-  "wsl": false,
-  "containerized": false
-}
-```
-
-| 键 | 说明 | Java 用法 |
+| 配置键 | 环境变量 | 说明 |
 |---|---|---|
-| `hostname` | 宿主机名（展示用） | 管理界面展示"授权绑定机器"；**绝不参与身份判定**（用户可随意改主机名） |
-| `os` / `arch` | `linux`/`macos`/`windows`；`x86_64`/`aarch64` | 授权特性可按平台区分 |
-| `cpu_model` / `cpu_cores` / `memory_gb` | CPU 型号 / 逻辑核数 / 内存 GB | **按资源限额授权**（如"≤8 核 ≤64G 可用"）时校验 |
-| `fingerprint_version` | 与 device-id 前缀一致的数字版本 | 版本路由 |
-| `collected_at` | 冻结时间（RFC3339） | 展示 |
-| `wsl` / `containerized` | 部署环境标记 | `true` 时可在管理界面提示环境特殊 |
+| `hostname` | `DEVICE_INFO_HOSTNAME` | 展示用；**绝不参与身份判定**（用户可随意改主机名） |
+| `os` / `arch` | `DEVICE_INFO_OS` / `DEVICE_INFO_ARCH` | `linux`/`macos`/`windows`；`x86_64`/`aarch64` |
+| `cpu_model` | `DEVICE_INFO_CPU_MODEL` | 可缺失 |
+| `cpu_cores` / `memory_gb` | `DEVICE_INFO_CPU_CORES` / `DEVICE_INFO_MEMORY_GB` | **按资源限额授权**（如"≤8 核 ≤64G"）时校验 |
+| `fingerprint_version` | `DEVICE_INFO_FINGERPRINT_VERSION` | 与 device-id 前缀一致的数字版本 |
+| `collected_at` | `DEVICE_INFO_COLLECTED_AT` | 冻结时间（RFC3339），展示用 |
+| `wsl` / `containerized` | `DEVICE_INFO_WSL` / `DEVICE_INFO_CONTAINERIZED` | 部署环境标记，true 时界面可提示 |
 
 ### 13.5 空值与兼容语义（Java 侧注意）
 

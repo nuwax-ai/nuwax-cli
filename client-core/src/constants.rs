@@ -766,10 +766,26 @@ pub mod device_info {
     /// canonical 串的域分隔前缀（防与其他 SHA-256 用途产生意义混淆）
     pub const CANONICAL_DOMAIN: &str = "nuwax-device-fp-v1";
 
-    /// .env 注入的环境变量键名（Java 侧通过 Spring 宽松绑定读取 device.*）
+    /// .env 注入的环境变量键名（Java 侧经 yml 占位符 + Spring 宽松绑定读取 device.*）。
+    /// 采用逐字段变量（而非 JSON 字符串），Java 侧零解析、纯原生 map/POJO 绑定；
+    /// 缺失字段不写键，yml 占位符默认空串
     pub const ENV_KEY_DEVICE_ID: &str = "DEVICE_ID";
-    pub const ENV_KEY_DEVICE_FIELDS: &str = "DEVICE_FIELDS";
-    pub const ENV_KEY_DEVICE_INFO: &str = "DEVICE_INFO";
+    // device.fields.* 逐字段哈希
+    pub const ENV_KEY_FIELD_MACHINE_ID: &str = "DEVICE_FIELDS_MACHINE_ID";
+    pub const ENV_KEY_FIELD_DMI_UUID: &str = "DEVICE_FIELDS_DMI_UUID";
+    pub const ENV_KEY_FIELD_DISK_SERIAL: &str = "DEVICE_FIELDS_DISK_SERIAL";
+    pub const ENV_KEY_FIELD_PRIMARY_MAC: &str = "DEVICE_FIELDS_PRIMARY_MAC";
+    // device.info.* 展示信息
+    pub const ENV_KEY_INFO_HOSTNAME: &str = "DEVICE_INFO_HOSTNAME";
+    pub const ENV_KEY_INFO_OS: &str = "DEVICE_INFO_OS";
+    pub const ENV_KEY_INFO_ARCH: &str = "DEVICE_INFO_ARCH";
+    pub const ENV_KEY_INFO_CPU_MODEL: &str = "DEVICE_INFO_CPU_MODEL";
+    pub const ENV_KEY_INFO_CPU_CORES: &str = "DEVICE_INFO_CPU_CORES";
+    pub const ENV_KEY_INFO_MEMORY_GB: &str = "DEVICE_INFO_MEMORY_GB";
+    pub const ENV_KEY_INFO_FINGERPRINT_VERSION: &str = "DEVICE_INFO_FINGERPRINT_VERSION";
+    pub const ENV_KEY_INFO_COLLECTED_AT: &str = "DEVICE_INFO_COLLECTED_AT";
+    pub const ENV_KEY_INFO_WSL: &str = "DEVICE_INFO_WSL";
+    pub const ENV_KEY_INFO_CONTAINERIZED: &str = "DEVICE_INFO_CONTAINERIZED";
 
     /// .env 中受管理区块的注释标记（存在则不重复插入）
     pub const ENV_MANAGED_MARKER: &str =
