@@ -787,6 +787,25 @@ pub mod device_info {
     pub const ENV_KEY_INFO_WSL: &str = "DEVICE_INFO_WSL";
     pub const ENV_KEY_INFO_CONTAINERIZED: &str = "DEVICE_INFO_CONTAINERIZED";
 
+    /// Exact keys owned by the CLI. Other host environment variables keep their usual precedence.
+    pub const ENV_MANAGED_KEYS: [&str; 15] = [
+        ENV_KEY_DEVICE_ID,
+        ENV_KEY_FIELD_MACHINE_ID,
+        ENV_KEY_FIELD_DMI_UUID,
+        ENV_KEY_FIELD_DISK_SERIAL,
+        ENV_KEY_FIELD_PRIMARY_MAC,
+        ENV_KEY_INFO_HOSTNAME,
+        ENV_KEY_INFO_OS,
+        ENV_KEY_INFO_ARCH,
+        ENV_KEY_INFO_CPU_MODEL,
+        ENV_KEY_INFO_CPU_CORES,
+        ENV_KEY_INFO_MEMORY_GB,
+        ENV_KEY_INFO_FINGERPRINT_VERSION,
+        ENV_KEY_INFO_COLLECTED_AT,
+        ENV_KEY_INFO_WSL,
+        ENV_KEY_INFO_CONTAINERIZED,
+    ];
+
     /// .env 中受管理区块的注释标记（存在则不重复插入）
     pub const ENV_MANAGED_MARKER: &str =
         "# --- Managed by nuwax-cli: device fingerprint, DO NOT EDIT ---";

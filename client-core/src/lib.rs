@@ -17,6 +17,7 @@ pub mod environment;
 // 重新导出 api_types 中的主要类型以保持向后兼容
 pub use api_types::*;
 pub mod architecture;
+pub mod atomic_file;
 pub mod authenticated_client;
 pub mod backup;
 pub mod config;

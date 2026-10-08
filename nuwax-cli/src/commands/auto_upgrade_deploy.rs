@@ -19,14 +19,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-/// 获取docker-compose文件路径
-fn get_compose_file_path(config_file: &Option<PathBuf>) -> PathBuf {
-    match config_file {
-        Some(path) => path.clone(),
-        None => client_core::constants::docker::get_compose_file_path(),
-    }
-}
-
 /// 创建 DockerManager（统一处理 config_file 和 project_name）
 ///
 /// # 参数
@@ -36,17 +28,11 @@ fn get_compose_file_path(config_file: &Option<PathBuf>) -> PathBuf {
 /// # 返回
 /// 返回配置好的 DockerManager Arc 引用
 fn create_docker_manager(
+    configured: &Arc<DockerManager>,
     config_file: &Option<PathBuf>,
     project_name: &Option<String>,
 ) -> Result<Arc<DockerManager>> {
-    let compose_path = get_compose_file_path(config_file);
-    let env_path = client_core::constants::docker::get_env_file_path();
-
-    Ok(Arc::new(DockerManager::with_project(
-        compose_path,
-        env_path,
-        project_name.clone(),
-    )?))
+    docker_service::select_docker_manager(configured, config_file.clone(), project_name.clone())
 }
 
 fn validate_target_sql(sql_content: &str) -> Result<()> {
@@ -190,7 +176,7 @@ async fn run_staged_deployment(
         .with_context(|| format!("Target MySQL DDL is missing: {}", target_sql_path.display()))?;
     validate_target_sql(&target_sql)?;
 
-    let docker_manager = create_docker_manager(&config_file, &project_name)?;
+    let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
     docker_manager.invalidate_compose_config_cache();
     if !is_first_deployment {
         // stop_docker_services_and_wait 在没有运行容器时可能跳过 down；这里清理旧的已停止容器。
@@ -532,7 +518,7 @@ pub async fn run_auto_upgrade_deploy(
     // 5. 🔍 提前检查并创建挂载目录（重要：Windows Podman Desktop 需要）
     info!("🔍 Checking and creating mount directories...");
 
-    let docker_manager = create_docker_manager(&config_file, &project_name)?;
+    let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
 
     // 使用新的环境检测机制
     let runtime_env = docker_manager.get_runtime_environment();
@@ -1482,7 +1468,7 @@ pub async fn run_offline_deploy(
     }
 
     // 4. 创建 DockerManager
-    let docker_manager = create_docker_manager(&config_file, &project_name)?;
+    let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
 
     // 5. 环境检测（Podman Desktop 需要预先创建挂载目录）
     let runtime_env = docker_manager.get_runtime_environment();

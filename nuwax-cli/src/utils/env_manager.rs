@@ -1,19 +1,19 @@
 use anyhow::{Context, Result};
+use client_core::atomic_file::{PermissionsPolicy, write_atomic};
 use log::{debug, info};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Cursor;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-/// 表示 .env 文件中的一行
+/// Appended records. Existing records retain their original source bytes.
 #[derive(Debug, Clone)]
 pub enum LineType {
     Variable(Variable),
-    Other(String), // 用于注释或空行
+    Other(String),
 }
 
-/// 变量的引号类型
 #[derive(Debug, Clone, PartialEq)]
 pub enum QuoteType {
     None,
@@ -21,221 +21,393 @@ pub enum QuoteType {
     Double,
 }
 
-/// 表示一个环境变量
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub key: String,
     pub value: String,
     pub quote_type: QuoteType,
-    /// 行内注释（自 " #" 起，含前导空格）；保存时原样回写，改值不丢注释
+    /// Parsed metadata retained for callers; saving uses the original source span.
+    #[allow(dead_code)]
     pub inline_comment: Option<String>,
 }
 
-/// 管理 .env 文件的结构
+struct VariableSpan {
+    key: String,
+    value: Range<usize>,
+}
+
+struct SourceLine {
+    range: Range<usize>,
+    variable: Option<VariableSpan>,
+}
+
+/// Edits only selected values; it never serializes unrelated assignments.
+/// In particular, loading a file does not interpolate its values against the
+/// process environment or turn escaped credentials into different source text.
 pub struct EnvManager {
     file_path: Option<PathBuf>,
-    lines: Vec<LineType>,
+    source: String,
+    lines: Vec<SourceLine>,
+    appended: Vec<LineType>,
     variables: HashMap<String, Variable>,
+    changed: HashSet<String>,
+    removed: HashSet<String>,
+    newline: &'static str,
+}
+
+impl Default for EnvManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EnvManager {
-    /// 创建一个新的 EnvManager 实例
     pub fn new() -> Self {
-        EnvManager {
+        Self {
             file_path: None,
+            source: String::new(),
             lines: Vec::new(),
+            appended: Vec::new(),
             variables: HashMap::new(),
+            changed: HashSet::new(),
+            removed: HashSet::new(),
+            newline: "\n",
         }
     }
 
-    /// 从文件加载 .env 内容
     pub fn load<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let path = path.as_ref();
-        self.file_path = Some(path.to_path_buf());
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read .env file: {}", path.display()))?;
         self.parse_content(&content)?;
+        self.file_path = Some(path.to_path_buf());
         Ok(())
     }
 
-    /// 解析 .env 文件内容
     fn parse_content(&mut self, content: &str) -> Result<()> {
+        self.source = content.to_string();
         self.lines.clear();
+        self.appended.clear();
         self.variables.clear();
-
-        // 正则表达式，用于从行中捕获键和值部分
-        // 1. `^s*`: 行首的任意空白
-        // 2. [(?:export\s+)?](cci:1://file:///Volumes/soddy/git_workspace/duck_client/nuwax-cli/src/utils/env_manager.rs:64:4-73:5): 可选的 `export` 关键字
-        // 3. [([\w.]+)](cci:1://file:///Volumes/soddy/git_workspace/duck_client/nuwax-cli/src/utils/env_manager.rs:64:4-73:5): 捕获组 1, 变量的键 (字母, 数字, _, .)
-        // 4. `\s*=\s*`: 等号，前后可有空白
-        // 5. [(.*?)](cci:1://file:///Volumes/soddy/git_workspace/duck_client/nuwax-cli/src/utils/env_manager.rs:64:4-73:5): 捕获组 2, 值以及可能的行内注释 (非贪婪)
-        // 6. `\s*$`: 行尾的任意空白
-        let re = Regex::new(r"^\s*(?:export\s+)?([\w.]+)\s*=\s*(.*?)?\s*$").unwrap();
-
-        for line_str in content.lines() {
-            if let Some(captures) = re.captures(line_str) {
-                let key = captures.get(1).unwrap().as_str().to_string();
-                let raw_value_part = captures.get(2).map_or("", |m| m.as_str());
-
-                // 分离值和行内注释（注释自 " #" 起原样保留，保存时回写）
-                let (raw_value, inline_comment) =
-                    if let Some(comment_start) = raw_value_part.find(" #") {
-                        (
-                            &raw_value_part[..comment_start],
-                            Some(raw_value_part[comment_start..].to_string()),
-                        )
-                    } else {
-                        (raw_value_part, None)
-                    };
-
-                let (value, quote_type) = self.parse_value(raw_value, line_str)?;
-
-                let var = Variable {
-                    key: key.clone(),
-                    value,
-                    quote_type,
-                    inline_comment,
+        self.changed.clear();
+        self.removed.clear();
+        self.newline = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let assignment = Regex::new(r"^[ \t]*(?:export[ \t]+)?([\w.]+)[ \t]*=")?;
+        // Windows editors can add a UTF-8 BOM. It belongs to the document,
+        // not to its first key, and must survive even if that key is removed.
+        let mut start = if content.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            0
+        };
+        while start < content.len() {
+            let physical_end = content[start..]
+                .find('\n')
+                .map_or(content.len(), |offset| start + offset + 1);
+            let first_line = content[start..physical_end].trim_end_matches(['\r', '\n']);
+            if let Some(captures) = assignment.captures(first_line) {
+                let key = captures
+                    .get(1)
+                    .context("Missing assignment key")?
+                    .as_str()
+                    .to_string();
+                let rhs = start + captures.get(0).context("Missing assignment prefix")?.end();
+                let (rhs_end, end, comment) = scan_rhs(content, rhs)?;
+                let raw_rhs = &content[rhs..rhs_end];
+                let trimmed = raw_rhs.trim();
+                // An empty assignment inserts its new value before the existing
+                // whitespace/comment, so KEY= # note becomes KEY=value # note.
+                let value_start = if trimmed.is_empty() {
+                    rhs
+                } else {
+                    rhs + raw_rhs.len() - raw_rhs.trim_start().len()
                 };
-
-                self.lines.push(LineType::Variable(var.clone()));
-                self.variables.insert(key, var);
+                let value_end = if trimmed.is_empty() {
+                    rhs
+                } else {
+                    value_start + trimmed.len()
+                };
+                let (value, quote_type) = parse_value(trimmed);
+                let comment =
+                    comment.map(|comment_end| content[value_end..comment_end].to_string());
+                self.variables.insert(
+                    key.clone(),
+                    Variable {
+                        key: key.clone(),
+                        value,
+                        quote_type,
+                        inline_comment: comment,
+                    },
+                );
+                self.lines.push(SourceLine {
+                    range: start..end,
+                    variable: Some(VariableSpan {
+                        key,
+                        value: value_start..value_end,
+                    }),
+                });
+                start = end;
             } else {
-                // 处理空行或注释
-                self.lines.push(LineType::Other(line_str.to_string()));
+                self.lines.push(SourceLine {
+                    range: start..physical_end,
+                    variable: None,
+                });
+                start = physical_end;
             }
         }
         Ok(())
     }
 
-    /// 使用 dotenvy 解析值以处理转义
-    fn parse_value(&self, raw_value: &str, _original_line: &str) -> Result<(String, QuoteType)> {
-        let trimmed_value = raw_value.trim();
-        let quote_type = if trimmed_value.starts_with('\'') && trimmed_value.ends_with('\'') {
-            QuoteType::Single
-        } else if trimmed_value.starts_with('"') && trimmed_value.ends_with('"') {
-            QuoteType::Double
-        } else {
-            QuoteType::None
-        };
-
-        // 对于无引号或单引号的值，我们直接使用原始值，因为dotenvy的行为可能不完全符合我们的需求
-        // 只有双引号的值才需要dotenvy来处理复杂的转义序列
-        if quote_type == QuoteType::Double {
-            // 我们需要给dotenvy一个完整的 "KEY=VALUE" 行来进行解析
-            let fake_line_for_parser = format!("_DUMMY_KEY_={trimmed_value}");
-            let mut iter = dotenvy::Iter::new(Cursor::new(fake_line_for_parser));
-
-            if let Some(item) = iter.next() {
-                let (_key, value) = item?;
-                return Ok((value, quote_type));
-            }
-        }
-
-        // 对于 None 和 Single quote，我们手动去除引号
-        let value = match quote_type {
-            QuoteType::None => trimmed_value.to_string(),
-            QuoteType::Single => trimmed_value
-                .strip_prefix('\'')
-                .unwrap()
-                .strip_suffix('\'')
-                .unwrap()
-                .to_string(),
-            QuoteType::Double => unreachable!(), // 已在上面处理
-        };
-
-        Ok((value, quote_type))
-    }
-
-    /// 保存对 .env 文件的更改
     pub fn save(&self) -> Result<()> {
         let path = self
             .file_path
             .as_ref()
             .context("File path is not set; cannot save .env changes")?;
-        let mut output = String::new();
-
-        for (i, line_type) in self.lines.iter().enumerate() {
-            if i > 0 {
-                output.push('\n');
-            }
-            match line_type {
-                LineType::Variable(var_template) => {
-                    // 从 variables map 中获取最新的变量信息
-                    if let Some(current_var) = self.variables.get(&var_template.key) {
-                        let value_str = match &current_var.quote_type {
-                            QuoteType::None => current_var.value.clone(),
-                            QuoteType::Single => format!("'{}'", current_var.value),
-                            QuoteType::Double => format!("\"{}\"", current_var.value),
-                        };
-                        // 回写解析时保留的行内注释，改值不丢注释
-                        let comment = current_var.inline_comment.as_deref().unwrap_or("");
-                        output.push_str(&format!("{}={}{}", current_var.key, value_str, comment));
-                    }
-                }
-                LineType::Other(s) => output.push_str(s),
-            }
+        let output = self.render()?;
+        if output == self.source {
+            return Ok(());
         }
-
-        fs::write(path, output)
+        write_atomic(path, output.as_bytes(), PermissionsPolicy::Preserve)
             .with_context(|| format!("Failed to write .env file: {}", path.display()))
     }
 
-    /// 获取一个变量
+    fn render(&self) -> Result<String> {
+        let mut output = if self.source.starts_with('\u{feff}') {
+            String::from("\u{feff}")
+        } else {
+            String::new()
+        };
+        for line in &self.lines {
+            if let Some(span) = &line.variable {
+                if self.removed.contains(&span.key) {
+                    continue;
+                }
+                if self.changed.contains(&span.key) {
+                    let variable = self
+                        .variables
+                        .get(&span.key)
+                        .context("Missing edited variable")?;
+                    output.push_str(&self.source[line.range.start..span.value.start]);
+                    output.push_str(&render_value(&variable.value, &variable.quote_type)?);
+                    output.push_str(&self.source[span.value.end..line.range.end]);
+                    continue;
+                }
+            }
+            output.push_str(&self.source[line.range.clone()]);
+        }
+        let mut additions = Vec::new();
+        for line in &self.appended {
+            match line {
+                LineType::Other(text) => additions.push(text.clone()),
+                LineType::Variable(template) => {
+                    if let Some(variable) = self.variables.get(&template.key) {
+                        additions.push(format!(
+                            "{}={}",
+                            variable.key,
+                            render_value(&variable.value, &variable.quote_type)?
+                        ));
+                    }
+                }
+            }
+        }
+        if !additions.is_empty() {
+            if !output.is_empty() && output != "\u{feff}" && !output.ends_with('\n') {
+                output.push_str(self.newline);
+            }
+            output.push_str(&additions.join(self.newline));
+            if self.source.ends_with('\n') {
+                output.push_str(self.newline);
+            }
+        }
+        Ok(output)
+    }
+
     #[allow(dead_code)]
     pub fn get_variable(&self, key: &str) -> Option<&Variable> {
         self.variables.get(key)
     }
 
-    /// 设置一个变量的值
     pub fn set_variable(&mut self, key: &str, value: &str) -> Result<()> {
-        if let Some(var) = self.variables.get_mut(key) {
-            debug!("Setting variable: {key} = {value}");
-            var.value = value.to_string();
-        } else {
-            // 如果变量不存在，我们可以在此选择添加它
-            // 为了简单起见，我们当前只修改现有变量
-            anyhow::bail!("Variable '{}' does not exist", key);
-        }
+        let variable = self
+            .variables
+            .get_mut(key)
+            .with_context(|| format!("Variable '{key}' does not exist"))?;
+        debug!("Setting variable: {key}");
+        variable.value = value.to_string();
+        self.changed.insert(key.to_string());
         Ok(())
     }
 
-    /// 键存在则更新（含引号风格），不存在则追加到文件末尾。
-    /// 与 `set_variable` 的区别：新增键不需要预先存在于 .env 中
-    /// （设备指纹等 CLI 托管键由工具追加，设计文档 §6.2）。
     pub fn upsert_variable(&mut self, key: &str, value: &str, quote: QuoteType) -> Result<()> {
-        if let Some(var) = self.variables.get_mut(key) {
-            debug!("Upserting existing variable: {key}");
-            var.value = value.to_string();
-            var.quote_type = quote;
-            return Ok(());
+        // Validate before mutating the document. Existing unrelated syntax is
+        // retained as-is, while generated values must form a safe assignment.
+        render_value(value, &quote)?;
+        if let Some(variable) = self.variables.get_mut(key) {
+            variable.value = value.to_string();
+            variable.quote_type = quote;
+            self.changed.insert(key.to_string());
+        } else {
+            let variable = Variable {
+                key: key.to_string(),
+                value: value.to_string(),
+                quote_type: quote,
+                inline_comment: None,
+            };
+            self.appended.push(LineType::Variable(variable.clone()));
+            self.variables.insert(key.to_string(), variable);
         }
-        debug!("Appending new variable: {key}");
-        let var = Variable {
-            key: key.to_string(),
-            value: value.to_string(),
-            quote_type: quote,
-            inline_comment: None,
-        };
-        self.lines.push(LineType::Variable(var.clone()));
-        self.variables.insert(key.to_string(), var);
         Ok(())
     }
 
-    /// 确保托管区块的注释标记存在（不存在则追加一行注释）
+    /// Remove every definition of a key, including duplicate or appended rows.
+    pub fn remove_variable(&mut self, key: &str) -> bool {
+        let existed = self.variables.remove(key).is_some();
+        self.removed.insert(key.to_string());
+        self.changed.remove(key);
+        self.appended
+            .retain(|line| !matches!(line, LineType::Variable(variable) if variable.key == key));
+        existed
+    }
+
     pub fn ensure_marker(&mut self, marker: &str) {
-        let exists = self
-            .lines
+        let exists = self.lines.iter().any(|line| {
+            line.variable.is_none() && self.source[line.range.clone()].trim() == marker.trim()
+        }) || self
+            .appended
             .iter()
-            .any(|line| matches!(line, LineType::Other(s) if s.trim() == marker.trim()));
+            .any(|line| matches!(line, LineType::Other(text) if text.trim() == marker.trim()));
         if !exists {
-            self.lines.push(LineType::Other(marker.to_string()));
+            self.appended.push(LineType::Other(marker.to_string()));
         }
     }
 
-    /// 获取所有变量的不可变引用
     #[allow(dead_code)]
     pub fn get_all_variables(&self) -> &HashMap<String, Variable> {
         &self.variables
+    }
+}
+
+/// Locate a logical assignment, including newlines inside quoted values.
+/// Return value end, record end including newline, and optional comment end.
+fn scan_rhs(content: &str, start: usize) -> Result<(usize, usize, Option<usize>)> {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut previous_whitespace = true;
+    for (offset, character) in content[start..].char_indices() {
+        let index = start + offset;
+        if character == '\n' && quote.is_none() {
+            return Ok((index, index + 1, None));
+        }
+        if escaped {
+            escaped = false;
+        } else if character == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if Some(character) == quote {
+            quote = None;
+        } else if quote.is_none() {
+            match character {
+                '\'' | '"' => quote = Some(character),
+                '#' if previous_whitespace => {
+                    let end = content[index..]
+                        .find('\n')
+                        .map_or(content.len(), |n| index + n + 1);
+                    let comment_end = if content[..end].ends_with('\n') {
+                        end - 1
+                    } else {
+                        end
+                    };
+                    let comment_end = if content[..comment_end].ends_with('\r') {
+                        comment_end - 1
+                    } else {
+                        comment_end
+                    };
+                    return Ok((index, end, Some(comment_end)));
+                }
+                _ => {}
+            }
+        }
+        previous_whitespace = character.is_whitespace();
+    }
+    anyhow::ensure!(
+        quote.is_none(),
+        "Unterminated quoted .env value at byte {start}"
+    );
+    Ok((content.len(), content.len(), None))
+}
+
+/// Decode display values without evaluating ${...} against process state.
+/// Original source is always retained separately for untouched assignments.
+fn parse_value(raw: &str) -> (String, QuoteType) {
+    if raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\'') {
+        return (raw[1..raw.len() - 1].to_string(), QuoteType::Single);
+    }
+    if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        let mut decoded = String::new();
+        let mut characters = raw[1..raw.len() - 1].chars();
+        while let Some(character) = characters.next() {
+            if character != '\\' {
+                decoded.push(character);
+                continue;
+            }
+            match characters.next() {
+                Some('n') => decoded.push('\n'),
+                Some('r') => decoded.push('\r'),
+                Some('t') => decoded.push('\t'),
+                Some(next @ ('\\' | '"' | '\'' | '$' | ' ')) => decoded.push(next),
+                Some(other) => {
+                    decoded.push('\\');
+                    decoded.push(other);
+                }
+                None => decoded.push('\\'),
+            }
+        }
+        return (decoded, QuoteType::Double);
+    }
+    (raw.to_string(), QuoteType::None)
+}
+
+fn render_value(value: &str, quote: &QuoteType) -> Result<String> {
+    match quote {
+        QuoteType::None => {
+            anyhow::ensure!(
+                !value.contains(['\r', '\n']),
+                "Unquoted .env values cannot contain newlines"
+            );
+            Ok(value.to_string())
+        }
+        QuoteType::Single => {
+            anyhow::ensure!(
+                !value.contains('\''),
+                "Single-quoted .env values cannot contain a single quote"
+            );
+            Ok(format!("'{value}'"))
+        }
+        QuoteType::Double => {
+            anyhow::ensure!(
+                !value.contains('`'),
+                "Use single quotes for literal backticks in .env values"
+            );
+            let mut encoded = String::from("\"");
+            for character in value.chars() {
+                match character {
+                    '\\' | '"' | '$' => {
+                        encoded.push('\\');
+                        encoded.push(character);
+                    }
+                    '\n' => encoded.push_str("\\n"),
+                    // dotenvy does not recognize \\r or \\t escapes. Literal
+                    // controls inside quotes retain their meaning for both
+                    // dotenvy and Compose (managed text is sanitized upstream).
+                    other => encoded.push(other),
+                }
+            }
+            encoded.push('"');
+            Ok(encoded)
+        }
     }
 }
 
@@ -292,6 +464,145 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn injection_preserves_quoted_secrets_and_source_bytes() {
+        let file = NamedTempFile::new().unwrap();
+        let original = concat!(
+            "  export MYSQL_PASSWORD = \"pa # ss\\\"C:\\\\tmp\\n\\$TOKEN\"  # keep me\r\n",
+            "WINDOWS_PATH='C:\\work\\nuwax'\r\n",
+            "REFERENCE=\"${SOME_EXTERNAL_VALUE}\"\r\n",
+            "MULTILINE='first # literal\r\nDEVICE_ID=inside-value\r\nlast'\r\n",
+            "# Original comment\r\n"
+        );
+        fs::write(file.path(), original).unwrap();
+        let mut manager = EnvManager::new();
+        manager.load(file.path()).unwrap();
+        assert!(manager.get_variable("DEVICE_ID").is_none());
+        manager
+            .upsert_variable("DEVICE_ID", "v1:new", QuoteType::None)
+            .unwrap();
+        manager.save().unwrap();
+        assert_eq!(
+            fs::read_to_string(file.path()).unwrap(),
+            format!("{original}DEVICE_ID=v1:new\r\n")
+        );
+        manager.load(file.path()).unwrap();
+        manager
+            .upsert_variable("DEVICE_ID", "v1:new", QuoteType::None)
+            .unwrap();
+        manager.save().unwrap();
+        assert_eq!(
+            fs::read_to_string(file.path()).unwrap(),
+            format!("{original}DEVICE_ID=v1:new\r\n")
+        );
+    }
+
+    #[test]
+    fn updates_duplicate_keys_with_their_own_comments_and_prefixes() {
+        let mut manager = EnvManager::new();
+        manager.parse_content(" export DEVICE_ID = 'old # literal' # first\r\nDEVICE_ID=old2  # second\r\nOTHER=keep\r\n").unwrap();
+        manager
+            .upsert_variable("DEVICE_ID", "v1:new", QuoteType::None)
+            .unwrap();
+        assert_eq!(
+            manager.render().unwrap(),
+            " export DEVICE_ID = v1:new # first\r\nDEVICE_ID=v1:new  # second\r\nOTHER=keep\r\n"
+        );
+    }
+
+    #[test]
+    fn removal_deletes_all_definitions_and_supports_reinsertion() {
+        let mut manager = EnvManager::new();
+        manager.parse_content("DEVICE_FIELDS_DISK_SERIAL=stale\nOTHER=keep\nexport DEVICE_FIELDS_DISK_SERIAL=also_stale\n").unwrap();
+        assert!(manager.remove_variable("DEVICE_FIELDS_DISK_SERIAL"));
+        assert!(!manager.remove_variable("NOT_PRESENT"));
+        assert_eq!(manager.render().unwrap(), "OTHER=keep\n");
+        manager
+            .upsert_variable("DEVICE_FIELDS_DISK_SERIAL", "current", QuoteType::None)
+            .unwrap();
+        assert_eq!(
+            manager.render().unwrap(),
+            "OTHER=keep\nDEVICE_FIELDS_DISK_SERIAL=current\n"
+        );
+        assert!(manager.remove_variable("DEVICE_FIELDS_DISK_SERIAL"));
+        assert_eq!(manager.render().unwrap(), "OTHER=keep\n");
+    }
+
+    #[test]
+    fn empty_assignment_keeps_comment_and_missing_final_newline() {
+        let mut manager = EnvManager::new();
+        manager
+            .parse_content("A= # explanation\nLAST='unchanged'")
+            .unwrap();
+        manager.set_variable("A", "80").unwrap();
+        assert_eq!(
+            manager.render().unwrap(),
+            "A=80 # explanation\nLAST='unchanged'"
+        );
+    }
+
+    #[test]
+    fn bom_first_assignment_updates_without_creating_duplicate() {
+        let mut manager = EnvManager::new();
+        manager
+            .parse_content("\u{feff}FRONTEND_HOST_PORT=80 # keep\r\nOTHER='unchanged'\r\n")
+            .unwrap();
+        manager.set_variable("FRONTEND_HOST_PORT", "8090").unwrap();
+        assert_eq!(
+            manager.render().unwrap(),
+            "\u{feff}FRONTEND_HOST_PORT=8090 # keep\r\nOTHER='unchanged'\r\n"
+        );
+    }
+
+    #[test]
+    fn bom_survives_first_key_removal_and_reinsertion() {
+        let mut manager = EnvManager::new();
+        manager
+            .parse_content("\u{feff}DEVICE_FIELDS_DISK_SERIAL=stale\r\n")
+            .unwrap();
+        assert!(manager.remove_variable("DEVICE_FIELDS_DISK_SERIAL"));
+        assert_eq!(manager.render().unwrap(), "\u{feff}");
+        manager
+            .upsert_variable("DEVICE_ID", "v1:current", QuoteType::None)
+            .unwrap();
+        assert_eq!(
+            manager.render().unwrap(),
+            "\u{feff}DEVICE_ID=v1:current\r\n"
+        );
+    }
+
+    #[test]
+    fn edited_double_quotes_round_trip_with_dotenvy() {
+        let file = NamedTempFile::new().unwrap();
+        fs::write(file.path(), "VALUE=\"old\"\n").unwrap();
+        let value = "quote \" slash \\ dollar $TOKEN\nnext line";
+        let mut manager = EnvManager::new();
+        manager.load(file.path()).unwrap();
+        manager.set_variable("VALUE", value).unwrap();
+        manager.save().unwrap();
+        let decoded: HashMap<_, _> = dotenvy::from_path_iter(file.path())
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(decoded.get("VALUE").map(String::as_str), Some(value));
+    }
+
+    #[test]
+    fn updating_a_quoted_value_keeps_hashes_in_the_value() {
+        let mut manager = EnvManager::new();
+        manager
+            .parse_content("HOSTNAME='prod # one' # note\n")
+            .unwrap();
+        assert_eq!(
+            manager.get_variable("HOSTNAME").unwrap().value,
+            "prod # one"
+        );
+        manager
+            .upsert_variable("HOSTNAME", "prod # two", QuoteType::Single)
+            .unwrap();
+        assert_eq!(manager.render().unwrap(), "HOSTNAME='prod # two' # note\n");
+    }
 
     #[test]
     fn test_env_parsing() {

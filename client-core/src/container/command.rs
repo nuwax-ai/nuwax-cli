@@ -101,7 +101,7 @@ impl DockerManager {
         cmd_args.extend(args);
 
         debug!("Executing docker compose subcommand: {:?}", cmd_args);
-        self.run_docker_command(&cmd_args).await
+        self.run_compose_process("docker", &cmd_args).await
     }
 
     /// 使用独立的 docker-compose 命令
@@ -126,8 +126,32 @@ impl DockerManager {
             "Executing standalone docker-compose command: {:?}",
             cmd_args
         );
-        let output = Command::new("docker-compose")
-            .args(&cmd_args)
+        self.run_compose_process("docker-compose", &cmd_args).await
+    }
+
+    /// The file is authoritative for CLI-managed device information, even if
+    /// this process inherited an older value before the file was repaired.
+    fn apply_managed_compose_environment(&self, command: &mut Command) -> Result<()> {
+        let values = super::config::load_env_values(&self.env_file)?;
+        for key in crate::constants::device_info::ENV_MANAGED_KEYS {
+            if let Some(value) = values.get(key) {
+                command.env(key, value);
+            } else {
+                command.env_remove(key);
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_compose_process(
+        &self,
+        program: &str,
+        cmd_args: &[&str],
+    ) -> Result<std::process::Output> {
+        let mut command = Command::new(program);
+        self.apply_managed_compose_environment(&mut command)?;
+        let output = command
+            .args(cmd_args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -147,5 +171,67 @@ impl DockerManager {
             .await?;
 
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod managed_compose_environment_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+
+    #[test]
+    fn current_file_replaces_inherited_device_values_without_changing_other_overrides() -> Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let env_path = directory.path().join("custom.env");
+        std::fs::write(
+            &env_path,
+            "DEVICE_ID=v1:current\nDEVICE_INFO_CPU_MODEL='Current CPU'\nUNRELATED=from-file\n",
+        )?;
+        let manager = DockerManager::with_project(
+            directory.path().join("compose.yml"),
+            env_path.clone(),
+            None,
+        )?;
+        for program in ["docker", "docker-compose"] {
+            let mut command = Command::new(program);
+            command
+                .env("DEVICE_ID", "v1:inherited-old")
+                .env("DEVICE_FIELDS_DISK_SERIAL", "old-disk")
+                .env("UNRELATED", "from-host");
+            manager.apply_managed_compose_environment(&mut command)?;
+            let overrides: HashMap<OsString, Option<OsString>> = command
+                .as_std()
+                .get_envs()
+                .map(|(key, value)| (key.to_owned(), value.map(ToOwned::to_owned)))
+                .collect();
+            assert_eq!(
+                overrides.get(&OsString::from("DEVICE_ID")),
+                Some(&Some(OsString::from("v1:current")))
+            );
+            assert_eq!(
+                overrides.get(&OsString::from("DEVICE_INFO_CPU_MODEL")),
+                Some(&Some(OsString::from("Current CPU")))
+            );
+            assert_eq!(
+                overrides.get(&OsString::from("DEVICE_FIELDS_DISK_SERIAL")),
+                Some(&None)
+            );
+            assert_eq!(
+                overrides.get(&OsString::from("UNRELATED")),
+                Some(&Some(OsString::from("from-host")))
+            );
+        }
+        std::fs::write(&env_path, "DEVICE_ID=v1:updated\n")?;
+        let mut next = Command::new("docker");
+        manager.apply_managed_compose_environment(&mut next)?;
+        assert!(
+            next.as_std()
+                .get_envs()
+                .any(|(key, value)| key == "DEVICE_ID"
+                    && value == Some(std::ffi::OsStr::new("v1:updated")))
+        );
+        Ok(())
     }
 }
