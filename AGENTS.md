@@ -114,6 +114,7 @@ RUST_LOG=debug cargo run -- status
 | `auto-upgrade-deploy` | Automated upgrade and deployment |
 | `cache` | Cache management |
 | `diff-sql` | Compare two SQL files and generate diff migration SQL |
+| `device-info` | Show host device fingerprint for license binding (`--json`, `--apply` injects into docker/.env, `--refresh` rebinds after hardware change) |
 
 ## Important Implementation Details
 

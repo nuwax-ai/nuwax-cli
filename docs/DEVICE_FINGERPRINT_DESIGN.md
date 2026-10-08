@@ -1,6 +1,6 @@
 # 设备指纹（Device Fingerprint）多平台方案设计
 
-> 状态：P0 已实现并完成三平台真机验证（2026-10-08：macOS aarch64 / Linux x86_64 / Windows x86_64）
+> 状态：P0+P1 已实现——逐字段注入契约随 nuwax-cli 1.0.136-beta.1（npm beta 渠道）发布，三平台真机验证通过（2026-10-08）；平台部署包待随下次打包发版内置透传
 > 日期：2026-10-08
 > 目标仓库：nuwax-cli（采集与注入）、build-agent-docker（compose / yml 透传）、Java backend（密钥校验，另行方案）
 
@@ -416,7 +416,7 @@ Java 通过 **`device` 前缀**读取；application-external.yml 以原生 map �
 | 场景 | 表现 | 说明 |
 |---|---|---|
 | 旧版 nuwax-cli 部署（未升级） | `device.*` 为 null | 机器信息未提供，Java 侧自行决定降级行为 |
-| 部分 JSON 键缺失 | 见 §13.3 | 正常，按"未采集"处理（平台差异） |
+| 部分字段为空（如 dmi_uuid） | 见 §13.3 | 正常，按"未采集"处理（平台差异/权限） |
 | `device.id` 前缀非 `v1:` | 未知版本 | 指纹算法版本不识别，建议告警 |
 | JSON 解析失败 | 值损坏 | 属异常状态，建议 Fail Fast 暴露 |
 
