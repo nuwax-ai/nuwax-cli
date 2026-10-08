@@ -51,7 +51,7 @@ async fn main() {
         warn!("🚀 Starting in Testing Environment...");
     }
 
-    // 设置日志记录
+    // 设置日志记录（日志走 stderr，stdout 留给数据输出）
     setup_logging(cli.verbose);
 
     // `init` 命令是特例，它不需要预先加载配置
@@ -114,6 +114,20 @@ async fn main() {
                 "❌ SQL diff comparison failed: {error}",
                 error = e.to_string()
             );
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // `device-info` 命令特殊处理：本机采集，不依赖配置/数据库初始化
+    if let Commands::DeviceInfo {
+        json,
+        apply,
+        refresh,
+    } = cli.command
+    {
+        if let Err(e) = nuwax_cli::run_device_info(json, apply, refresh).await {
+            error!("❌ Device info failed: {error}", error = e.to_string());
             std::process::exit(1);
         }
         return;

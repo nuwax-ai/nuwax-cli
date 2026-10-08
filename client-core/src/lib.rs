@@ -26,6 +26,7 @@ pub mod container;
 pub mod database;
 pub mod database_manager;
 pub mod db;
+pub mod device_info;
 pub mod downloader;
 pub mod error;
 pub mod mysql_executor;

@@ -746,3 +746,45 @@ pub mod updates {
     /// 默认检查频率
     pub const DEFAULT_CHECK_FREQUENCY: &str = "daily";
 }
+
+/// 设备指纹相关常量（设计文档：docs/DEVICE_FINGERPRINT_DESIGN.md）
+pub mod device_info {
+    use std::path::{Path, PathBuf};
+
+    /// 数据目录名（与其他模块的状态持久化目录约定一致）
+    pub const DATA_DIR_NAME: &str = "data";
+
+    /// 冻结文件名
+    pub const FINGERPRINT_FILE_NAME: &str = "device_fingerprint.json";
+
+    /// 指纹算法版本（对应 device_id 前缀 "v1"）
+    pub const FP_VERSION: usize = 1;
+
+    /// device_id 前缀
+    pub const DEVICE_ID_PREFIX: &str = "v1";
+
+    /// canonical 串的域分隔前缀（防与其他 SHA-256 用途产生意义混淆）
+    pub const CANONICAL_DOMAIN: &str = "nuwax-device-fp-v1";
+
+    /// .env 注入的环境变量键名（Java 侧通过 Spring 宽松绑定读取 device.*）
+    pub const ENV_KEY_DEVICE_ID: &str = "DEVICE_ID";
+    pub const ENV_KEY_DEVICE_FIELDS: &str = "DEVICE_FIELDS";
+    pub const ENV_KEY_DEVICE_INFO: &str = "DEVICE_INFO";
+
+    /// .env 中受管理区块的注释标记（存在则不重复插入）
+    pub const ENV_MANAGED_MARKER: &str =
+        "# --- Managed by nuwax-cli: device fingerprint, DO NOT EDIT ---";
+
+    /// 身份字段名（canonical 拼接顺序，亦是 DEVICE_FIELDS JSON 的键）
+    pub const FIELD_MACHINE_ID: &str = "machine_id";
+    pub const FIELD_DMI_UUID: &str = "dmi_uuid";
+    pub const FIELD_DISK_SERIAL: &str = "disk_serial";
+    pub const FIELD_PRIMARY_MAC: &str = "primary_mac";
+
+    /// 获取冻结文件路径（跨平台）
+    pub fn get_fingerprint_file_path() -> PathBuf {
+        Path::new(".")
+            .join(DATA_DIR_NAME)
+            .join(FINGERPRINT_FILE_NAME)
+    }
+}

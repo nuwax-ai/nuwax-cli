@@ -1404,3 +1404,19 @@ restart_policy:
   on_failure: "on-failure (持续服务)"
   on_failure_n: "on-failure:n (持续服务)"
   unknown: "未知"
+
+# device_info.rs / device_env.rs messages
+device_info_cmd:
+  env_not_found: "未找到 .env 文件（%{path}）；请在部署根目录执行，或先完成部署"
+  inject_failed: "设备指纹写入 .env 失败: %{error}"
+  report_title: "设备指纹"
+  device_id: "设备 ID"
+  source: "来源"
+  collected_at: "采集时间"
+  field_hashes: "字段哈希 (SHA-256)"
+  environment: "环境信息"
+  wsl_note: "运行于 WSL 环境；指纹标识的是 WSL 发行版"
+  containerized_note: "nuwax-cli 似乎运行在容器内；指纹为容器视角"
+  drift_warning: "检测到硬件指纹漂移；为保持授权连续性，维持冻结的设备 ID"
+  drift_hint: "如确认是硬件变更导致的重绑定，请执行: nuwax-cli device-info --apply --refresh"
+  applied: "设备指纹已写入 %{path}"

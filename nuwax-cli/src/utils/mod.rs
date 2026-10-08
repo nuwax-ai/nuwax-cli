@@ -9,6 +9,7 @@ use tracing::{error, info};
 use zip::read::ZipFile;
 
 // 导入匹配器模块
+pub mod device_env;
 pub mod env_manager;
 
 // 重新导出匹配器模块
@@ -872,6 +873,8 @@ pub fn setup_logging(verbose: bool) {
             .init();
     } else {
         // 输出到终端 - 使用简洁格式，用户友好
+        // 日志走 stderr：stdout 留给数据（如 device-info --json 的机器可读输出），
+        // 管道 `nuwax-cli device-info --json | jq` 才不会被日志行污染
         fmt()
             .with_env_filter(env_filter)
             .with_target(false) // 不显示模块路径
@@ -879,6 +882,7 @@ pub fn setup_logging(verbose: bool) {
             .with_line_number(false) // 不显示行号
             .without_time() // 不显示时间戳
             .compact() // 使用紧凑格式
+            .with_writer(std::io::stderr)
             .init();
     }
 }

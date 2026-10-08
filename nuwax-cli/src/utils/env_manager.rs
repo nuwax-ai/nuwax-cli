@@ -27,8 +27,8 @@ pub struct Variable {
     pub key: String,
     pub value: String,
     pub quote_type: QuoteType,
-    pub has_comment: bool,
-    pub line_index: usize,
+    /// 行内注释（自 " #" 起，含前导空格）；保存时原样回写，改值不丢注释
+    pub inline_comment: Option<String>,
 }
 
 /// 管理 .env 文件的结构
@@ -72,17 +72,20 @@ impl EnvManager {
         // 6. `\s*$`: 行尾的任意空白
         let re = Regex::new(r"^\s*(?:export\s+)?([\w.]+)\s*=\s*(.*?)?\s*$").unwrap();
 
-        for (i, line_str) in content.lines().enumerate() {
+        for line_str in content.lines() {
             if let Some(captures) = re.captures(line_str) {
                 let key = captures.get(1).unwrap().as_str().to_string();
                 let raw_value_part = captures.get(2).map_or("", |m| m.as_str());
 
-                // 分离值和行内注释
-                let (raw_value, has_comment) =
+                // 分离值和行内注释（注释自 " #" 起原样保留，保存时回写）
+                let (raw_value, inline_comment) =
                     if let Some(comment_start) = raw_value_part.find(" #") {
-                        (&raw_value_part[..comment_start], true)
+                        (
+                            &raw_value_part[..comment_start],
+                            Some(raw_value_part[comment_start..].to_string()),
+                        )
                     } else {
-                        (raw_value_part, false)
+                        (raw_value_part, None)
                     };
 
                 let (value, quote_type) = self.parse_value(raw_value, line_str)?;
@@ -91,8 +94,7 @@ impl EnvManager {
                     key: key.clone(),
                     value,
                     quote_type,
-                    has_comment,
-                    line_index: i,
+                    inline_comment,
                 };
 
                 self.lines.push(LineType::Variable(var.clone()));
@@ -158,27 +160,16 @@ impl EnvManager {
             }
             match line_type {
                 LineType::Variable(var_template) => {
-                    // 从 [variables](cci:1://file:///Volumes/soddy/git_workspace/duck_client/nuwax-cli/src/utils/env_manager.rs:5:4-8:5) map 中获取最新的变量信息
+                    // 从 variables map 中获取最新的变量信息
                     if let Some(current_var) = self.variables.get(&var_template.key) {
                         let value_str = match &current_var.quote_type {
                             QuoteType::None => current_var.value.clone(),
                             QuoteType::Single => format!("'{}'", current_var.value),
                             QuoteType::Double => format!("\"{}\"", current_var.value),
                         };
-
-                        // 重新构建行，保留原始的行内注释（如果存在）
-                        let original_line_str = self.get_original_line_str(current_var.line_index);
-                        let line_ending = if current_var.has_comment {
-                            if let Some(comment_start) = original_line_str.find(" #") {
-                                &original_line_str[comment_start..]
-                            } else {
-                                "" // 理论上不应该发生
-                            }
-                        } else {
-                            ""
-                        };
-                        output
-                            .push_str(&format!("{}={}{}", current_var.key, value_str, line_ending));
+                        // 回写解析时保留的行内注释，改值不丢注释
+                        let comment = current_var.inline_comment.as_deref().unwrap_or("");
+                        output.push_str(&format!("{}={}{}", current_var.key, value_str, comment));
                     }
                 }
                 LineType::Other(s) => output.push_str(s),
@@ -187,21 +178,6 @@ impl EnvManager {
 
         fs::write(path, output)
             .with_context(|| format!("Failed to write .env file: {}", path.display()))
-    }
-
-    fn get_original_line_str(&self, index: usize) -> &str {
-        match &self.lines.get(index) {
-            Some(LineType::Variable(_var)) => {
-                // This is tricky as we don't store the original string.
-                // We need to reconstruct it or find a way to access it.
-                // For now, let's assume we can get it from somewhere.
-                // This part needs a better implementation.
-                // Let's just return an empty string for now.
-                ""
-            }
-            Some(LineType::Other(s)) => s,
-            None => "",
-        }
     }
 
     /// 获取一个变量
@@ -221,6 +197,39 @@ impl EnvManager {
             anyhow::bail!("Variable '{}' does not exist", key);
         }
         Ok(())
+    }
+
+    /// 键存在则更新（含引号风格），不存在则追加到文件末尾。
+    /// 与 `set_variable` 的区别：新增键不需要预先存在于 .env 中
+    /// （设备指纹等 CLI 托管键由工具追加，设计文档 §6.2）。
+    pub fn upsert_variable(&mut self, key: &str, value: &str, quote: QuoteType) -> Result<()> {
+        if let Some(var) = self.variables.get_mut(key) {
+            debug!("Upserting existing variable: {key}");
+            var.value = value.to_string();
+            var.quote_type = quote;
+            return Ok(());
+        }
+        debug!("Appending new variable: {key}");
+        let var = Variable {
+            key: key.to_string(),
+            value: value.to_string(),
+            quote_type: quote,
+            inline_comment: None,
+        };
+        self.lines.push(LineType::Variable(var.clone()));
+        self.variables.insert(key.to_string(), var);
+        Ok(())
+    }
+
+    /// 确保托管区块的注释标记存在（不存在则追加一行注释）
+    pub fn ensure_marker(&mut self, marker: &str) {
+        let exists = self
+            .lines
+            .iter()
+            .any(|line| matches!(line, LineType::Other(s) if s.trim() == marker.trim()));
+        if !exists {
+            self.lines.push(LineType::Other(marker.to_string()));
+        }
     }
 
     /// 获取所有变量的不可变引用
@@ -313,7 +322,14 @@ ESCAPED_VAR="hello\nworld"
             manager.get_variable("DB_HOST").unwrap().quote_type,
             QuoteType::Single
         );
-        assert!(manager.get_variable("API_URL").unwrap().has_comment);
+        assert_eq!(
+            manager
+                .get_variable("API_URL")
+                .unwrap()
+                .inline_comment
+                .as_deref(),
+            Some(" # inline comment")
+        );
         assert_eq!(
             manager.get_variable("ESCAPED_VAR").unwrap().value,
             "hello\nworld"
@@ -362,5 +378,106 @@ KEY3='single_quoted'"#;
             final_manager.get_variable("KEY2").unwrap().quote_type,
             QuoteType::Double
         );
+    }
+
+    #[test]
+    fn test_set_variable_preserves_inline_comment() {
+        // 回归测试：改值不丢行内注释（旧行为依赖 line_index 反查原始行，
+        // get_original_line_str 恒返回空串，注释会静默丢失）
+        let temp_file = NamedTempFile::new().unwrap();
+        fs::write(
+            temp_file.path(),
+            "FRONTEND_HOST_PORT=80 # default http port\nMYSQL_USER=agent\n",
+        )
+        .unwrap();
+
+        let mut manager = EnvManager::new();
+        manager.load(temp_file.path()).unwrap();
+        manager.set_variable("FRONTEND_HOST_PORT", "8090").unwrap();
+        manager.save().unwrap();
+
+        let content = fs::read_to_string(temp_file.path()).unwrap();
+        assert_eq!(
+            content.trim(),
+            "FRONTEND_HOST_PORT=8090 # default http port\nMYSQL_USER=agent"
+        );
+    }
+
+    #[test]
+    fn test_upsert_appends_new_key_with_marker() {
+        let temp_file = NamedTempFile::new().unwrap();
+        fs::write(
+            temp_file.path(),
+            "FRONTEND_HOST_PORT=80\nMYSQL_USER=agent\n",
+        )
+        .unwrap();
+
+        let mut manager = EnvManager::new();
+        manager.load(temp_file.path()).unwrap();
+        manager.ensure_marker("# --- managed ---");
+        manager
+            .upsert_variable("DEVICE_ID", "v1:abc123", QuoteType::None)
+            .unwrap();
+        manager
+            .upsert_variable(
+                "DEVICE_FIELDS",
+                "{\"machine_id\":\"h1\"}",
+                QuoteType::Single,
+            )
+            .unwrap();
+        manager.save().unwrap();
+
+        let content = fs::read_to_string(temp_file.path()).unwrap();
+        let expected = "FRONTEND_HOST_PORT=80\nMYSQL_USER=agent\n# --- managed ---\nDEVICE_ID=v1:abc123\nDEVICE_FIELDS='{\"machine_id\":\"h1\"}'";
+        assert_eq!(content.trim(), expected);
+
+        // 读回验证解析结果
+        let mut reloaded = EnvManager::new();
+        reloaded.load(temp_file.path()).unwrap();
+        assert_eq!(
+            reloaded.get_variable("DEVICE_ID").unwrap().value,
+            "v1:abc123"
+        );
+        assert_eq!(
+            reloaded.get_variable("DEVICE_FIELDS").unwrap().value,
+            "{\"machine_id\":\"h1\"}"
+        );
+    }
+
+    #[test]
+    fn test_upsert_updates_existing_key_and_quote() {
+        let temp_file = NamedTempFile::new().unwrap();
+        fs::write(temp_file.path(), "DEVICE_ID=old\nOTHER=1\n").unwrap();
+
+        let mut manager = EnvManager::new();
+        manager.load(temp_file.path()).unwrap();
+        manager
+            .upsert_variable("DEVICE_ID", "v1:new", QuoteType::None)
+            .unwrap();
+        manager.save().unwrap();
+
+        let content = fs::read_to_string(temp_file.path()).unwrap();
+        // 更新在原位置，OTHER 不受影响
+        assert_eq!(content.trim(), "DEVICE_ID=v1:new\nOTHER=1");
+    }
+
+    #[test]
+    fn test_upsert_idempotent_and_marker_not_duplicated() {
+        let temp_file = NamedTempFile::new().unwrap();
+        fs::write(temp_file.path(), "A=1\n").unwrap();
+
+        for _ in 0..2 {
+            let mut manager = EnvManager::new();
+            manager.load(temp_file.path()).unwrap();
+            manager.ensure_marker("# --- managed ---");
+            manager
+                .upsert_variable("DEVICE_ID", "v1:same", QuoteType::None)
+                .unwrap();
+            manager.save().unwrap();
+        }
+
+        let content = fs::read_to_string(temp_file.path()).unwrap();
+        assert_eq!(content.trim(), "A=1\n# --- managed ---\nDEVICE_ID=v1:same");
+        assert_eq!(content.matches("# --- managed ---").count(), 1);
     }
 }

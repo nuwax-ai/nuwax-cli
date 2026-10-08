@@ -13,7 +13,7 @@ documentation = "https://github.com/nuwax-ai/nuwax-cli"
 [workspace.dependencies]
 
 # 内部 crate
-client-core = { path = "client-core", version = "0.1.10", default-features = false }
+client-core = { path = "client-core", version = "0.1.11", default-features = false }
 
 # 集成的 ducker Docker TUI (v0.6.5 依赖 bollard ^0.20.1，与 0.21.0 不兼容)
 ducker = { version = "0.6.5" }
@@ -58,10 +58,10 @@ tower-http = { version = "0.7", features = [
 axum-extra = { version = "0.12", features = ["typed-header"] }
 
 # API文档
-utoipa = { version = "5.5", features = ["axum_extras", "chrono"] }
-utoipa-rapidoc = { version = "6", features = ["axum"] }
-utoipa-redoc = { version = "6", features = ["axum"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa = { version = "6", features = ["axum_extras", "chrono"] }
+utoipa-rapidoc = { version = "7", features = ["axum"] }
+utoipa-redoc = { version = "7", features = ["axum"] }
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
 
 # 并发工具
 dashmap = "6.2"
@@ -74,10 +74,10 @@ criterion = "0.8.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "=0.9.33"
-serde_with = "3.22"
+serde_with = "3.24"
 
 # 配置文件
-toml = "1.1.4"
+toml = "1.1.7"
 
 # 构建工具
 derive_builder = "0.20"
@@ -119,7 +119,7 @@ flate2 = "1.1"
 tar = "0.4"
 
 # 文件类型检测 (魔数检测)
-infer = "0.19"
+infer = "0.22"
 
 # 加密和哈希
 sha2 = "0.11"
@@ -159,7 +159,10 @@ fs_extra = "1.3"
 remove_dir_all = "1"
 
 # Base64 编码/解码
-base64 = "0.22"
+base64 = "0.23"
+
+# Windows 注册表访问(设备指纹 MachineGuid 读取, 仅 windows target)
+winreg = "0.56"
 
 # 系统信息
 num_cpus = "1.17"
@@ -180,7 +183,7 @@ color-eyre = "0.6"
 ratatui = "0.30"
 
 # 系统目录路径
-dirs = "6.0"
+dirs = "7.0"
 
 # 解析器组合子
 nom = "8"

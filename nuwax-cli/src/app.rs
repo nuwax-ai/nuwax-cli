@@ -184,6 +184,7 @@ impl CliApp {
                 new_version,
                 output,
             } => commands::run_diff_sql(old_sql, new_sql, old_version, new_version, output).await,
+            Commands::DeviceInfo { .. } => unreachable!("handled in main.rs"), // 不依赖数据库，已在 main.rs 中处理
         }
     }
 }

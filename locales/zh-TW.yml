@@ -1365,3 +1365,19 @@ script_permissions:
   debug_all_script_encoding_passed: "所有腳本編碼檢查通過"
   debug_script_scan_failed_non_critical: "腳本掃描失敗（非關鍵錯誤）: %{error}"
   debug_script_permission_already_correct: "腳本權限已正確: %{path}"
+
+# device_info.rs / device_env.rs messages
+device_info_cmd:
+  env_not_found: "未找到 .env 檔案（%{path}）；請在部署根目錄執行，或先完成部署"
+  inject_failed: "設備指紋寫入 .env 失敗: %{error}"
+  report_title: "設備指紋"
+  device_id: "設備 ID"
+  source: "來源"
+  collected_at: "採集時間"
+  field_hashes: "欄位雜湊 (SHA-256)"
+  environment: "環境資訊"
+  wsl_note: "執行於 WSL 環境；指紋標識的是 WSL 發行版"
+  containerized_note: "nuwax-cli 似乎執行在容器內；指紋為容器視角"
+  drift_warning: "偵測到硬體指紋漂移；為保持授權連續性，維持凍結的設備 ID"
+  drift_hint: "如確認是硬體變更導致的重綁定，請執行: nuwax-cli device-info --apply --refresh"
+  applied: "設備指紋已寫入 %{path}"

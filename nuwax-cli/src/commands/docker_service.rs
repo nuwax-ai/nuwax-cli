@@ -84,6 +84,10 @@ pub async fn prepare_docker_services(
         set_frontend_port(port).await?;
     }
 
+    // 注入设备指纹到 .env（幂等，冻结优先；必须在任何 compose 配置读取/缓存之前，
+    // 与 update_frontend_port 同一注意点——设计文档 DEVICE_FINGERPRINT_DESIGN.md §6.3）
+    crate::utils::device_env::ensure_device_env(false)?;
+
     // 创建 Docker 服务管理器
     let mut docker_service_manager = if let Some(compose_path) = config_file {
         // 使用自定义的compose文件路径创建DockerManager
@@ -147,6 +151,10 @@ pub async fn start_docker_services(
     project_name: Option<String>,
 ) -> Result<()> {
     info!("▶️ Starting Docker services...");
+
+    // 注入/刷新设备指纹（幂等；在创建 DockerServiceManager 之前执行，
+    // 避免命中 compose 配置缓存读到旧插值）
+    crate::utils::device_env::ensure_device_env(false)?;
 
     let mut docker_service_manager = if let Some(compose_path) = config_file {
         // 使用自定义的compose文件路径创建DockerManager

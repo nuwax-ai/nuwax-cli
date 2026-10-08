@@ -289,6 +289,19 @@ pub enum Commands {
         )]
         output: String,
     },
+
+    /// Show host device fingerprint (machine identity for license binding)
+    DeviceInfo {
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Collect and write device fingerprint into docker/.env
+        #[arg(long)]
+        apply: bool,
+        /// Ignore frozen fingerprint and rebind to current hardware
+        #[arg(long)]
+        refresh: bool,
+    },
 }
 
 #[cfg(test)]

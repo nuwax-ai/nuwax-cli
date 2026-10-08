@@ -1365,3 +1365,19 @@ script_permissions:
   debug_all_script_encoding_passed: "All script encoding checks passed"
   debug_script_scan_failed_non_critical: "Script scan failed (non-critical): %{error}"
   debug_script_permission_already_correct: "Script permission already correct: %{path}"
+
+# device_info.rs / device_env.rs messages
+device_info_cmd:
+  env_not_found: ".env file not found at %{path}; run this command from the deployment root directory, or deploy first"
+  inject_failed: "Failed to inject device fingerprint into .env: %{error}"
+  report_title: "Device Fingerprint"
+  device_id: "Device ID"
+  source: "Source"
+  collected_at: "Collected At"
+  field_hashes: "Field Hashes (SHA-256)"
+  environment: "Environment"
+  wsl_note: "running inside WSL; fingerprint identifies the WSL distro"
+  containerized_note: "nuwax-cli appears to run inside a container; fingerprint is container-scoped"
+  drift_warning: "Hardware fingerprint drift detected; frozen Device ID kept for license continuity"
+  drift_hint: "If this is an intentional hardware change, rebind via: nuwax-cli device-info --apply --refresh"
+  applied: "Device fingerprint written to %{path}"

@@ -1,6 +1,6 @@
 [package]
 name = "nuwax-cli"
-version = "1.0.134"
+version = "1.0.135"
 description = "Docker service management and upgrade CLI"
 edition.workspace = true
 authors.workspace = true
@@ -42,7 +42,6 @@ chrono = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-serde_with = { workspace = true }
 
 # 日志
 tracing = { workspace = true }
