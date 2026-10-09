@@ -995,6 +995,16 @@ pub async fn handle_auto_upgrade_deploy_command(
     }
 }
 
+/// Record the version of the package being deployed, rather than the version
+/// advertised by a server that may be behind the installed deployment.
+fn deployment_target_version(strategy: &UpgradeStrategy, deployed_version: &str) -> String {
+    match strategy {
+        UpgradeStrategy::FullUpgrade { target_version, .. }
+        | UpgradeStrategy::PatchUpgrade { target_version, .. } => target_version.to_string(),
+        UpgradeStrategy::NoUpgrade { .. } => deployed_version.to_owned(),
+    }
+}
+
 /// 执行自动升级部署流程
 pub async fn run_auto_upgrade_deploy(
     app: &mut CliApp,
@@ -1026,17 +1036,14 @@ pub async fn run_auto_upgrade_deploy(
     // 1. 获取最新版本信息并下载
     info!("📥 Downloading the latest Docker service version...");
 
-    // 下载策略只读取一次 manifest；部署版本从同一策略中取得，避免版本与包不一致。
+    // 下载策略只读取一次 manifest；替包时记录策略目标，无替包时保留当前部署版本。
     let upgrade_args = crate::cli::UpgradeArgs {
         force: false,
         check: false,
     };
     let upgrade_strategy = update::run_upgrade(app, upgrade_args).await?;
-    let target_version = match &upgrade_strategy {
-        UpgradeStrategy::FullUpgrade { target_version, .. }
-        | UpgradeStrategy::PatchUpgrade { target_version, .. }
-        | UpgradeStrategy::NoUpgrade { target_version } => target_version.to_string(),
-    };
+    let target_version =
+        deployment_target_version(&upgrade_strategy, &app.config.get_docker_versions());
 
     let had_existing_compose = docker_manager.get_compose_file().is_file();
     preflight_current_config(
@@ -1918,7 +1925,10 @@ pub async fn run_offline_deploy(
 
 #[cfg(test)]
 mod tests {
-    use super::{OnlineEnvPreserve, restore_preserved_docker_dirs, validate_offline_archive_sql};
+    use super::{
+        OnlineEnvPreserve, UpgradeStrategy, restore_preserved_docker_dirs,
+        validate_offline_archive_sql,
+    };
     use anyhow::{Context, Result};
     use flate2::{Compression, write::GzEncoder};
     use std::{fs::File, io::Write, path::Path};
@@ -2073,6 +2083,72 @@ mod tests {
             &system_parent.join("docker/secrets/operator.env"),
             &system_parent.join("docker"),
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn no_upgrade_with_older_manifest_keeps_deployed_version() -> Result<()> {
+        let strategy = UpgradeStrategy::NoUpgrade {
+            target_version: "9.71.1.0".parse()?,
+        };
+        assert_eq!(
+            super::deployment_target_version(&strategy, "9.71.2.2"),
+            "9.71.2.2"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn no_upgrade_with_equal_manifest_preserves_version_string() -> Result<()> {
+        let strategy = UpgradeStrategy::NoUpgrade {
+            target_version: "9.71.2.0".parse()?,
+        };
+        // Config versions are operator-owned strings; do not normalize a
+        // three-part version when redeploying the unchanged package.
+        assert_eq!(
+            super::deployment_target_version(&strategy, "9.71.2"),
+            "9.71.2"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn full_upgrade_records_selected_package_version() -> Result<()> {
+        let strategy = UpgradeStrategy::FullUpgrade {
+            url: String::new(),
+            hash: String::new(),
+            signature: String::new(),
+            target_version: "9.71.3.0".parse()?,
+            download_type: client_core::upgrade_strategy::DownloadType::Full,
+        };
+        assert_eq!(
+            super::deployment_target_version(&strategy, "9.71.2.2"),
+            "9.71.3.0"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn patch_upgrade_records_selected_package_version() -> Result<()> {
+        use client_core::api_types::{PatchOperations, PatchPackageInfo};
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: None,
+                    delete: None,
+                },
+            },
+            target_version: "9.71.2.3".parse()?,
+            download_type: client_core::upgrade_strategy::DownloadType::Patch,
+        };
+        assert_eq!(
+            super::deployment_target_version(&strategy, "9.71.2.2"),
+            "9.71.2.3"
+        );
         Ok(())
     }
 
