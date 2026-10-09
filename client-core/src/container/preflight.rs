@@ -670,6 +670,90 @@ mod tests {
     }
 
     #[test]
+    fn backup_member_keys_remain_posix_on_every_host() {
+        for (input, expected) in [
+            (
+                "im-app/nuwax-im-gateway-bootstrap.jar",
+                "im-app/nuwax-im-gateway-bootstrap.jar",
+            ),
+            (
+                "./repo-collab-app/dist/index.js",
+                "repo-collab-app/dist/index.js",
+            ),
+            (
+                "repo-collab-app//dist/./index.js",
+                "repo-collab-app/dist/index.js",
+            ),
+        ] {
+            let actual = backup_member_path(Path::new(input)).expect("safe archive member");
+            assert_eq!(actual, expected);
+            assert!(
+                !actual.contains('\\'),
+                "receipt keys must be portable POSIX strings"
+            );
+        }
+        for unsafe_path in [
+            "../escape",
+            "dir/../escape",
+            "/absolute",
+            "C:/absolute",
+            "./C:/absolute",
+            "C:relative",
+            "dir\\file",
+        ] {
+            assert!(
+                backup_member_path(Path::new(unsafe_path)).is_err(),
+                "{unsafe_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn backup_parent_lookup_uses_canonical_posix_keys() {
+        let file = "repo-collab-app/dist/index.js";
+        let mut entries = HashMap::from([
+            (
+                file.to_string(),
+                BackupArchiveEntry {
+                    regular: true,
+                    directory: false,
+                    size: 1,
+                },
+            ),
+            (
+                "repo-collab-app".to_string(),
+                BackupArchiveEntry {
+                    regular: false,
+                    directory: false,
+                    size: 0,
+                },
+            ),
+        ]);
+        assert!(
+            ensure_backup_regular_file(&entries, file).is_err(),
+            "unsafe parent must be found using the receipt's slash-separated key"
+        );
+        entries.insert(
+            "repo-collab-app".to_string(),
+            BackupArchiveEntry {
+                regular: false,
+                directory: true,
+                size: 0,
+            },
+        );
+        ensure_backup_regular_file(&entries, file).expect("ordinary parent directory");
+        entries.insert(
+            "repo-collab-app/dist".to_string(),
+            BackupArchiveEntry {
+                regular: false,
+                directory: false,
+                size: 0,
+            },
+        );
+        assert!(ensure_backup_regular_file(&entries, file).is_err());
+    }
+
+    #[test]
     fn backup_guard_rejects_component_free_and_half_backups() {
         let directory = tempfile::tempdir().expect("tempdir");
         let docker_dir = directory.path().join("docker");
@@ -1723,33 +1807,49 @@ fn backup_member_path(path: &Path) -> Result<String> {
     if path.to_string_lossy().contains('\\') {
         bail!("backup member paths must use portable forward slashes");
     }
-    let mut normalized = PathBuf::new();
+    let mut normalized = Vec::new();
     for part in path.components() {
         match part {
             Component::CurDir => {}
-            Component::Normal(name) => normalized.push(name),
+            Component::Normal(name) => {
+                let name = name.to_string_lossy().into_owned();
+                let bytes = name.as_bytes();
+                if normalized.is_empty()
+                    && bytes.len() >= 2
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                {
+                    bail!("backup contains an unsafe drive-qualified member path");
+                }
+                normalized.push(name);
+            }
             _ => bail!("backup contains an unsafe member path"),
         }
     }
-    Ok(normalized.to_string_lossy().into_owned())
+    // Archive/receipt keys are POSIX strings, independent of the host's native
+    // separators. Rebuilding a PathBuf here would introduce backslashes on Windows.
+    Ok(normalized.join("/"))
 }
 
 fn ensure_backup_regular_file(
     entries: &HashMap<String, BackupArchiveEntry>,
     path: &str,
 ) -> Result<()> {
+    let canonical = backup_member_path(Path::new(path))?;
     if !entries
-        .get(path)
+        .get(&canonical)
         .is_some_and(|entry| entry.regular && entry.size > 0)
     {
         bail!("backup is missing required non-empty regular file {path}");
     }
-    for parent in Path::new(path).ancestors().skip(1) {
-        if let Some(entry) = entries.get(&parent.to_string_lossy().to_string())
+    let mut parent = canonical.as_str();
+    while let Some((prefix, _)) = parent.rsplit_once('/') {
+        if let Some(entry) = entries.get(prefix)
             && !entry.directory
         {
             bail!("backup parent of {path} is not a regular directory");
         }
+        parent = prefix;
     }
     Ok(())
 }
