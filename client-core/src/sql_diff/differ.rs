@@ -282,7 +282,7 @@ fn generate_index_diffs(
                 idx_def
                     .columns
                     .iter()
-                    .map(|c| format!("`{c}`"))
+                    .map(|c| c.render())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -300,7 +300,7 @@ fn generate_index_diffs(
                 idx_def
                     .columns
                     .iter()
-                    .map(|c| format!("`{c}`"))
+                    .map(|c| c.render())
                     .collect::<Vec<_>>()
                     .join(", "),
                 parser_clause
@@ -314,7 +314,7 @@ fn generate_index_diffs(
                 idx_def
                     .columns
                     .iter()
-                    .map(|c| format!("`{c}`"))
+                    .map(|c| c.render())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -327,7 +327,7 @@ fn generate_index_diffs(
                 idx_def
                     .columns
                     .iter()
-                    .map(|c| format!("`{c}`"))
+                    .map(|c| c.render())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -340,7 +340,7 @@ fn generate_index_diffs(
                 idx_def
                     .columns
                     .iter()
-                    .map(|c| format!("`{c}`"))
+                    .map(|c| c.render())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));

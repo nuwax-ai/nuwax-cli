@@ -180,8 +180,13 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
     // 3. 执行备份
     info!("🔄 Starting backup creation...");
 
-    // 执行需要备份的目录: app, data 目录
-    let source_paths = vec![docker::get_data_dir_path(), docker::get_app_dir_path()];
+    // 执行需要备份的目录: data, app 及新增应用宿主产物（im-app 双 jar、repo-collab-app dist）
+    let source_paths = vec![
+        docker::get_data_dir_path(),
+        docker::get_app_dir_path(),
+        docker::get_im_app_dir_path(),
+        docker::get_repo_collab_app_dir_path(),
+    ];
 
     let backup_options = BackupOptions {
         backup_type: BackupType::Manual,

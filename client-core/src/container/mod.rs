@@ -6,6 +6,7 @@ mod image;
 mod interpolation;
 mod labels;
 mod path_utils;
+pub mod preflight;
 mod service;
 pub mod types;
 pub mod volumes;

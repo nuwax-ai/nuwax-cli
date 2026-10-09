@@ -322,7 +322,13 @@ impl BackupManager {
         docker_dir: &Path,
         dirs_to_exculde: &[&str],
     ) -> Result<()> {
-        let mut data_dirs_to_clear: Vec<String> = vec!["data".to_string(), "app".to_string()];
+        let mut data_dirs_to_clear: Vec<String> = vec![
+            "data".to_string(),
+            "app".to_string(),
+            // 新增应用宿主产物一并清理后按备份整目录恢复，避免新旧文件混杂（C02）
+            "im-app".to_string(),
+            "repo-collab-app".to_string(),
+        ];
         // Filter out directories that should be excluded from clearing
         data_dirs_to_clear.retain(|dir| !dirs_to_exculde.contains(&dir.as_str()));
 

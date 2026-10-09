@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use client_core::constants::sql;
 use client_core::container::DockerManager;
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
-use client_core::sql_diff::generate_live_schema_diff;
-use client_core::sql_diff::parse_sql_tables_strict;
+use client_core::sql_diff::generate_live_schema_diff_multi;
+use client_core::sql_diff::parse_schema_template;
 use client_core::upgrade_strategy::UpgradeStrategy;
 use client_core::utils::archive::{self, ArchiveFormat};
 use rust_i18n::t;
@@ -35,43 +35,51 @@ fn create_docker_manager(
     docker_service::select_docker_manager(configured, config_file.clone(), project_name.clone())
 }
 
-fn validate_target_sql(sql_content: &str) -> Result<()> {
-    let tables =
-        parse_sql_tables_strict(sql_content).context("Failed to parse target MySQL DDL")?;
-    if tables.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Target init_mysql.sql contains no CREATE TABLE statements"
-        ));
-    }
-    Ok(())
-}
-
-/// 离线完整包在停止旧服务前必须能提供完整目标 DDL。
+/// 离线完整包在停止旧服务前必须能提供全部库表模板（多库清单，Fail Fast）。
+/// 每个清单文件恰好一份、内容通过 parse_schema_template 校验（唯一 USE + 非空表集）。
 fn validate_offline_archive_sql(archive_path: &Path) -> Result<()> {
-    fn is_target(path: &Path) -> bool {
-        let normalized = path.strip_prefix("docker").unwrap_or(path);
-        normalized == Path::new("config/init_mysql.sql")
-    }
+    let expected: Vec<std::path::PathBuf> = sql::SCHEMA_SQL_FILES
+        .iter()
+        .map(|file| {
+            Path::new(file)
+                .strip_prefix("docker")
+                .unwrap_or(Path::new(file))
+                .to_path_buf()
+        })
+        .collect();
+    let is_target = |path: &Path| -> Option<usize> { expected.iter().position(|e| e == path) };
 
-    let mut target_sql = None;
+    let mut found: Vec<Option<String>> = vec![None; expected.len()];
+    let mut record = |path: &Path, content: String| -> Result<()> {
+        if let Some(index) = is_target(path) {
+            if found[index].is_some() {
+                return Err(anyhow::anyhow!(
+                    "Duplicate {} in offline archive",
+                    expected[index].display()
+                ));
+            }
+            found[index] = Some(content);
+        }
+        Ok(())
+    };
+
     match archive::detect_format_by_magic(archive_path)? {
         ArchiveFormat::Zip => {
             let file = fs::File::open(archive_path)?;
             let mut zip = zip::ZipArchive::new(file)?;
             for idx in 0..zip.len() {
                 let mut entry = zip.by_index(idx)?;
-                let path = entry
+                let raw_path = entry
                     .enclosed_name()
                     .ok_or_else(|| anyhow::anyhow!("Unsafe archive entry: {}", entry.name()))?;
-                if is_target(&path) {
-                    if target_sql.is_some() {
-                        return Err(anyhow::anyhow!(
-                            "Duplicate init_mysql.sql in offline archive"
-                        ));
-                    }
+                let path = raw_path
+                    .strip_prefix("docker")
+                    .unwrap_or(raw_path.as_ref())
+                    .to_path_buf();
+                if is_target(&path).is_some() {
                     let mut content = String::new();
                     entry.read_to_string(&mut content)?;
-                    target_sql = Some(content);
+                    record(&path, content)?;
                 }
             }
         }
@@ -81,23 +89,28 @@ fn validate_offline_archive_sql(archive_path: &Path) -> Result<()> {
             let mut tar = tar::Archive::new(decoder);
             for entry in tar.entries()? {
                 let mut entry = entry?;
-                if is_target(&entry.path()?) {
-                    if target_sql.is_some() {
-                        return Err(anyhow::anyhow!(
-                            "Duplicate init_mysql.sql in offline archive"
-                        ));
-                    }
+                let raw_path = entry.path()?.to_path_buf();
+                let path = raw_path
+                    .strip_prefix("docker")
+                    .unwrap_or(raw_path.as_ref())
+                    .to_path_buf();
+                if is_target(&path).is_some() {
                     let mut content = String::new();
                     entry.read_to_string(&mut content)?;
-                    target_sql = Some(content);
+                    record(&path, content)?;
                 }
             }
         }
     }
 
-    let content = target_sql
-        .ok_or_else(|| anyhow::anyhow!("Offline archive is missing config/init_mysql.sql"))?;
-    validate_target_sql(&content)
+    for (template_path, content) in expected.iter().zip(found) {
+        let content = content.ok_or_else(|| {
+            anyhow::anyhow!("Offline archive is missing {}", template_path.display())
+        })?;
+        parse_schema_template(&content)
+            .with_context(|| format!("Invalid schema template {}", template_path.display()))?;
+    }
+    Ok(())
 }
 
 /// 更新配置文件中的版本号并持久化
@@ -136,9 +149,10 @@ async fn wait_for_mysql_connection(compose_path: &Path, env_path: &Path) -> Resu
     let env = env_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Compose env path is not valid UTF-8"))?;
-    let config = MySqlConfig::for_container(Some(compose), Some(env))
+    // root 管理连接：多库 Live Diff 需要建库/授权与跨库 DDL 权限（应用账号不具备）
+    let config = MySqlConfig::for_container_admin(Some(compose), Some(env))
         .await
-        .context("Failed to resolve MySQL connection from Compose")?;
+        .context("Failed to resolve MySQL admin connection from Compose")?;
     let executor = MySqlExecutor::new(config);
     let timeout = Duration::from_secs(sql::MYSQL_READY_TIMEOUT);
     let deadline = tokio::time::Instant::now() + timeout;
@@ -171,13 +185,37 @@ async fn run_staged_deployment(
     is_first_deployment: bool,
     target_version: &str,
 ) -> Result<()> {
-    let target_sql_path = Path::new(sql::CURRENT_SQL_PATH);
-    let target_sql = fs::read_to_string(target_sql_path)
-        .with_context(|| format!("Target MySQL DDL is missing: {}", target_sql_path.display()))?;
-    validate_target_sql(&target_sql)?;
+    // 部署前校验全部库表模板（多库清单，缺文件/解析失败即 Fail Fast）；
+    // 顺带收集库名，供配置预检校验应用连接目标
+    let mut template_databases = Vec::with_capacity(sql::SCHEMA_SQL_FILES.len());
+    for template_path in sql::SCHEMA_SQL_FILES {
+        let path = Path::new(template_path);
+        let content = fs::read_to_string(path).with_context(|| {
+            format!(
+                "{}",
+                t!(
+                    "auto_upgrade_deploy.schema_template_missing",
+                    path = path.display().to_string()
+                )
+            )
+        })?;
+        let template = parse_schema_template(&content)
+            .with_context(|| format!("Invalid schema template {template_path}"))?;
+        template_databases.push(template.database);
+    }
 
     let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
     docker_manager.invalidate_compose_config_cache();
+
+    // C01/C03: 候选 Compose + 合并后 .env 的预检（启动 mysql、修改数据库之前的最后一道闸）：
+    // 必填键非空、应用库连接与本地多库迁移目标一致、宿主产物完整（失败只报键名/路径）
+    client_core::container::preflight::preflight_deploy_config(
+        docker_manager.get_compose_file(),
+        docker_manager.get_env_file(),
+        &template_databases,
+    )
+    .context("Deployment configuration preflight failed")?;
+
     if !is_first_deployment {
         // stop_docker_services_and_wait 在没有运行容器时可能跳过 down；这里清理旧的已停止容器。
         docker_manager
@@ -422,6 +460,130 @@ fn env_assignment_key(line: &str) -> Option<&str> {
     Some(key)
 }
 
+/// 停止旧服务前的当前配置预检（C01）：必填键、本地库目标约定、宿主产物完整性。
+/// 候选新包的同一预检在解压后、修改数据库前由 `run_staged_deployment` 再执行一次。
+fn preflight_current_config() -> Result<()> {
+    let compose = client_core::constants::docker::get_compose_file_path();
+    let env = client_core::constants::docker::get_env_file_path();
+    if !compose.is_file() || !env.is_file() {
+        return Ok(());
+    }
+    let template_databases = collect_existing_template_databases();
+    client_core::container::preflight::preflight_deploy_config(&compose, &env, &template_databases)
+        .context("Configuration preflight failed before stopping services")
+}
+
+/// 收集磁盘上现存且可解析的 schema 模板库名（宽容处理：旧部署可能尚无
+/// 新增模板文件；完整校验在解压后的预检中执行，这里只为库目标校验提供输入）
+fn collect_existing_template_databases() -> Vec<String> {
+    sql::SCHEMA_SQL_FILES
+        .iter()
+        .filter_map(|path| {
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|content| parse_schema_template(&content).ok())
+                .map(|template| template.database)
+        })
+        .collect()
+}
+
+/// 在线升级（full/patch）期间的 `.env` 保留守卫（C01）。
+///
+/// full 清理不保护普通文件、patch 变更清单可能包含 `.env`——两者都会丢用户配置。
+/// 守卫在清理前把 `docker/.env` 复制到 docker/ 之外的临时位置：
+/// - 解压成功 → 与包内 `.env` 合并（保留用户值、仅补新包新增键，复用离线路径的
+///   `merge_preserved_env_file`：原子写入、保留权限、失败不污染）；
+/// - 包内没有 `.env` → 原样还原；
+/// - 解压失败 → 原样还原，保证失败不污染。
+struct OnlineEnvPreserve {
+    preserve_path: PathBuf,
+    active: bool,
+}
+
+impl OnlineEnvPreserve {
+    fn capture(docker_dir: &Path) -> Result<Self> {
+        let env_path = docker_dir.join(".env");
+        if !env_path.is_file() {
+            return Ok(Self {
+                preserve_path: PathBuf::new(),
+                active: false,
+            });
+        }
+        let preserve_path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(format!(".nuwax-env-preserve-{}", std::process::id()));
+        Self::capture_at(&env_path, preserve_path)
+    }
+
+    fn capture_at(env_path: &Path, preserve_path: PathBuf) -> Result<Self> {
+        if !env_path.is_file() {
+            return Ok(Self {
+                preserve_path: PathBuf::new(),
+                active: false,
+            });
+        }
+        fs::copy(env_path, &preserve_path).with_context(|| {
+            format!(
+                "Failed to preserve existing .env before upgrade: {}",
+                env_path.display()
+            )
+        })?;
+        info!(
+            "🛡️ Preserved existing .env before package cleanup: {path}",
+            path = preserve_path.display()
+        );
+        Ok(Self {
+            preserve_path,
+            active: true,
+        })
+    }
+
+    fn merge_into(&self, docker_dir: &Path) -> Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        let env_path = docker_dir.join(".env");
+        if env_path.is_file() {
+            merge_preserved_env_file(&self.preserve_path, &env_path)?;
+            info!("🛡️ Preserved existing .env values and added missing package defaults");
+        } else {
+            fs::create_dir_all(docker_dir).context("Failed to recreate docker directory")?;
+            fs::rename(&self.preserve_path, &env_path)
+                .context("Failed to restore preserved .env")?;
+            info!("🛡️ Restored preserved .env (package shipped none)");
+        }
+        Ok(())
+    }
+
+    /// 解压失败时原样还原用户 `.env`（覆盖包内半解压产物）
+    fn restore(&self, docker_dir: &Path) -> Result<()> {
+        if !self.active || !self.preserve_path.is_file() {
+            return Ok(());
+        }
+        let env_path = docker_dir.join(".env");
+        if env_path.exists() {
+            fs::remove_file(&env_path).context("Failed to remove partial package .env")?;
+        } else {
+            fs::create_dir_all(docker_dir).context("Failed to recreate docker directory")?;
+        }
+        fs::rename(&self.preserve_path, &env_path).context("Failed to restore preserved .env")?;
+        info!("🛡️ Restored user .env after failed extraction");
+        Ok(())
+    }
+
+    fn discard(&self) {
+        if self.active
+            && self.preserve_path.is_file()
+            && let Err(error) = fs::remove_file(&self.preserve_path)
+        {
+            warn!(
+                "⚠️ Failed to remove preserved .env copy: {error}",
+                error = error.to_string()
+            );
+        }
+    }
+}
+
 /// 运行自动升级部署相关命令的统一入口
 pub async fn handle_auto_upgrade_deploy_command(
     app: &mut CliApp,
@@ -501,6 +663,10 @@ pub async fn run_auto_upgrade_deploy(
     } else {
         info!("🔄 Upgrade deployment detected, services will be stopped first");
 
+        // C01: 停止旧服务前先对当前配置预检（必填键/库目标/产物完整性），
+        // 配置不完整时旧服务保持运行
+        preflight_current_config()?;
+
         // 3. 🛑 停止服务并等待（使用统一的公共方法）
         let stopped = docker_service::stop_docker_services_and_wait(
             app,
@@ -547,8 +713,12 @@ pub async fn run_auto_upgrade_deploy(
     // 6. 📦 解压新的Docker服务包（在服务停止后）
     info!("📦 Extracting Docker service package...");
 
-    // 清理现有的docker目录以避免路径冲突
+    // C01: 清理/解压期间保留用户 .env——full 清理与 patch 变更删除都不再丢配置；
+    // 解压成功后与包内 .env 合并补键，失败时原样还原
     let docker_dir = std::path::Path::new("docker");
+    let env_preserve = OnlineEnvPreserve::capture(docker_dir)?;
+
+    // 清理现有的docker目录以避免路径冲突
     if docker_dir.exists() {
         // 增量升级/全量升级
         match upgrade_strategy.clone() {
@@ -556,9 +726,14 @@ pub async fn run_auto_upgrade_deploy(
                 // 增量升级逻辑
                 let changed_files = patch_info.get_changed_files();
                 //基于 docker_dir 目录下, 清理 changed_files 的相对路径的文件/目录
+                // .env 即便出现在变更清单也只做"合并补键"，绝不删除用户配置（C01）
 
                 let remove_file_or_dir = changed_files
                     .iter()
+                    .filter(|path| {
+                        let normalized = path.trim_start_matches("./");
+                        normalized != ".env" && normalized != "docker/.env"
+                    })
                     .map(|path| PathBuf::from(docker_dir).join(path))
                     .collect::<Vec<_>>();
 
@@ -598,7 +773,8 @@ pub async fn run_auto_upgrade_deploy(
             }
             UpgradeStrategy::NoUpgrade { .. } => {
                 //do nothing
-                info!("Version unchanged, no upgrade required")
+                info!("Version unchanged, no upgrade required");
+                env_preserve.discard();
             }
         }
     }
@@ -608,6 +784,9 @@ pub async fn run_auto_upgrade_deploy(
     {
         Ok(_) => {
             info!("✅ Docker service package extracted");
+
+            // C01: 与包内 .env 合并（保留用户值、仅补新包新增键）
+            env_preserve.merge_into(docker_dir)?;
 
             // 🔧 自动修复关键脚本文件权限
             fix_script_permissions().await?;
@@ -619,6 +798,13 @@ pub async fn run_auto_upgrade_deploy(
                 "❌ Failed to extract Docker service package: {error}",
                 error = e.to_string()
             );
+            // C01: 解压失败原样还原用户 .env，保证失败不污染
+            if let Err(restore_error) = env_preserve.restore(docker_dir) {
+                warn!(
+                    "⚠️ Failed to restore preserved .env after extraction failure: {error}",
+                    error = restore_error.to_string()
+                );
+            }
             return Err(e);
         }
     }
@@ -1053,7 +1239,6 @@ async fn archive_diff_sql_file(diff_sql_path: &Path, status: &str) -> Result<()>
 async fn execute_sql_diff_upgrade(executor: &MySqlExecutor) -> Result<()> {
     let temp_sql_dir = Path::new(sql::TEMP_SQL_DIR);
     let diff_sql_path = temp_sql_dir.join(sql::DIFF_SQL_FILE);
-    let new_sql_path = temp_sql_dir.join(sql::NEW_SQL_FILE);
 
     // 如果 temp_sql 目录已存在，先归档到 history_sql
     if temp_sql_dir.exists() {
@@ -1104,72 +1289,71 @@ async fn execute_sql_diff_upgrade(executor: &MySqlExecutor) -> Result<()> {
         path = temp_sql_dir.display()
     );
 
-    // 复制新版本的SQL文件（使用常量路径）
-    let current_sql_path = Path::new(sql::CURRENT_SQL_PATH);
-    if current_sql_path.exists() {
-        // 先删除目标文件（如果存在），确保复制操作成功
+    // 逐模板读取并解析（多库清单）：每个文件一个库（唯一 USE 归属），
+    // 拷贝到 temp_sql/{database}_new.sql 留档；缺文件/解析失败即 Fail Fast
+    let mut templates = Vec::with_capacity(sql::SCHEMA_SQL_FILES.len());
+    for template_path in sql::SCHEMA_SQL_FILES {
+        let source_path = Path::new(template_path);
+        let content = fs::read_to_string(source_path).with_context(|| {
+            format!(
+                "{}",
+                t!(
+                    "auto_upgrade_deploy.schema_template_missing",
+                    path = source_path.display().to_string()
+                )
+            )
+        })?;
+        let template = parse_schema_template(&content)
+            .with_context(|| format!("Invalid schema template {template_path}"))?;
+
+        // 同一库出现在多个模板文件属于配置错误（diff 会重复建表）
+        if templates
+            .iter()
+            .any(|existing: &client_core::sql_diff::SchemaTemplate| {
+                existing.database == template.database
+            })
+        {
+            return Err(anyhow::anyhow!(
+                "Duplicate schema template for database `{}` in SCHEMA_SQL_FILES",
+                template.database
+            ));
+        }
+
+        let new_sql_path = temp_sql_dir.join(format!("{}_new.sql", template.database));
         if new_sql_path.exists() {
             fs::remove_file(&new_sql_path)?;
-            info!(
-                "🗑️Old SQL file deleted: {path}",
-                path = new_sql_path.display()
-            );
         }
-
-        fs::copy(current_sql_path, &new_sql_path).context(t!(
+        fs::copy(source_path, &new_sql_path).context(t!(
             "auto_upgrade_deploy.copy_sql_failed",
-            src = current_sql_path.display(),
+            src = source_path.display(),
             dst = new_sql_path.display()
         ))?;
-
-        // 验证文件复制成功
-        if !new_sql_path.exists() {
-            return Err(anyhow::anyhow!(t!(
-                "auto_upgrade_deploy.sql_copy_not_found",
-                dst = new_sql_path.display(),
-                src = current_sql_path.display()
-            )));
-        }
-
         info!(
-            "📄 Copied new version SQL file: {path}",
-            path = new_sql_path.display()
+            database = %template.database,
+            tables = template.tables.len(),
+            path = %new_sql_path.display(),
+            "📄 Copied schema template for database"
         );
-    } else {
-        return Err(anyhow::anyhow!(
-            "Target MySQL DDL is missing: {}",
-            current_sql_path.display()
-        ));
+
+        templates.push(template);
     }
 
-    // 读取模板SQL（严格失败策略）
-    if !new_sql_path.exists() {
-        return Err(anyhow::anyhow!(t!(
-            "auto_upgrade_deploy.template_sql_not_found",
-            path = new_sql_path.display()
-        )));
-    }
-    let new_sql_content = fs::read_to_string(&new_sql_path)?;
-    validate_target_sql(&new_sql_content)?;
-
-    // 注意：parse_sql_tables 内部的 extract_create_table_statements_with_regex
-    // 会自动处理 USE 语句的查找和提取，无需手动处理
-
-    // 基于在线架构与模板生成差异SQL
+    // 基于在线架构与模板逐库生成差异SQL（root 管理连接）
     info!("📊 Generating SQL differences based on online schema...");
-    let diff_result = generate_live_schema_diff(executor, &new_sql_content, "target version")
+    let diff_result = generate_live_schema_diff_multi(executor, &templates, "target version")
         .await
         .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?;
 
     info!(description = %diff_result.description, has_executable_sql = diff_result.has_executable_sql, has_warnings = diff_result.has_warnings, "📋 Difference generation completed");
 
-    // 保存从 MySQL 读取的原始 CREATE TABLE 语句到 init_mysql_old.sql
-    if let Some(live_sql) = &diff_result.live_sql {
-        let old_sql_path = temp_sql_dir.join(sql::OLD_SQL_FILE);
-        fs::write(&old_sql_path, live_sql)?;
+    // 逐库保存在线架构快照（SHOW CREATE TABLE 原文）
+    for section in &diff_result.sections {
+        let old_sql_path = temp_sql_dir.join(format!("{}_old.sql", section.database));
+        fs::write(&old_sql_path, &section.live_sql)?;
         info!(
-            "📄 Saved online schema SQL file: {path}",
-            path = old_sql_path.display()
+            database = %section.database,
+            path = %old_sql_path.display(),
+            "📄 Saved online schema SQL file"
         );
     }
 
@@ -1458,6 +1642,9 @@ pub async fn run_offline_deploy(
     } else {
         info!("🔄 Upgrade deployment detected, services will be stopped first");
 
+        // C01: 停止旧服务前先对当前配置预检，配置不完整时旧服务保持运行
+        preflight_current_config()?;
+
         // 停止服务并等待
         let stopped = docker_service::stop_docker_services_and_wait(
             app,
@@ -1552,20 +1739,38 @@ pub async fn run_offline_deploy(
 
 #[cfg(test)]
 mod staged_deploy_tests {
-    use super::{restore_preserved_docker_dirs, validate_offline_archive_sql};
+    use super::{OnlineEnvPreserve, restore_preserved_docker_dirs, validate_offline_archive_sql};
     use anyhow::Result;
     use flate2::{Compression, write::GzEncoder};
     use std::{fs::File, io::Write, path::Path};
 
-    fn write_archive(path: &Path, sql: Option<&str>) -> Result<()> {
+    fn valid_platform_sql() -> &'static str {
+        "CREATE DATABASE IF NOT EXISTS agent_platform;\n\
+         GRANT ALL PRIVILEGES ON agent_platform.* TO 'agent_platform'@'%';\n\
+         USE agent_platform;\n\
+         CREATE TABLE users (id INT);"
+    }
+
+    fn valid_im_sql() -> &'static str {
+        "CREATE DATABASE IF NOT EXISTS `nuwax_im`;\n\
+         USE `nuwax_im`;\n\
+         CREATE TABLE im_users (id INT);"
+    }
+
+    fn write_archive(path: &Path, platform: Option<&str>, im: Option<&str>) -> Result<()> {
         let encoder = GzEncoder::new(File::create(path)?, Compression::default());
         let mut archive = tar::Builder::new(encoder);
-        if let Some(sql) = sql {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(sql.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            archive.append_data(&mut header, "docker/config/init_mysql.sql", sql.as_bytes())?;
+        for (name, sql) in [
+            ("docker/config/init_mysql.sql", platform),
+            ("docker/config/init_mysql_im.sql", im),
+        ] {
+            if let Some(sql) = sql {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(sql.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive.append_data(&mut header, name, sql.as_bytes())?;
+            }
         }
         archive.finish()?;
         archive.into_inner()?.finish()?.flush()?;
@@ -1573,14 +1778,76 @@ mod staged_deploy_tests {
     }
 
     #[test]
-    fn offline_archive_requires_parseable_target_sql() -> Result<()> {
+    fn online_env_preserve_merges_keeps_and_restores_user_values() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let docker_dir = directory.path().join("docker");
+        std::fs::create_dir_all(&docker_dir)?;
+        let env_path = docker_dir.join(".env");
+        let preserve_path = directory.path().join(".nuwax-env-preserve-test");
+
+        // 用户配置存在 → 捕获
+        std::fs::write(&env_path, "MYSQL_PASSWORD=user-secret\nPORT=8080\n")?;
+        let preserve = OnlineEnvPreserve::capture_at(&env_path, preserve_path.clone())?;
+        assert!(preserve.active);
+
+        // 解压成功 + 包内携带新键：合并——用户值保留、仅补新键
+        std::fs::write(&env_path, "MYSQL_PASSWORD=package-default\nNEW_KEY=added\n")?;
+        preserve.merge_into(&docker_dir)?;
+        let merged = std::fs::read_to_string(&env_path)?;
+        assert!(merged.contains("MYSQL_PASSWORD=user-secret"));
+        assert!(merged.contains("PORT=8080"));
+        assert!(merged.contains("NEW_KEY=added"));
+        assert!(!preserve_path.exists(), "合并后临时副本必须清理");
+
+        // 解压失败路径：包内半解压 .env 被用户原值覆盖
+        std::fs::write(&env_path, "MYSQL_PASSWORD=partial-garbage\n")?;
+        let preserve = OnlineEnvPreserve::capture_at(&env_path, preserve_path.clone())?;
+        std::fs::write(&env_path, "MYSQL_PASSWORD=partial-garbage\n")?;
+        preserve.restore(&docker_dir)?;
+        assert_eq!(
+            std::fs::read_to_string(&env_path)?,
+            "MYSQL_PASSWORD=partial-garbage\n"
+        );
+        assert!(!preserve_path.exists(), "还原后临时副本必须清理");
+
+        // 包内没有 .env：原样还原为用户文件
+        std::fs::remove_file(&env_path)?;
+        let preserve =
+            OnlineEnvPreserve::capture_at(&(docker_dir.join(".env")), preserve_path.clone())?;
+        assert!(!preserve.active, "env 不存在时为空守卫");
+        std::fs::write(&preserve_path, "X=1\n")?;
+        let active = OnlineEnvPreserve {
+            preserve_path: preserve_path.clone(),
+            active: true,
+        };
+        active.discard();
+        assert!(!preserve_path.exists(), "discard 必须清理临时副本");
+        Ok(())
+    }
+
+    #[test]
+    fn offline_archive_requires_all_schema_templates() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = directory.path().join("bundle.tar.gz");
 
-        write_archive(&archive, None)?;
+        // 空包：缺少全部模板
+        write_archive(&archive, None, None)?;
         assert!(validate_offline_archive_sql(&archive).is_err());
 
-        write_archive(&archive, Some("CREATE TABLE users (id INT);"))?;
+        // 缺 im 模板（对应"新 CLI + 旧包"组合，Fail Fast）
+        write_archive(&archive, Some(valid_platform_sql()), None)?;
+        assert!(validate_offline_archive_sql(&archive).is_err());
+
+        // 模板缺 USE（无法归属库）
+        write_archive(
+            &archive,
+            Some("CREATE TABLE users (id INT);"),
+            Some(valid_im_sql()),
+        )?;
+        assert!(validate_offline_archive_sql(&archive).is_err());
+
+        // 两模板齐全且合法
+        write_archive(&archive, Some(valid_platform_sql()), Some(valid_im_sql()))?;
         validate_offline_archive_sql(&archive)?;
         Ok(())
     }
@@ -1590,13 +1857,31 @@ mod staged_deploy_tests {
         let directory = tempfile::tempdir()?;
         let archive = directory.path().join("bundle.zip");
         let mut zip = zip::ZipWriter::new(File::create(&archive)?);
+        for (name, sql) in [
+            ("docker/config/init_mysql.sql", valid_platform_sql()),
+            ("docker/config/init_mysql_im.sql", valid_im_sql()),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(sql.as_bytes())?;
+        }
+        zip.finish()?;
+        validate_offline_archive_sql(&archive)?;
+
+        // 归一化后同名的重复模板必须被拒绝（带/不带 docker/ 前缀）
+        let duplicated = directory.path().join("duplicate.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&duplicated)?);
+        for name in ["docker/config/init_mysql.sql", "config/init_mysql.sql"] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(valid_platform_sql().as_bytes())?;
+        }
         zip.start_file(
-            "docker/config/init_mysql.sql",
+            "config/init_mysql_im.sql",
             zip::write::SimpleFileOptions::default(),
         )?;
-        zip.write_all(b"CREATE TABLE users (id INT);")?;
+        zip.write_all(valid_im_sql().as_bytes())?;
         zip.finish()?;
-        validate_offline_archive_sql(&archive)
+        assert!(validate_offline_archive_sql(&duplicated).is_err());
+        Ok(())
     }
 
     #[test]

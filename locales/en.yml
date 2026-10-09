@@ -601,6 +601,7 @@ auto_upgrade_deploy:
   copied_new_sql_file: "📄 Copied new version SQL file: %{path}"
   no_sql_file_skip: "📄 No SQL files in new version; skipping diff generation"
   template_sql_not_found: "Template SQL file not found: %{path}"
+  schema_template_missing: "Schema template file is missing: %{path}"
   compose_path_to_string_failed: "Unable to convert docker-compose.yml path to string"
   env_path_to_string_failed: "Unable to convert .env file path to string"
   create_mysql_config_failed: "Failed to create MySQL configuration"

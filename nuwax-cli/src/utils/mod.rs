@@ -685,8 +685,13 @@ async fn extract_zip_archive(
                         info!("✅ Critical file updated: {}", critical_file);
                     }
                     Err(_) => {
-                        // 压缩包中没有这个文件，跳过
-                        info!("⏭️  Critical file not present in archive: {}", zip_path);
+                        // C04: 补丁包必须携带全部关键 schema 文件——缺文件时保留的
+                        // 只会是磁盘上的旧版本 schema，Live Diff 将对比错误目标。
+                        // 显式失败并引导改用完整包，而不是静默沿用旧 schema。
+                        return Err(anyhow::anyhow!(
+                            "Patch archive is missing critical schema file {zip_path}; \
+                             refusing to keep a stale schema (deploy with a full package instead)"
+                        ));
                     }
                 }
             }

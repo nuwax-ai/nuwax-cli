@@ -636,6 +636,7 @@ auto_upgrade_deploy:
   copied_new_sql_file: "📄 已复制新版本SQL文件: %{path}"
   no_sql_file_skip: "📄 新版本没有SQL文件，跳过差异生成"
   template_sql_not_found: "未找到模板SQL文件: %{path}"
+  schema_template_missing: "缺少库表模板文件: %{path}"
   compose_path_to_string_failed: "无法将 docker-compose.yml 路径转换为字符串"
   env_path_to_string_failed: "无法将 .env 文件路径转换为字符串"
   create_mysql_config_failed: "创建 MySQL 配置失败"

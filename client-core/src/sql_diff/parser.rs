@@ -1,4 +1,6 @@
-use super::types::{GeneratedColumnDef, TableColumn, TableDefinition, TableIndex};
+use super::types::{
+    GeneratedColumnDef, IndexColumnDef, SchemaTemplate, TableColumn, TableDefinition, TableIndex,
+};
 use crate::error::DuckError;
 use regex::Regex;
 use sqlparser::ast::{
@@ -34,6 +36,103 @@ pub fn parse_sql_tables_strict(
     parse_sql_tables_with_mode(sql_content, true)
 }
 
+/// 解析单个 schema 模板文件（多库 Live Diff 的输入）：
+/// - 库归属：文件内**恰好一个** `USE <db>;` 语句（一个文件一个库）
+/// - `preamble_stmts`：CREATE DATABASE / GRANT / FLUSH PRIVILEGES 原句透传
+/// - 表定义：复用 strict 解析（`USE` 之后的全部 CREATE TABLE + 独立 CREATE INDEX）
+///
+/// Fail Fast：无 USE、多个 USE、USE 后无 CREATE TABLE 均报错——
+/// 纯数据文件（如 init_mysql_data.sql）误入清单时在此被拦截。
+pub fn parse_schema_template(sql_content: &str) -> Result<SchemaTemplate, DuckError> {
+    let database = extract_use_database(sql_content)?;
+    let preamble_stmts = extract_preamble_statements(sql_content);
+
+    let tables = parse_sql_tables_strict(sql_content)?;
+    if tables.is_empty() {
+        return Err(DuckError::custom(format!(
+            "Schema template for database `{database}` contains no CREATE TABLE statements"
+        )));
+    }
+
+    info!(
+        database = %database,
+        tables = tables.len(),
+        preamble = preamble_stmts.len(),
+        "Parsed schema template"
+    );
+    Ok(SchemaTemplate {
+        database,
+        preamble_stmts,
+        tables,
+    })
+}
+
+/// 提取模板的唯一 `USE <db>;` 目标库名（去反引号），非恰好一个即报错
+fn extract_use_database(sql_content: &str) -> Result<String, DuckError> {
+    let use_regex = Regex::new(r"(?i)^\s*USE\s+([^;]+);\s*$")
+        .map_err(|e| DuckError::custom(format!("正则表达式编译失败: {e}")))?;
+
+    let mut databases = Vec::new();
+    for line in sql_content.lines() {
+        if let Some(captures) = use_regex.captures(line) {
+            databases.push(strip_backticks(captures[1].trim()));
+        }
+    }
+
+    match databases.len() {
+        1 => Ok(databases.remove(0)),
+        0 => Err(DuckError::custom(
+            "Schema template contains CREATE TABLE statements but no USE statement; \
+             one database per template file is required"
+                .to_string(),
+        )),
+        count => Err(DuckError::custom(format!(
+            "Schema template contains {count} USE statements; exactly one is required"
+        ))),
+    }
+}
+
+/// 逐行扫描提取 CREATE DATABASE / GRANT / FLUSH 开头的语句原句（支持跨行，到分号收尾）。
+/// 原句透传保证幂等（IF NOT EXISTS / 重复 GRANT）且完整保留 charset/collation 细节。
+fn extract_preamble_statements(sql_content: &str) -> Vec<String> {
+    let keyword_regex = Regex::new(r"(?i)^(CREATE\s+DATABASE|GRANT|FLUSH)\b")
+        .expect("preamble keyword regex must compile");
+
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut collecting = false;
+
+    for line in sql_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("--") || trimmed.starts_with("/*") {
+            continue;
+        }
+
+        if !collecting && keyword_regex.is_match(trimmed) {
+            collecting = true;
+            current.clear();
+        }
+
+        if collecting {
+            current.push_str(trimmed);
+            if trimmed.ends_with(';') {
+                statements.push(current.clone());
+                current.clear();
+                collecting = false;
+            } else {
+                current.push(' ');
+            }
+        }
+    }
+
+    // 未以分号收尾的残句无法保证语义完整，直接丢弃并告警
+    if collecting && !current.trim().is_empty() {
+        warn!("Unterminated preamble statement dropped: {}", current);
+    }
+
+    statements
+}
+
 fn parse_sql_tables_with_mode(
     sql_content: &str,
     strict: bool,
@@ -66,7 +165,10 @@ fn parse_sql_tables_with_mode(
 
                             // 检查是否是列级别的主键
                             if is_column_primary_key(column) {
-                                primary_key_columns.push(ident_to_string(&column.name));
+                                primary_key_columns.push(IndexColumnDef {
+                                    name: ident_to_string(&column.name),
+                                    prefix_length: None,
+                                });
                             }
 
                             table_columns.push(column_def);
@@ -326,7 +428,7 @@ fn parse_column_definition(column: &ColumnDef) -> Result<TableColumn, DuckError>
 fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIndex>, DuckError> {
     match constraint {
         TableConstraint::PrimaryKey(pk) => {
-            let column_names = extract_index_columns(&pk.columns);
+            let column_names = extract_index_columns(&pk.columns)?;
 
             Ok(Some(TableIndex {
                 name: "PRIMARY".to_string(),
@@ -340,7 +442,7 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
             }))
         }
         TableConstraint::Unique(uq) => {
-            let column_names = extract_index_columns(&uq.columns);
+            let column_names = extract_index_columns(&uq.columns)?;
             // MySQL 方言 `UNIQUE KEY uk_x (...)` 的名字在 index_name 字段；
             // ANSI `CONSTRAINT uk_x UNIQUE (...)` 的约束名在 name 字段。两者都取，
             // 否则 MySQL 风格的唯一索引会丢失名字、被合成为 unique_<列名>。
@@ -349,7 +451,7 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                 .as_ref()
                 .or(uq.name.as_ref())
                 .map(ident_to_string)
-                .unwrap_or_else(|| format!("unique_{}", column_names.join("_")));
+                .unwrap_or_else(|| format!("unique_{}", index_column_name_list(&column_names)));
 
             Ok(Some(TableIndex {
                 name: index_name,
@@ -363,12 +465,12 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
             }))
         }
         TableConstraint::Index(idx) => {
-            let column_names = extract_index_columns(&idx.columns);
+            let column_names = extract_index_columns(&idx.columns)?;
             let index_name = idx
                 .name
                 .as_ref()
                 .map(ident_to_string)
-                .unwrap_or_else(|| format!("idx_{}", column_names.join("_")));
+                .unwrap_or_else(|| format!("idx_{}", index_column_name_list(&column_names)));
 
             Ok(Some(TableIndex {
                 name: index_name,
@@ -383,7 +485,7 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
         }
         // CREATE TABLE 内部的 FULLTEXT / SPATIAL 约束形式
         TableConstraint::FulltextOrSpatial(ft) => {
-            let column_names = extract_index_columns(&ft.columns);
+            let column_names = extract_index_columns(&ft.columns)?;
             let index_name = ft
                 .opt_index_name
                 .as_ref()
@@ -392,7 +494,7 @@ fn parse_table_constraint(constraint: &TableConstraint) -> Result<Option<TableIn
                     format!(
                         "{}_{}",
                         if ft.fulltext { "fulltext" } else { "spatial" },
-                        column_names.join("_")
+                        index_column_name_list(&column_names)
                     )
                 });
             let (is_fulltext, index_type) = if ft.fulltext {
@@ -561,29 +663,90 @@ fn is_column_primary_key(column: &ColumnDef) -> bool {
     false
 }
 
-/// 从 IndexColumn 列表中提取列名
+/// 兜底合成索引名用的列名列表（如 unique_cols）
+fn index_column_name_list(columns: &[IndexColumnDef]) -> String {
+    columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+/// 从 AST 结构化还原索引列。
 ///
-/// 处理三种情况：
-/// 1. 简单列名：`column_name`
-/// 2. 复合标识符：`table.column` (只取最后一部分)
-/// 3. 复杂表达式：函数索引等 (使用 Display)
-fn extract_index_columns(index_columns: &[sqlparser::ast::IndexColumn]) -> Vec<String> {
+/// MySQL 前缀长度 `col_name(N)` 在 fork 的 AST 中表现为函数调用节点
+/// （单一简单标识符 + 单个数值字面量参数）。按 MySQL 索引列语法
+/// `col_name [(length)] [ASC | DESC]`，只有该形态会携带数值参数，可无损还原。
+/// 其余复杂表达式（函数索引等）无法忠实渲染为 DDL，Fail Fast 而非生成坏 SQL。
+fn extract_index_columns(
+    index_columns: &[sqlparser::ast::IndexColumn],
+) -> Result<Vec<IndexColumnDef>, DuckError> {
     index_columns
         .iter()
-        .filter_map(|index_col| {
-            match &index_col.column.expr {
-                sqlparser::ast::Expr::Identifier(ident) => Some(strip_backticks(&ident.value)),
-                sqlparser::ast::Expr::CompoundIdentifier(idents) => {
-                    // 处理 table.column 格式，只取最后一个部分
-                    idents.last().map(|id| strip_backticks(&id.value))
-                }
-                _ => {
-                    // 对于函数索引等复杂表达式，使用 Display
-                    Some(strip_backticks(&index_col.column.to_string()))
-                }
+        .map(|index_col| {
+            let expr = &index_col.column.expr;
+            if let sqlparser::ast::Expr::Identifier(ident) = expr {
+                return Ok(IndexColumnDef {
+                    name: ident.value.clone(),
+                    prefix_length: None,
+                });
             }
+            if let sqlparser::ast::Expr::CompoundIdentifier(idents) = expr {
+                // 处理 table.column 形式，只取最后一个部分
+                let name = idents
+                    .last()
+                    .map(|id| id.value.clone())
+                    .ok_or_else(|| {
+                        DuckError::custom(
+                            "Empty compound identifier in index column".to_string(),
+                        )
+                    })?;
+                return Ok(IndexColumnDef {
+                    name,
+                    prefix_length: None,
+                });
+            }
+            if let sqlparser::ast::Expr::Function(function) = expr
+                && let Some((name, length)) = mysql_prefix_length(function)
+            {
+                return Ok(IndexColumnDef {
+                    name,
+                    prefix_length: Some(length),
+                });
+            }
+            Err(DuckError::custom(format!(
+                "Unsupported index column expression (functional indexes cannot be rendered): {expr}"
+            )))
         })
         .collect()
+}
+
+/// 识别 MySQL 前缀长度形态：函数名为单一简单标识符，
+/// 恰好一个未命名参数且为可解析为无符号整数的数字字面量，无其他子句。
+fn mysql_prefix_length(function: &sqlparser::ast::Function) -> Option<(String, u64)> {
+    if function.name.0.len() != 1 {
+        return None;
+    }
+    let sqlparser::ast::FunctionArguments::List(list) = &function.args else {
+        return None;
+    };
+    if list.args.len() != 1 || list.duplicate_treatment.is_some() || !list.clauses.is_empty() {
+        return None;
+    }
+    let sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
+        sqlparser::ast::Expr::Value(value),
+    )) = &list.args[0]
+    else {
+        return None;
+    };
+    let sqlparser::ast::Value::Number(number, _) = &value.value else {
+        return None;
+    };
+    let sqlparser::ast::ObjectNamePart::Identifier(ident) = &function.name.0[0] else {
+        return None;
+    };
+    let name = ident.value.clone();
+    number.parse::<u64>().ok().map(|length| (name, length))
 }
 
 /// 解析独立的 CREATE INDEX 语句并添加到表定义中
@@ -626,7 +789,7 @@ fn parse_standalone_indexes(
                         let table_name = ident_to_string(&create_index.table_name);
 
                         // 提取列名列表
-                        let columns = extract_index_columns(&create_index.columns);
+                        let columns = extract_index_columns(&create_index.columns)?;
 
                         if columns.is_empty() {
                             warn!("Index {} has no column definition, skipping", index_name);

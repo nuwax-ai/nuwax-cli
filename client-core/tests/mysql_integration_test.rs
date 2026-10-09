@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
-use client_core::sql_diff::generate_live_schema_diff;
+use client_core::sql_diff::generate_live_schema_diff_multi;
+use client_core::sql_diff::parse_schema_template;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -18,6 +19,10 @@ const TEST_MYSQL_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 async fn test_partial_ddl_failure_is_reconciled_by_live_rediff() -> Result<()> {
     let url = std::env::var("TEST_MYSQL_URL").context("TEST_MYSQL_URL is required")?;
     let config = mysql_config_from_url(&url)?;
+    let database = config
+        .database
+        .clone()
+        .ok_or_else(|| anyhow!("TEST_MYSQL_URL must name a database"))?;
     let executor = MySqlExecutor::new(config);
     let table = "nuwax_partial_ddl_recovery";
     executor
@@ -35,25 +40,227 @@ async fn test_partial_ddl_failure_is_reconciled_by_live_rediff() -> Result<()> {
         .ok_or_else(|| anyhow!("duplicate column should fail after the first DDL"))?;
     assert!(error.to_string().contains("after 1 successful statements"));
 
+    let live_templates = |ddl: String| -> Result<Vec<client_core::sql_diff::SchemaTemplate>> {
+        Ok(vec![parse_schema_template(&format!(
+            "USE `{database}`;\n{ddl}"
+        ))?])
+    };
     let target =
         format!("CREATE TABLE `{table}` (id INT NOT NULL, name VARCHAR(20), PRIMARY KEY (id));");
-    let remaining = generate_live_schema_diff(&executor, &target, "recovery").await?;
+    let remaining =
+        generate_live_schema_diff_multi(&executor, &live_templates(target.clone())?, "recovery")
+            .await?;
     assert!(remaining.diff_sql.contains("ADD COLUMN `name`"));
     executor.execute_diff_sql_once(&remaining.diff_sql).await?;
 
-    let final_diff = generate_live_schema_diff(&executor, &target, "recovery").await?;
+    let final_diff =
+        generate_live_schema_diff_multi(&executor, &live_templates(target.clone())?, "recovery")
+            .await?;
     assert!(!final_diff.has_executable_sql);
 
     let manual_target = format!("{} ENGINE=MyISAM;", target.trim_end_matches(';'));
-    let manual_diff = generate_live_schema_diff(&executor, &manual_target, "manual").await?;
+    let manual_diff =
+        generate_live_schema_diff_multi(&executor, &live_templates(manual_target)?, "manual")
+            .await?;
     assert!(!manual_diff.has_executable_sql);
     assert!(manual_diff.has_warnings);
     assert!(manual_diff.diff_sql.contains("table option ENGINE differs"));
-    assert!(manual_diff.description.contains("manual-change warnings"));
 
     executor
         .execute_single(&format!("DROP TABLE IF EXISTS `{table}`"))
         .await?;
+    Ok(())
+}
+
+/// 多库 Live Diff 真实 MySQL 场景验收（隔离库名，用后即删，不触碰现有部署）：
+///
+/// 1. 平台库已存在且含业务数据、IM 库不存在 → 一次迁移补建 IM 库，平台数据保留；
+/// 2. 两库各自漂移（平台加列、IM 加表）→ 再次迁移全部应用，数据保留；
+/// 3. IM 库与目标约束冲突 → 整体报错停止；解除冲突后重试按实际状态收敛。
+#[tokio::test]
+#[ignore = "requires TEST_MYSQL_URL pointing to a disposable MySQL instance"]
+async fn multi_database_live_diff_scenarios() -> Result<()> {
+    let url = std::env::var("TEST_MYSQL_URL").context("TEST_MYSQL_URL is required")?;
+    let mut config = mysql_config_from_url(&url)?;
+    // 管理连接：无默认库（库切换由 diff 的 USE 段完成）
+    config.database = None;
+    let executor = MySqlExecutor::new(config.clone());
+    executor.test_connection().await?;
+
+    let suffix = uuid::Uuid::now_v7().simple();
+    let platform_db = format!("nuwax_mdp_{suffix}");
+    let im_db = format!("nuwax_mdi_{suffix}");
+
+    let outcome = multi_database_scenario_body(&executor, &config, &platform_db, &im_db).await;
+
+    // 无论成败都清理隔离库
+    for database in [&platform_db, &im_db] {
+        executor
+            .execute_single(&format!("DROP DATABASE IF EXISTS `{database}`"))
+            .await
+            .ok();
+    }
+    outcome
+}
+
+async fn multi_database_scenario_body(
+    executor: &MySqlExecutor,
+    config: &MySqlConfig,
+    platform_db: &str,
+    im_db: &str,
+) -> Result<()> {
+    use client_core::sql_diff::{
+        SchemaTemplate, generate_live_schema_diff_multi, parse_schema_template,
+    };
+
+    let templates_for = |platform_ddl: &str, im_ddl: &str| -> Result<Vec<SchemaTemplate>> {
+        Ok(vec![
+            parse_schema_template(&format!("USE `{platform_db}`;\n{platform_ddl}"))?,
+            // IM 模板带建库前缀，与真实 init_mysql_im.sql 形态一致
+            parse_schema_template(&format!(
+                "CREATE DATABASE IF NOT EXISTS `{im_db}` DEFAULT CHARACTER SET utf8mb4;\nUSE `{im_db}`;\n{im_ddl}"
+            ))?,
+        ])
+    };
+    let migrate = |templates: Vec<SchemaTemplate>| async move {
+        generate_live_schema_diff_multi(executor, &templates, "scenario").await
+    };
+
+    // ── 场景 1：平台库已存在含数据，IM 库不存在 ─────────────────────────
+    executor
+        .execute_single(&format!(
+            "CREATE DATABASE `{platform_db}`; \
+             CREATE TABLE `{platform_db}`.`users` \
+             (`id` bigint NOT NULL, `name` varchar(64), PRIMARY KEY (`id`)); \
+             INSERT INTO `{platform_db}`.`users` VALUES (1, 'must-survive')"
+        ))
+        .await
+        .context("准备平台库失败")?;
+
+    let platform_v1 =
+        "CREATE TABLE `users` (`id` bigint NOT NULL, `name` varchar(64), PRIMARY KEY (`id`));";
+    let im_v1 = "CREATE TABLE `im_msg` (`id` bigint NOT NULL, PRIMARY KEY (`id`));";
+
+    let result = migrate(templates_for(platform_v1, im_v1)?).await?;
+    assert!(
+        result.has_executable_sql,
+        "IM 库缺失应产生可执行差异: {}",
+        result.description
+    );
+    assert!(
+        result
+            .diff_sql
+            .contains(&format!("CREATE DATABASE IF NOT EXISTS `{im_db}`"))
+    );
+    assert!(result.diff_sql.contains(&format!("USE `{im_db}`;")));
+    executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .context("场景1 迁移失败")?;
+
+    // 两库就绪后再建立断言用连接（按库连接 + 静态 SQL，动态值走 bind）
+    let connect = |database: &str| {
+        MySqlPoolOptions::new().max_connections(1).connect_with(
+            MySqlConnectOptions::new()
+                .host(&config.host)
+                .port(config.port)
+                .username(&config.user)
+                .password(&config.password)
+                .database(database),
+        )
+    };
+    let platform_pool = connect(platform_db).await.context("无法连接平台测试库")?;
+    let im_pool = connect(im_db).await.context("无法连接 IM 测试库")?;
+    let im_schema_table_count = || async {
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?")
+                .bind(im_db)
+                .fetch_one(&im_pool)
+                .await
+                .context("查询 IM 库表数失败")?;
+        Ok::<_, anyhow::Error>(count)
+    };
+
+    let kept: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM `users` WHERE `name` = 'must-survive'")
+        .fetch_one(&platform_pool)
+        .await?;
+    assert_eq!(kept, (1,), "平台库业务数据必须保留");
+    assert_eq!(im_schema_table_count().await?, (1,), "IM 库应补建 1 张表");
+
+    // ── 场景 2：两库各自漂移（平台加列、IM 加表） ───────────────────────
+    let platform_v2 = "CREATE TABLE `users` (`id` bigint NOT NULL, `name` varchar(64), `email` varchar(255), PRIMARY KEY (`id`));";
+    let im_v2 = "CREATE TABLE `im_msg` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n\
+                 CREATE TABLE `im_conv` (`id` bigint NOT NULL, PRIMARY KEY (`id`));";
+
+    let result = migrate(templates_for(platform_v2, im_v2)?).await?;
+    assert!(
+        result.has_executable_sql,
+        "两库漂移都应被检出: {}",
+        result.description
+    );
+    executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .context("场景2 迁移失败")?;
+
+    let kept: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM `users` WHERE `name` = 'must-survive'")
+        .fetch_one(&platform_pool)
+        .await?;
+    assert_eq!(kept, (1,), "加列后平台数据仍保留");
+    let email_column: Vec<(String,)> =
+        sqlx::query_as("SHOW COLUMNS FROM `users` WHERE Field = 'email'")
+            .fetch_all(&platform_pool)
+            .await?;
+    assert_eq!(email_column.len(), 1, "平台库新列已应用");
+    assert_eq!(im_schema_table_count().await?, (2,), "IM 库新表已应用");
+
+    // ── 场景 3：IM 库约束冲突 → 停止；解除后重试收敛 ────────────────────
+    executor
+        .execute_single(&format!(
+            "CREATE TABLE `{im_db}`.`im_tag` (`id` bigint NOT NULL, `tag` varchar(64), PRIMARY KEY (`id`)); \
+             INSERT INTO `{im_db}`.`im_tag` VALUES (1, 'dup'), (2, 'dup')"
+        ))
+        .await
+        .context("准备冲突数据失败")?;
+
+    let im_v3 = "CREATE TABLE `im_msg` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n\
+                 CREATE TABLE `im_conv` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n\
+                 CREATE TABLE `im_tag` (`id` bigint NOT NULL, `tag` varchar(64), PRIMARY KEY (`id`), UNIQUE KEY `uk_tag` (`tag`));";
+
+    let result = migrate(templates_for(platform_v2, im_v3)?).await?;
+    assert!(result.has_executable_sql, "唯一键差异应被检出");
+    let failure = executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .err()
+        .context("重复值与 UNIQUE 约束冲突必须让迁移整体失败")?;
+    assert!(
+        format!("{failure:#}").contains("Diff SQL failed"),
+        "失败语义应为出错即停: {failure:#}"
+    );
+
+    // 解除冲突后重试：差异按数据库实际状态重算，只补未完成的约束
+    executor
+        .execute_single(&format!("DELETE FROM `{im_db}`.`im_tag` WHERE `id` = 2"))
+        .await?;
+    let result = migrate(templates_for(platform_v2, im_v3)?).await?;
+    executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .context("解除冲突后的重试必须成功")?;
+
+    let dup_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM `im_tag` WHERE `tag` = 'dup'")
+        .fetch_one(&im_pool)
+        .await?;
+    assert_eq!(dup_count, (1,), "冲突数据按人工处理保留一行");
+
+    // 幂等：无变更再跑一次不执行任何语句
+    let result = migrate(templates_for(platform_v2, im_v3)?).await?;
+    assert!(
+        !result.has_executable_sql,
+        "收敛后应无差异: {}",
+        result.description
+    );
     Ok(())
 }
 
@@ -386,7 +593,7 @@ fn mysql_config_from_url(raw_url: &str) -> Result<MySqlConfig> {
         port,
         user,
         password,
-        database,
+        database: Some(database),
     })
 }
 
@@ -401,7 +608,7 @@ fn test_mysql_url_credentials_are_decoded_once() -> Result<()> {
     )?;
     assert_eq!(config.user, "test@user");
     assert_eq!(config.password, "p@ss:#$%E4");
-    assert_eq!(config.database, "disposable");
+    assert_eq!(config.database.as_deref(), Some("disposable"));
     Ok(())
 }
 

@@ -65,8 +65,8 @@ fn test_index_column_with_and_without_backticks() {
         .expect("应该有 idx_name 索引");
 
     // 检查索引列名都不带反引号
-    assert_eq!(index1.columns[0], "name");
-    assert_eq!(index2.columns[0], "name");
+    assert_eq!(index1.columns[0].name, "name");
+    assert_eq!(index2.columns[0].name, "name");
 }
 
 #[test]
@@ -95,8 +95,8 @@ fn test_primary_key_with_and_without_backticks() {
         .expect("应该有主键");
 
     // 检查主键列名都不带反引号
-    assert_eq!(pk1.columns[0], "id");
-    assert_eq!(pk2.columns[0], "id");
+    assert_eq!(pk1.columns[0].name, "id");
+    assert_eq!(pk2.columns[0].name, "id");
 }
 
 #[test]
@@ -203,8 +203,8 @@ fn test_column_level_primary_key_with_backticks() {
         .expect("应该有主键");
 
     // 主键列名应该相同（不带反引号）
-    assert_eq!(pk1.columns[0], "id");
-    assert_eq!(pk2.columns[0], "id");
+    assert_eq!(pk1.columns[0].name, "id");
+    assert_eq!(pk2.columns[0].name, "id");
 }
 
 #[test]
@@ -234,12 +234,12 @@ fn test_composite_primary_key_with_backticks() {
 
     // 检查复合主键的列名
     assert_eq!(pk1.columns.len(), 2);
-    assert_eq!(pk1.columns[0], "user_id");
-    assert_eq!(pk1.columns[1], "order_id");
+    assert_eq!(pk1.columns[0].name, "user_id");
+    assert_eq!(pk1.columns[1].name, "order_id");
 
     assert_eq!(pk2.columns.len(), 2);
-    assert_eq!(pk2.columns[0], "user_id");
-    assert_eq!(pk2.columns[1], "order_id");
+    assert_eq!(pk2.columns[0].name, "user_id");
+    assert_eq!(pk2.columns[1].name, "order_id");
 }
 
 #[test]
@@ -270,8 +270,8 @@ fn test_unique_index_with_backticks() {
         .expect("应该有唯一索引");
 
     // 检查索引列名都不带反引号
-    assert_eq!(uk1.columns[0], "email");
-    assert_eq!(uk2.columns[0], "email");
+    assert_eq!(uk1.columns[0].name, "email");
+    assert_eq!(uk2.columns[0].name, "email");
 
     // 两个索引的名称应该相同（都被标准化了）
     assert_eq!(uk1.name, uk2.name);

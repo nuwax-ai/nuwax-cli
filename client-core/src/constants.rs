@@ -20,6 +20,12 @@ pub mod docker {
     /// 应用程序目录名
     pub const APP_DIR_NAME: &str = "app";
 
+    /// IM 应用宿主产物目录（双 jar，必须同包同版）
+    pub const IM_APP_DIR_NAME: &str = "im-app";
+
+    /// 资料库应用宿主产物目录（前端 dist）
+    pub const REPO_COLLAB_APP_DIR_NAME: &str = "repo-collab-app";
+
     /// 配置目录名
     pub const CONFIG_DIR_NAME: &str = "config";
 
@@ -190,6 +196,18 @@ pub mod docker {
     /// 获取应用程序目录路径（跨平台）
     pub fn get_app_dir_path() -> PathBuf {
         Path::new(".").join(DOCKER_DIR_NAME).join(APP_DIR_NAME)
+    }
+
+    /// 获取 IM 应用宿主产物目录路径（跨平台）
+    pub fn get_im_app_dir_path() -> PathBuf {
+        Path::new(".").join(DOCKER_DIR_NAME).join(IM_APP_DIR_NAME)
+    }
+
+    /// 获取资料库应用宿主产物目录路径（跨平台）
+    pub fn get_repo_collab_app_dir_path() -> PathBuf {
+        Path::new(".")
+            .join(DOCKER_DIR_NAME)
+            .join(REPO_COLLAB_APP_DIR_NAME)
     }
 
     /// 获取配置目录路径（跨平台）
@@ -572,26 +590,21 @@ pub mod sql {
     /// 临时 SQL 目录名
     pub const TEMP_SQL_DIR: &str = "temp_sql";
 
-    /// 旧版本 SQL 文件名
-    pub const OLD_SQL_FILE: &str = "init_mysql_old.sql";
-
-    /// 新版本 SQL 文件名
-    pub const NEW_SQL_FILE: &str = "init_mysql_new.sql";
-
     /// 差异 SQL 文件名
     pub const DIFF_SQL_FILE: &str = "upgrade_diff.sql";
 
-    /// 当前 SQL 文件路径
-    pub const CURRENT_SQL_PATH: &str = "docker/config/init_mysql.sql";
+    /// Schema 模板清单：Live Diff 逐库对比的目标 DDL。
+    /// 每个文件对应一个数据库（靠文件内唯一的 `USE` 语句归属库），
+    /// 纯数据文件（如 init_mysql_data.sql）不属于此清单。
+    pub const SCHEMA_SQL_FILES: &[&str] = &[
+        "docker/config/init_mysql.sql",
+        "docker/config/init_mysql_im.sql",
+    ];
 
     /// 关键升级文件列表（增量升级时必须强制更新）
     /// 这些文件对于数据库升级至关重要，必须始终保持最新版本
-    pub const CRITICAL_UPGRADE_FILES: &[&str] = &[
-        "config/init_mysql.sql",
-        // 未来可以添加其他关键文件，例如：
-        // "config/schema.json",
-        // "config/migration_rules.yml",
-    ];
+    pub const CRITICAL_UPGRADE_FILES: &[&str] =
+        &["config/init_mysql.sql", "config/init_mysql_im.sql"];
 
     /// 目录清理最大重试次数
     pub const MAX_CLEANUP_ATTEMPTS: usize = 3;

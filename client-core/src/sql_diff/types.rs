@@ -1,3 +1,24 @@
+use std::collections::HashMap;
+
+/// 索引列（结构化）：列名 + 可选 MySQL 前缀长度（`col_name(N)`，
+/// 如 utf8mb4 索引长度限制下的 `` `url`(255) ``）。
+/// 解析层从 AST 还原、渲染层据此生成 SQL，全程不做文本嗅探。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexColumnDef {
+    pub name: String,
+    pub prefix_length: Option<u64>,
+}
+
+impl IndexColumnDef {
+    /// 渲染为 SQL 片段：`` `name` `` 或 `` `name`(N) ``
+    pub(crate) fn render(&self) -> String {
+        match self.prefix_length {
+            Some(length) => format!("`{}`({length})", self.name),
+            None => format!("`{}`", self.name),
+        }
+    }
+}
+
 /// 生成列定义（MySQL `GENERATED ALWAYS AS (expr) STORED/VIRTUAL`）
 ///
 /// 注意：对存量表 ADD/MODIFY 为 STORED 生成列会触发全表重建，大表升级需评估耗时。
@@ -284,7 +305,7 @@ fn strip_balanced_outer_parens(s: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableIndex {
     pub name: String,
-    pub columns: Vec<String>,
+    pub columns: Vec<IndexColumnDef>,
     pub is_primary: bool,
     pub is_unique: bool,
     /// MySQL: `CREATE FULLTEXT INDEX` / `CREATE SPATIAL INDEX` 标记
@@ -322,6 +343,47 @@ pub struct SchemaDiffResult {
     /// 是否有可执行的SQL语句
     pub has_executable_sql: bool,
     /// 是否包含需要人工处理的警告
+    pub has_warnings: bool,
+}
+
+/// 单个模板文件解析结果（多库 Live Diff 的输入）
+/// 一个文件对应一个数据库：库归属来自文件内唯一的 `USE` 语句
+#[derive(Debug, Clone)]
+pub struct SchemaTemplate {
+    /// 目标数据库名（来自 `USE <db>`）
+    pub database: String,
+    /// 建库/授权/刷新原句（CREATE DATABASE / GRANT / FLUSH PRIVILEGES），
+    /// 按原文件顺序透传执行——幂等且保留 charset/collation 等细节，不做合成
+    pub preamble_stmts: Vec<String>,
+    /// 模板内全部表定义
+    pub tables: HashMap<String, TableDefinition>,
+}
+
+/// 单库的 Live Diff 结果
+#[derive(Debug, Clone)]
+pub struct DbSectionResult {
+    /// 数据库名
+    pub database: String,
+    /// 该库的差异 SQL（不含建库前缀与 USE 段头）
+    pub diff_sql: String,
+    /// 该库的变更统计
+    pub stats: DiffStats,
+    /// 该库在线架构的原始 CREATE TABLE SQL
+    pub live_sql: String,
+}
+
+/// 多库 Live Diff 汇总结果
+#[derive(Debug, Clone)]
+pub struct MultiDbDiffResult {
+    /// 逐库结果（与输入模板顺序一致）
+    pub sections: Vec<DbSectionResult>,
+    /// 组装后的完整差异 SQL（含建库前缀 + USE 段头，仅含有可执行变更的库段）
+    pub diff_sql: String,
+    /// 汇总描述（逐库摘要）
+    pub description: String,
+    /// 任一库存在可执行语句
+    pub has_executable_sql: bool,
+    /// 任一库存在人工处理警告
     pub has_warnings: bool,
 }
 
