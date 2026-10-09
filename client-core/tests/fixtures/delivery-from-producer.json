@@ -1,0 +1,43 @@
+{
+  "architecture": "amd64",
+  "components": {
+    "nuwax-im": {
+      "artifacts": {
+        "im-app/nuwax-im-gateway-bootstrap.jar": "9faa0cdbd8af130d1d8aa7a12588855da59545cbe15afabb7e99a00da388918e",
+        "im-app/nuwax-im-web-bootstrap.jar": "c395de21d575f34824a527209fc303f85bbb77932b9e69a99dbe4a75b9e536f2"
+      },
+      "config_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "source": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "target": "nuwax-docker-images-registry.cn-hangzhou.cr.aliyuncs.com/nuwax/nuwax-im:latest",
+      "version": "fixture-1"
+    },
+    "repo-collab": {
+      "artifacts": {
+        "repo-collab-app/dist/index.js": "e06757f41c77d002071190eb4688976cae19fd47e569b04ccedbca153564f6be"
+      },
+      "config_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "source": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "target": "nuwax-docker-images-registry.cn-hangzhou.cr.aliyuncs.com/nuwax/repo-collab:latest",
+      "version": "fixture-1"
+    }
+  },
+  "compose": {
+    "path": "docker-compose.yml",
+    "sha256": "fda0e2f675f28a49fa241e0ab7b659ccd2cea52adf14a7fce5e417c327afdc65"
+  },
+  "contract_version": 1,
+  "mysql": {
+    "files": {
+      "config/init_mysql.sql": "15a0b1b481877b1dc6e097a664def4ee65a13692a658a1e1641f4c33f68f3b3d",
+      "config/init_mysql_data.sql": "2611501d3e3662c3d33e1e5a35d7f6b3a061a31cc4e39bc398a0ea264b158943",
+      "config/init_mysql_databases.sql": "93b16ac06f2aa9e279692e58fd03681ecd88dd17a35f46d7f0b4eee6c00ec044",
+      "config/init_mysql_im.sql": "eafd4929bb8cea3ccd8a2df82c267dcf335fedb1bdad3a2efb616ce06a205d81",
+      "config/init_mysql_permissions.sh": "c085c5e4a9b1eb559c7629117e360d5d1571d14c98fe49da1d322714d86c1ef1",
+      "config/mysql-schema-manifest.json": "3127fd6b3c864493f4cde2aeb226ef8bdd62b75b97db83623a2df02a9531f8a5"
+    },
+    "manifest": "config/mysql-schema-manifest.json"
+  },
+  "release_sha256": "113fc2adede2df1b72ccd10b0d90e5becde8cd7d59e7b591985fc4b052cd6c4e"
+}

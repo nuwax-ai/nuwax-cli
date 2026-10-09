@@ -422,6 +422,49 @@ impl MySqlExecutor {
         Ok((tables, create_sqls))
     }
 
+    /// 单列字符串查询（内部运维用：如读取 mysql.db 的授权模式）
+    pub async fn query_string_column(
+        &self,
+        sql: &str,
+        param: &str,
+    ) -> Result<Vec<String>, mysql_async::Error> {
+        let mut conn = self.pool.get_conn().await?;
+        let rows: Vec<String> = conn.exec(sql, (param,)).await?;
+        Ok(rows)
+    }
+
+    /// 在同一连接的专用会话中执行权限语句（F04，与部署 permissions 脚本语义等价）：
+    /// - 先保存 `@@sql_mode`，设置 `NO_BACKSLASH_ESCAPES` 后逐条执行，最后恢复——
+    ///   会话模式不泄漏到后续 schema DDL（池化连接复用安全）；
+    /// - 任意账户名只需单引号加倍即可安全表达；执行失败在恢复模式后返回错误。
+    pub async fn execute_privilege_statements(
+        &self,
+        statements: &[String],
+    ) -> Result<(), mysql_async::Error> {
+        let mut conn = self.pool.get_conn().await?;
+        let saved_mode: Option<(String,)> = conn.exec_first("SELECT @@sql_mode", ()).await?;
+        conn.query_drop("SET SESSION sql_mode=CONCAT(@@sql_mode, ',NO_BACKSLASH_ESCAPES')")
+            .await?;
+        let mut failure = None;
+        for statement in statements {
+            if let Err(error) = conn.query_drop(statement).await {
+                failure = Some(error);
+                break;
+            }
+            tracing::info!(statement = %statement, "Privilege statement applied");
+        }
+        if let Some((saved,)) = saved_mode {
+            let restore = format!("SET SESSION sql_mode='{}'", saved.replace('\'', "''"));
+            if let Err(restore_error) = conn.query_drop(restore).await {
+                tracing::warn!(error = %restore_error, "Failed to restore sql_mode on pooled connection");
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     /// 判断库是否存在（仅用于日志与状态展示）
     pub async fn schema_exists(&self, schema: &str) -> Result<bool, mysql_async::Error> {
         let mut conn = self.pool.get_conn().await?;

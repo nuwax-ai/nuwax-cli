@@ -219,10 +219,21 @@ pub fn validate_manifest_structure(manifest: &SchemaManifest) -> Result<()> {
         bail!("manifest permissions.user_env must not be empty");
     }
 
-    // initdb 挂载名：两位数字前缀、全局唯一
+    // initdb 挂载名：两位数字前缀、全局唯一，且类别顺序满足
+    // bootstrap < permissions < schemas（按清单顺序递增）< seeds
     let mut targets: HashSet<&str> = HashSet::new();
     let target_pattern =
-        Regex::new(r"^[0-9]{2}_[A-Za-z0-9_.-]+$").expect("initdb target pattern must compile");
+        Regex::new(r"^([0-9]{2})_[A-Za-z0-9_.-]+$").expect("initdb target pattern must compile");
+    let ordering = |target: &str| -> Result<u32> {
+        let captures = target_pattern.captures(target).ok_or_else(|| {
+            anyhow::anyhow!(
+                "manifest initdb_target '{target}' must carry a two-digit ordering prefix"
+            )
+        })?;
+        captures[1]
+            .parse::<u32>()
+            .context("initdb prefix must be numeric")
+    };
     let all_targets = std::iter::once(manifest.bootstrap.initdb_target.as_str())
         .chain(std::iter::once(manifest.permissions.initdb_target.as_str()))
         .chain(
@@ -238,11 +249,50 @@ pub fn validate_manifest_structure(manifest: &SchemaManifest) -> Result<()> {
                 .map(|seed| seed.initdb_target.as_str()),
         );
     for target in all_targets {
-        if !target_pattern.is_match(target) {
-            bail!("manifest initdb_target '{target}' must carry a two-digit ordering prefix");
-        }
+        ordering(target)?;
         if !targets.insert(target) {
             bail!("manifest initdb_target '{target}' is declared more than once");
+        }
+    }
+    if !manifest.schemas.is_empty() {
+        let bootstrap_order = ordering(&manifest.bootstrap.initdb_target)?;
+        let permissions_order = ordering(&manifest.permissions.initdb_target)?;
+        let schema_orders: Vec<u32> = manifest
+            .schemas
+            .iter()
+            .map(|schema| ordering(&schema.initdb_target))
+            .collect::<Result<Vec<_>>>()?;
+        let seed_orders: Vec<u32> = manifest
+            .first_install_seeds
+            .iter()
+            .map(|seed| ordering(&seed.initdb_target))
+            .collect::<Result<Vec<_>>>()?;
+        if permissions_order <= bootstrap_order {
+            bail!(
+                "initdb ordering violated: permissions ({permissions_order}) must run after bootstrap ({bootstrap_order})"
+            );
+        }
+        if schema_orders
+            .first()
+            .is_some_and(|first| *first <= permissions_order)
+        {
+            bail!(
+                "initdb ordering violated: schemas ({schema_orders:?}) must run after permissions ({permissions_order})"
+            );
+        }
+        for pair in schema_orders.windows(2) {
+            if pair[1] <= pair[0] {
+                bail!(
+                    "initdb ordering violated: schema targets must ascend along the manifest order ({schema_orders:?})"
+                );
+            }
+        }
+        if let Some(last_schema) = schema_orders.last()
+            && seed_orders.iter().any(|order| order <= last_schema)
+        {
+            bail!(
+                "initdb ordering violated: seeds ({seed_orders:?}) must run after all schemas ({schema_orders:?})"
+            );
         }
     }
 
@@ -449,6 +499,12 @@ pub fn validate_manifest_files(manifest: &SchemaManifest, docker_root: &Path) ->
     Ok(())
 }
 
+/// GRANT 权限模式中的库名转义：`_`（单字符通配符）与 `%`（任意串通配符）
+/// 加反斜杠转义，保证只匹配声明的库本身
+fn escape_database_grant_pattern(name: &str) -> String {
+    name.replace('_', r"\_").replace('%', r"\%")
+}
+
 /// 存量迁移编排：bootstrap（幂等建库）→ 应用账号授权 → 按 schemas 逐库 Live Diff。
 ///
 /// - bootstrap/permissions 独立执行，不受表差异控制；任何一步失败立即停止；
@@ -464,8 +520,8 @@ pub async fn run_manifest_migration(
     docker_root: &Path,
     app_user: &str,
 ) -> Result<MultiDbDiffResult> {
-    let app_user = app_user.trim();
-    if app_user.is_empty() || app_user.eq_ignore_ascii_case("root") {
+    let account_trimmed = app_user.trim();
+    if account_trimmed.is_empty() || account_trimmed.eq_ignore_ascii_case("root") {
         bail!(
             "application account (from {}) must be a non-empty non-root user for permissions",
             manifest.permissions.user_env
@@ -484,18 +540,44 @@ pub async fn run_manifest_migration(
         "Manifest bootstrap applied (idempotent CREATE DATABASE)"
     );
 
-    // 2) 应用账号授权（对 bootstrap 声明的全部库）
-    let escaped_user = app_user.replace('\'', "''");
-    let mut grants = String::new();
+    // 2) 应用账号授权（对 bootstrap 声明的全部库，语义与部署 permissions 脚本等价）
+    //    - 权限模式的库名转义 `_`/`%`（默认模式下 `_` 是单字符通配符，未转义会把
+    //      agent_platform 授到 agentXplatform 等相似库）；
+    //    - 先按【未转义】模式 REVOKE 收敛早期 CLI 版本可能已加入的宽权限行，
+    //      再按【转义】模式精确 GRANT（二者是不同权限行，REVOKE 不影响精确行）；
+    //    - 专用会话执行（NO_BACKSLASH_ESCAPES + 恢复 sql_mode），账户名仅加倍单引号。
+    let account = app_user.replace('\'', "''");
+    // 收敛范围只覆盖【实际存在】的未转义宽权限行（GRANT 的库名模式按字面存储于
+    // mysql.db.Db：宽行为 `agent_platform`，精确行为 `agent\_platform`，互不影响）；
+    // 不存在的模式 REVOKE 会被 MySQL 以 1141 拒绝，因此先查再撤
+    let existing_patterns = executor
+        .query_string_column(
+            "SELECT Db FROM mysql.db WHERE User = ? AND Host = '%'",
+            app_user,
+        )
+        .await
+        .context("failed to inspect existing grant patterns")?;
+    let mut statements = Vec::with_capacity(manifest.databases.len() * 2 + 1);
     for database in &manifest.databases {
-        grants.push_str(&format!(
-            "GRANT ALL PRIVILEGES ON `{}`.* TO '{escaped_user}'@'%';\n",
-            database.name
+        if existing_patterns
+            .iter()
+            .any(|pattern| pattern == &database.name)
+        {
+            statements.push(format!(
+                "REVOKE ALL PRIVILEGES ON `{}`.* FROM '{account}'@'%';",
+                database.name
+            ));
+        }
+    }
+    for database in &manifest.databases {
+        let escaped = escape_database_grant_pattern(&database.name);
+        statements.push(format!(
+            "GRANT ALL PRIVILEGES ON `{escaped}`.* TO '{account}'@'%';"
         ));
     }
-    grants.push_str("FLUSH PRIVILEGES;\n");
+    statements.push("FLUSH PRIVILEGES;".to_string());
     executor
-        .execute_diff_sql_once(&grants)
+        .execute_privilege_statements(&statements)
         .await
         .context("manifest permissions (GRANT) failed")?;
 
@@ -610,6 +692,26 @@ mod tests {
 
         let mut manifest = parse_schema_manifest(&valid_manifest_json()).expect("valid");
         manifest.databases[0].name = "1bad-name".to_string();
+        assert!(validate_manifest_structure(&manifest).is_err());
+    }
+
+    #[test]
+    fn rejects_initdb_ordering_violations() {
+        // IM schema 排到 permissions 之前（05 < 01 类别乱序）
+        let mut manifest = parse_schema_manifest(&valid_manifest_json()).expect("valid");
+        manifest.schemas[1].initdb_target = "05_init_mysql_im.sql".to_string();
+        let error = validate_manifest_structure(&manifest).unwrap_err();
+        assert!(error.to_string().contains("ordering"), "{error}");
+
+        // schema 目标未按清单顺序递增
+        let mut manifest = parse_schema_manifest(&valid_manifest_json()).expect("valid");
+        manifest.schemas[0].initdb_target = "20_init_mysql.sql".to_string();
+        manifest.schemas[1].initdb_target = "10_init_mysql_im.sql".to_string();
+        assert!(validate_manifest_structure(&manifest).is_err());
+
+        // seeds 早于 schema
+        let mut manifest = parse_schema_manifest(&valid_manifest_json()).expect("valid");
+        manifest.first_install_seeds[0].initdb_target = "15_init_mysql_data.sql".to_string();
         assert!(validate_manifest_structure(&manifest).is_err());
     }
 

@@ -226,6 +226,12 @@ async fn run_staged_deployment(
         delivery.as_ref(),
     )
     .context("Deployment configuration preflight failed")?;
+    if let Some(manifest) = manifest {
+        let compose_text = fs::read_to_string(docker_manager.get_compose_file())
+            .context("Failed to read candidate compose for initdb mount checks")?;
+        client_core::container::preflight::validate_initdb_mount_contract(&compose_text, manifest)
+            .context("Candidate compose violates the initdb mount contract")?;
+    }
 
     if !is_first_deployment {
         // stop_docker_services_and_wait 在没有运行容器时可能跳过 down；这里清理旧的已停止容器。
@@ -421,7 +427,11 @@ fn load_delivery_manifest(
 /// （compose / .env / schema manifest / 交付清单 / 关键 schema / 组件产物），
 /// 不重复下载大包、不整包预解压。新增必填键缺失、坏清单、patch 缺关键
 /// schema、连接映射错误都在停止旧服务之前失败（旧服务保持运行）。
-fn preflight_candidate_package_at(archive_path: &Path, is_patch: bool) -> Result<()> {
+fn preflight_candidate_package_at(
+    archive_path: &Path,
+    is_patch: bool,
+    user_env_path: &Path,
+) -> Result<()> {
     let base_names = [
         "docker-compose.yml",
         ".env",
@@ -442,16 +452,16 @@ fn preflight_candidate_package_at(archive_path: &Path, is_patch: bool) -> Result
     let compose_text = String::from_utf8(compose_bytes.clone())
         .context("candidate package docker-compose.yml is not valid UTF-8")?;
 
-    // 合并 env：用户现值完全保留 + 包内默认补键；shell 优先级由连接校验的插值层处理
-    let user_env = fs::read_to_string(Path::new("docker").join(".env")).unwrap_or_default();
+    // 合并 env：用户现值完全保留 + 包内默认补键；解析走与运行时相同的
+    // Compose env-file 解析器（引号/行内注释/插值-未定义为空/优先级，F03）
+    let user_env = fs::read_to_string(user_env_path).unwrap_or_default();
     let package_env = entries
         .get(".env")
         .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
         .unwrap_or_default();
-    let values = parse_env_text_to_map(&crate::utils::env_merge::merge_env_contents(
-        &user_env,
-        &package_env,
-    ));
+    let values = client_core::container::preflight::compose_env_values_from_text(
+        &crate::utils::env_merge::merge_env_contents(&user_env, &package_env),
+    )?;
 
     let missing =
         client_core::container::preflight::missing_required_env_keys(&compose_text, &values);
@@ -490,6 +500,11 @@ fn preflight_candidate_package_at(archive_path: &Path, is_patch: bool) -> Result
                 &manifest,
             )
             .context("candidate package connection mapping does not match the migration targets")?;
+            client_core::container::preflight::validate_initdb_mount_contract(
+                &compose_text,
+                &manifest,
+            )
+            .context("candidate package initdb mount contract is violated")?;
             Some(manifest)
         }
         None => {
@@ -531,6 +546,7 @@ fn preflight_candidate_package_at(archive_path: &Path, is_patch: bool) -> Result
         client_core::container::preflight::verify_delivery_against_entries(
             &parsed,
             &delivery_entries,
+            Some(crate::docker_service::get_system_architecture().as_str()),
         )
         .context("candidate package contents do not match its DELIVERY_MANIFEST")?;
         delivery = Some(parsed);
@@ -568,7 +584,15 @@ fn preflight_candidate_package_at(archive_path: &Path, is_patch: bool) -> Result
         let refs: Vec<&str> = component_mounts.iter().map(String::as_str).collect();
         let mount_entries = crate::utils::read_archive_entries(archive_path, &refs)?;
         for source in &component_mounts {
-            if !mount_entries.contains_key(source.as_str()) {
+            // 文件形态（叶子含扩展名）要求精确条目；目录形态允许 files-only 归档
+            //（无显式目录条目，仅有 prefix/file 后代）
+            let looks_like_file = source
+                .rsplit('/')
+                .next()
+                .is_some_and(|leaf| leaf.contains('.'));
+            let present = mount_entries.contains_key(source.as_str())
+                || (!looks_like_file && crate::utils::archive_contains(archive_path, source)?);
+            if !present {
                 return Err(anyhow::anyhow!(
                     "candidate compose mounts '{source}' but the package does not contain it"
                 ));
@@ -583,26 +607,12 @@ fn preflight_candidate_package_at(archive_path: &Path, is_patch: bool) -> Result
     Ok(())
 }
 
-/// 极简 .env 文本 → 键值映射（预检用；容忍 export 前缀与基础引号包裹）
-fn parse_env_text_to_map(text: &str) -> std::collections::HashMap<String, String> {
-    text.lines()
-        .filter_map(|line| {
-            let key = crate::utils::env_merge::env_assignment_key(line)?.to_string();
-            let assignment = line.trim().strip_prefix("export ").unwrap_or(line.trim());
-            let (_, value) = assignment.split_once('=')?;
-            let value = value.trim();
-            let value = value
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-                .unwrap_or(value);
-            Some((key, value.to_string()))
-        })
-        .collect()
-}
-
 /// 在线升级的候选包预检包装：解析策略对应本地包路径并执行归档预检
-fn preflight_candidate_package(app: &CliApp, strategy: &UpgradeStrategy) -> Result<()> {
+fn preflight_candidate_package(
+    app: &CliApp,
+    strategy: &UpgradeStrategy,
+    user_env_path: &Path,
+) -> Result<()> {
     let Some(path) = docker_service::package_path_for_strategy(app, strategy)? else {
         return Ok(());
     };
@@ -613,27 +623,26 @@ fn preflight_candidate_package(app: &CliApp, strategy: &UpgradeStrategy) -> Resu
         ));
     }
     let is_patch = matches!(strategy, UpgradeStrategy::PatchUpgrade { .. });
-    preflight_candidate_package_at(&path, is_patch)
+    preflight_candidate_package_at(&path, is_patch, user_env_path)
 }
 
 /// 停止旧服务前的当前配置预检（C01）：必填键、库目标/连接映射、宿主产物完整性。
+/// 路径来自最终选定的 DockerManager（--config / 项目配置覆盖生效，F06）。
 /// 候选新包的同一预检在解压后、修改数据库前由 `run_staged_deployment` 再执行一次。
-fn preflight_current_config() -> Result<()> {
-    let compose = client_core::constants::docker::get_compose_file_path();
-    let env = client_core::constants::docker::get_env_file_path();
-    if !compose.is_file() || !env.is_file() {
+fn preflight_current_config(compose_path: &Path, env_path: &Path) -> Result<()> {
+    if !compose_path.is_file() || !env_path.is_file() {
         return Ok(());
     }
-    let docker_root = Path::new("docker");
+    let docker_root = env_path.parent().unwrap_or(Path::new("docker"));
     let plan = resolve_migration_plan(docker_root)?;
     let (manifest, template_databases) = match &plan {
         MigrationPlan::Manifest(manifest) => (Some(manifest), manifest.database_names()),
-        MigrationPlan::Legacy => (None, collect_existing_template_databases()),
+        MigrationPlan::Legacy => (None, collect_existing_template_databases(docker_root)),
     };
     let delivery = load_delivery_manifest(docker_root)?;
     client_core::container::preflight::preflight_deploy_config(
-        &compose,
-        &env,
+        compose_path,
+        env_path,
         &template_databases,
         manifest.map(std::convert::AsRef::as_ref),
         delivery.as_ref(),
@@ -643,11 +652,11 @@ fn preflight_current_config() -> Result<()> {
 
 /// 收集磁盘上现存且可解析的 schema 模板库名（宽容处理：旧部署可能尚无
 /// 新增模板文件；完整校验在解压后的预检中执行，这里只为库目标校验提供输入）
-fn collect_existing_template_databases() -> Vec<String> {
-    sql::SCHEMA_SQL_FILES
+fn collect_existing_template_databases(docker_root: &Path) -> Vec<String> {
+    client_core::constants::sql::SCHEMA_SQL_FILES
         .iter()
-        .filter_map(|path| {
-            fs::read_to_string(path)
+        .filter_map(|relative| {
+            fs::read_to_string(docker_root.join(relative.trim_start_matches("docker/")))
                 .ok()
                 .and_then(|content| parse_schema_template(&content).ok())
                 .map(|template| template.database)
@@ -738,18 +747,6 @@ impl OnlineEnvPreserve {
         info!("🛡️ Restored user .env after failed extraction");
         Ok(())
     }
-
-    fn discard(&self) {
-        if self.active
-            && self.preserve_path.is_file()
-            && let Err(error) = fs::remove_file(&self.preserve_path)
-        {
-            warn!(
-                "⚠️ Failed to remove preserved .env copy: {error}",
-                error = error.to_string()
-            );
-        }
-    }
 }
 
 /// 运行自动升级部署相关命令的统一入口
@@ -826,15 +823,23 @@ pub async fn run_auto_upgrade_deploy(
     // 2. 🔍 检查部署类型：第一次部署 vs 升级部署
     let is_first_deployment = is_first_deployment().await;
 
+    // F06：最终选定的 DockerManager（--config / 项目配置覆盖生效）——预检与
+    // 后续挂载目录检查统一使用其 compose/env 路径，不重复按默认路径取上下文
+    let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
+
     if is_first_deployment {
         info!("🆕 First deployment detected, using fresh initialization");
     } else {
         info!("🔄 Upgrade deployment detected, services will be stopped first");
 
-        // C01/P1#3: 停止旧服务前先对当前配置与候选包预检（必填键/连接映射/
-        // schema 清单/交付清单/产物），任何失败旧服务保持运行
-        preflight_current_config()?;
-        preflight_candidate_package(app, &upgrade_strategy)
+        // C01/P1#3/F06: 停止旧服务前先对当前配置与候选包预检（必填键/连接映射/
+        // schema 清单/交付清单/产物）；路径取自最终选定的 DockerManager，
+        // --config / 项目配置覆盖与实际部署一致（manager 已在分支外创建）
+        preflight_current_config(
+            docker_manager.get_compose_file(),
+            docker_manager.get_env_file(),
+        )?;
+        preflight_candidate_package(app, &upgrade_strategy, docker_manager.get_env_file())
             .context("Candidate package preflight failed before stopping services")?;
 
         // 3. 🛑 停止服务并等待（使用统一的公共方法）
@@ -853,8 +858,7 @@ pub async fn run_auto_upgrade_deploy(
 
     // 5. 🔍 提前检查并创建挂载目录（重要：Windows Podman Desktop 需要）
     info!("🔍 Checking and creating mount directories...");
-
-    let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
+    // DockerManager 已在停服前创建并用于预检（见上方 F06 注释），此处直接复用
 
     // 使用新的环境检测机制
     let runtime_env = docker_manager.get_runtime_environment();
@@ -886,7 +890,12 @@ pub async fn run_auto_upgrade_deploy(
     // C01: 清理/解压期间保留用户 .env——full 清理与 patch 变更删除都不再丢配置；
     // 解压成功后与包内 .env 合并补键，失败时原样还原
     let docker_dir = std::path::Path::new("docker");
-    let env_preserve = OnlineEnvPreserve::capture(docker_dir)?;
+    // F02：NoUpgrade（版本未变）无新包——不清理、不捕获保存副本，直接走
+    // 分阶段重新部署（停服→原文件重启）；避免已 discard 的副本进入合并路径
+    let env_preserve = match &upgrade_strategy {
+        UpgradeStrategy::NoUpgrade { .. } => None,
+        _ => Some(OnlineEnvPreserve::capture(docker_dir)?),
+    };
 
     // 清理现有的docker目录以避免路径冲突
     if docker_dir.exists() {
@@ -942,9 +951,8 @@ pub async fn run_auto_upgrade_deploy(
                 }
             }
             UpgradeStrategy::NoUpgrade { .. } => {
-                //do nothing
+                //do nothing：无包可解压，docker/ 保持原样进入 run_staged_deployment
                 info!("Version unchanged, no upgrade required");
-                env_preserve.discard();
             }
         }
     }
@@ -955,8 +963,10 @@ pub async fn run_auto_upgrade_deploy(
         Ok(_) => {
             info!("✅ Docker service package extracted");
 
-            // C01: 与包内 .env 合并（保留用户值、仅补新包新增键）
-            env_preserve.merge_into(docker_dir)?;
+            // C01: 与包内 .env 合并（保留用户值、仅补新包新增键；NoUpgrade 无守卫）
+            if let Some(env_preserve) = env_preserve.as_ref() {
+                env_preserve.merge_into(docker_dir)?;
+            }
 
             // 🔧 自动修复关键脚本文件权限
             fix_script_permissions().await?;
@@ -969,7 +979,9 @@ pub async fn run_auto_upgrade_deploy(
                 error = e.to_string()
             );
             // C01: 解压失败原样还原用户 .env，保证失败不污染
-            if let Err(restore_error) = env_preserve.restore(docker_dir) {
+            if let Some(env_preserve) = env_preserve.as_ref()
+                && let Err(restore_error) = env_preserve.restore(docker_dir)
+            {
                 warn!(
                     "⚠️ Failed to restore preserved .env after extraction failure: {error}",
                     error = restore_error.to_string()
@@ -1845,7 +1857,8 @@ pub async fn run_offline_deploy(
         version = version.to_string()
     );
 
-    // 3. 检测是否首次部署
+    // 3. 检测是否首次部署（DockerManager 已提前创建：F06 路径统一）
+    let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
     let is_first_deployment = is_first_deployment().await;
 
     if is_first_deployment {
@@ -1853,9 +1866,13 @@ pub async fn run_offline_deploy(
     } else {
         info!("🔄 Upgrade deployment detected, services will be stopped first");
 
-        // C01/P1#3: 停止旧服务前先对当前配置与离线包预检，任何失败旧服务保持运行
-        preflight_current_config()?;
-        preflight_candidate_package_at(&archive_path, false)
+        // C01/P1#3/F06: 停止旧服务前先对当前配置与离线包预检；路径取自
+        // 最终选定的 DockerManager（--config / 项目配置覆盖生效；已在分支外创建）
+        preflight_current_config(
+            docker_manager.get_compose_file(),
+            docker_manager.get_env_file(),
+        )?;
+        preflight_candidate_package_at(&archive_path, false, docker_manager.get_env_file())
             .context("Offline package preflight failed before stopping services")?;
 
         // 停止服务并等待
@@ -1872,8 +1889,7 @@ pub async fn run_offline_deploy(
         }
     }
 
-    // 4. 创建 DockerManager
-    let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
+    // 4. DockerManager 已在停服前创建（用于预检），此处直接复用
 
     // 5. 环境检测（Podman Desktop 需要预先创建挂载目录）
     let runtime_env = docker_manager.get_runtime_environment();
@@ -2028,13 +2044,7 @@ mod staged_deploy_tests {
         let preserve =
             OnlineEnvPreserve::capture_at(&(docker_dir.join(".env")), preserve_path.clone())?;
         assert!(!preserve.active, "env 不存在时为空守卫");
-        std::fs::write(&preserve_path, "X=1\n")?;
-        let active = OnlineEnvPreserve {
-            preserve_path: preserve_path.clone(),
-            active: true,
-        };
-        active.discard();
-        assert!(!preserve_path.exists(), "discard 必须清理临时副本");
+        assert!(!preserve_path.exists(), "未激活守卫不产生临时副本");
         Ok(())
     }
 
@@ -2118,6 +2128,169 @@ mod staged_deploy_tests {
         Ok(())
     }
 
+    /// F03 回归：候选 .env 里 `${UNDEFINED}` 与 `KEY= # 行内注释` 都必须按
+    /// 真实 Compose 语义解析为空 → 必填键缺失在停服前发现
+    #[test]
+    fn candidate_preflight_treats_undefined_interpolation_and_inline_comments_as_empty()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let docker_dir = directory.path().join("docker");
+        std::fs::create_dir_all(&docker_dir)?;
+
+        let archive_path = directory.path().join("full.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        zip.start_file(
+            "docker-compose.yml",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(
+            b"services:\n  backend:\n    environment:\n      - SECRET=${NEW_MUST_SET:?}\n",
+        )?;
+        // 包内 .env "定义"了该键，但值为未定义引用 / 纯行内注释——真实 Compose 均解析为空
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"NEW_MUST_SET=${UNDEFINED_FIXTURE_KEY}\n")?;
+        zip.finish()?;
+
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let result =
+            super::preflight_candidate_package_at(&archive_path, false, &docker_dir.join(".env"));
+        std::env::set_current_dir(cwd)?;
+        let error = result.expect_err("undefined interpolation must count as empty");
+        assert!(
+            error.to_string().contains("NEW_MUST_SET"),
+            "错误必须指名键: {error}"
+        );
+
+        // 行内注释形态
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        zip.start_file(
+            "docker-compose.yml",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(
+            b"services:\n  backend:\n    environment:\n      - SECRET=${NEW_MUST_SET:?}\n",
+        )?;
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"NEW_MUST_SET= # fill before upgrade\n")?;
+        zip.finish()?;
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let result =
+            super::preflight_candidate_package_at(&archive_path, false, &docker_dir.join(".env"));
+        std::env::set_current_dir(cwd)?;
+        assert!(result.is_err(), "行内注释值必须解析为空并触发必填失败");
+        Ok(())
+    }
+
+    /// F07 回归：patch 按 manifest 驱动强制更新全部关键引用文件——
+    /// 即使 operations 不包含它们，最终磁盘也是目标版本；缺引用文件则硬失败
+    #[tokio::test]
+    async fn patch_extraction_updates_manifest_referenced_files_beyond_ops() -> Result<()> {
+        use anyhow::Context as _;
+        use client_core::api_types::{PatchOperations, PatchPackageInfo, ReplaceOperations};
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+
+        let directory = tempfile::tempdir()?;
+        let docker_dir = directory.path().join("docker");
+        std::fs::create_dir_all(docker_dir.join("config"))?;
+        // 磁盘上的旧版 schema/bootstrap（将被包内新版覆盖）
+        std::fs::write(
+            docker_dir.join("config/init_mysql.sql"),
+            b"-- old platform schema\n",
+        )?;
+        std::fs::write(
+            docker_dir.join("config/init_mysql_im.sql"),
+            b"-- old im schema\n",
+        )?;
+        std::fs::write(
+            docker_dir.join("config/init_mysql_databases.sql"),
+            b"-- old bootstrap\n",
+        )?;
+
+        let manifest_json = br#"{"contract_version":1,"requires":{"cli_capability":"mysql-schema-manifest-v1"},
+"mysql_target":{"service":"mysql","internal_port":3306},"application_connections":[],
+"databases":[{"name":"agent_platform","bootstrap_only":false},{"name":"nuwax_im","bootstrap_only":false}],
+"bootstrap":{"path":"config/init_mysql_databases.sql","idempotent":true,"initdb_target":"00_init_mysql_databases.sql"},
+"permissions":{"path":"config/init_mysql_permissions.sh","user_env":"MYSQL_USER","databases":"bootstrap","initdb_target":"01_init_mysql_permissions.sh"},
+"schemas":[
+ {"database":"agent_platform","path":"config/init_mysql.sql","initdb_target":"10_init_mysql.sql"},
+ {"database":"nuwax_im","path":"config/init_mysql_im.sql","initdb_target":"20_init_mysql_im.sql"}],
+"first_install_seeds":[]}"#;
+        let new_platform = b"USE agent_platform;\nCREATE TABLE `users_new` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n";
+        let new_im = b"USE `nuwax_im`;\nCREATE TABLE `im_msg_new` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n";
+        let new_bootstrap = b"CREATE DATABASE IF NOT EXISTS `agent_platform` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\nCREATE DATABASE IF NOT EXISTS `nuwax_im` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;\n";
+        let new_permissions = b"#!/bin/sh\nexit 0\n";
+
+        let archive_path = directory.path().join("patch.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        for (name, bytes) in [
+            (
+                "docker/config/mysql-schema-manifest.json",
+                &manifest_json[..],
+            ),
+            ("docker/config/init_mysql_databases.sql", &new_bootstrap[..]),
+            (
+                "docker/config/init_mysql_permissions.sh",
+                &new_permissions[..],
+            ),
+            ("docker/config/init_mysql.sql", &new_platform[..]),
+            ("docker/config/init_mysql_im.sql", &new_im[..]),
+            ("docker/config/app.conf", b"content\n"),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(bytes)?;
+        }
+        zip.finish()?;
+
+        // ops 只声明 app.conf——schema/manifest 全不在变更清单里
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: Some(ReplaceOperations {
+                        files: vec!["config/app.conf".to_string()],
+                        directories: Vec::new(),
+                    }),
+                    delete: None,
+                },
+            },
+            target_version: "0.0.91.0".parse().context("version")?,
+            download_type: DownloadType::Patch,
+        };
+
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extraction = crate::utils::extract_docker_service(&archive_path, &strategy).await;
+        std::env::set_current_dir(cwd)?;
+        extraction.expect("patch extraction must succeed with manifest-driven criticals");
+
+        // 未进 ops 的关键文件全部更新为目标版本
+        assert_eq!(
+            std::fs::read(docker_dir.join("config/init_mysql.sql"))?,
+            &new_platform[..],
+            "平台 schema 必须被强制更新"
+        );
+        assert_eq!(
+            std::fs::read(docker_dir.join("config/init_mysql_im.sql"))?,
+            &new_im[..],
+            "IM schema 必须被强制更新"
+        );
+        assert_eq!(
+            std::fs::read(docker_dir.join("config/init_mysql_databases.sql"))?,
+            &new_bootstrap[..],
+            "bootstrap 必须被强制更新"
+        );
+        assert!(
+            std::fs::read_to_string(docker_dir.join("config/mysql-schema-manifest.json"))?
+                .contains("mysql-schema-manifest-v1")
+        );
+        Ok(())
+    }
+
     /// P1#3 回归：候选包预检在缺新必填键时失败（旧服务无需停止即可发现）
     #[test]
     fn candidate_package_preflight_rejects_missing_required_keys() -> Result<()> {
@@ -2141,7 +2314,8 @@ mod staged_deploy_tests {
 
         let cwd = std::env::current_dir()?;
         std::env::set_current_dir(directory.path())?;
-        let result = super::preflight_candidate_package_at(&archive_path, false);
+        let result =
+            super::preflight_candidate_package_at(&archive_path, false, &docker_dir.join(".env"));
         std::env::set_current_dir(cwd)?;
         let error = result.expect_err("missing required key must fail the preflight");
         assert!(

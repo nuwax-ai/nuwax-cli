@@ -11,7 +11,7 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 
 #[path = "compose_env.rs"]
-mod compose_env;
+pub(crate) mod compose_env;
 
 // 缓存条目的结构
 #[derive(Debug, Clone)]

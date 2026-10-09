@@ -698,10 +698,35 @@ async fn extract_zip_archive(
                 }
             }
 
-            // 🔧 强制更新关键配置文件（无论是否在变更列表中）
-            // 这些文件对于数据库升级至关重要，必须始终保持最新
-            use client_core::constants::sql::CRITICAL_UPGRADE_FILES;
-            for critical_file in CRITICAL_UPGRADE_FILES {
+            // 🔧 强制更新关键 schema/清单文件（无论是否出现在 patch operations 中）。
+            // F07：按包内 mysql-schema-manifest.json 驱动——bootstrap、permissions、
+            // manifest 本身与各库 schema 即使未进 ops 也必须落盘为目标版本；
+            // 无 manifest 的 legacy 包退回固定关键文件名单。
+            let critical_files: Vec<String> = {
+                let manifest_bytes = archive
+                    .by_name("docker/config/mysql-schema-manifest.json")
+                    .ok()
+                    .and_then(|mut entry| {
+                        let mut bytes = Vec::new();
+                        std::io::Read::read_to_end(&mut entry, &mut bytes).ok()?;
+                        Some(bytes)
+                    });
+                match manifest_bytes
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .and_then(|text| client_core::mysql_manifest::parse_schema_manifest(&text).ok())
+                {
+                    Some(manifest) => {
+                        let mut files = vec!["config/mysql-schema-manifest.json".to_string()];
+                        files.extend(manifest.referenced_paths());
+                        files
+                    }
+                    None => client_core::constants::sql::CRITICAL_UPGRADE_FILES
+                        .iter()
+                        .map(|file| file.to_string())
+                        .collect(),
+                }
+            };
+            for critical_file in &critical_files {
                 let zip_path = format!("docker/{}", critical_file);
                 let dst_path = work_dir.join(critical_file);
 
@@ -712,9 +737,9 @@ async fn extract_zip_archive(
                         info!("✅ Critical file updated: {}", critical_file);
                     }
                     Err(_) => {
-                        // C04: 补丁包必须携带全部关键 schema 文件——缺文件时保留的
-                        // 只会是磁盘上的旧版本 schema，Live Diff 将对比错误目标。
-                        // 显式失败并引导改用完整包，而不是静默沿用旧 schema。
+                        // C04/F07: patch 必须携带全部关键 schema/清单文件——缺文件时
+                        // 保留的只会是磁盘上的旧版本，Live Diff 将对比错误目标。
+                        // 显式失败并引导改用完整包，而不是静默沿用旧文件。
                         return Err(anyhow::anyhow!(
                             "Patch archive is missing critical schema file {zip_path}; \
                              refusing to keep a stale schema (deploy with a full package instead)"
@@ -935,6 +960,39 @@ pub fn setup_minimal_logging() {
         .with_target(false)
         .compact() // 使用紧凑格式
         .try_init();
+}
+
+/// 判断归档内是否存在某路径（精确条目，或其下任意后代条目——files-only
+/// 归档可能没有显式目录条目，只有 `prefix/file` 形式的文件）
+pub fn archive_contains(archive_path: &std::path::Path, path: &str) -> Result<bool> {
+    let prefix = format!("{path}/");
+    match archive::detect_format_by_magic(archive_path)? {
+        client_core::utils::archive::ArchiveFormat::Zip => {
+            let file = std::fs::File::open(archive_path)?;
+            let mut zip = zip::ZipArchive::new(file)?;
+            for index in 0..zip.len() {
+                let name = zip.by_index(index)?.name().to_string();
+                let normalized = name.strip_prefix("docker/").unwrap_or(&name).to_string();
+                if normalized == path || normalized.starts_with(&prefix) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        client_core::utils::archive::ArchiveFormat::TarGz => {
+            let file = std::fs::File::open(archive_path)?;
+            let decoder = flate2::read::GzDecoder::new(file);
+            let mut tar = tar::Archive::new(decoder);
+            for entry in tar.entries()? {
+                let name = entry?.path()?.to_string_lossy().into_owned();
+                let normalized = name.strip_prefix("docker/").unwrap_or(&name).to_string();
+                if normalized == path || normalized.starts_with(&prefix) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+    }
 }
 
 /// 按名称读取归档内少量条目（不整包解压、不重复下载）。

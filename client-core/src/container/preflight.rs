@@ -206,7 +206,17 @@ pub fn preflight_deploy_config(
 pub fn verify_delivery_against_entries(
     manifest: &DeliveryManifest,
     entries: &HashMap<String, Vec<u8>>,
+    local_architecture: Option<&str>,
 ) -> Result<()> {
+    if let Some(architecture) = local_architecture
+        && !architecture.is_empty()
+        && manifest.architecture != architecture
+    {
+        bail!(
+            "DELIVERY_MANIFEST architecture '{}' does not match this host ('{architecture}')",
+            manifest.architecture
+        );
+    }
     let compose = entries
         .get(manifest.compose.path.as_str())
         .ok_or_else(|| anyhow!("archive is missing compose {}", manifest.compose.path))?;
@@ -465,32 +475,59 @@ mod tests {
     }
 
     #[test]
-    fn backup_guard_rejects_component_free_backup_when_compose_references_it() {
+    fn backup_guard_rejects_component_free_and_half_backups() {
         let directory = tempfile::tempdir().expect("tempdir");
         let docker_dir = directory.path().join("docker");
         std::fs::create_dir_all(&docker_dir).expect("mkdir");
+        // compose 同时挂载两个 jar（文件挂载）与 dist（目录挂载）
         std::fs::write(
             docker_dir.join("docker-compose.yml"),
-            "services:\n  nuwax-im-business:\n    volumes:\n      - type: bind\n        source: ./im-app/nuwax-im-web-bootstrap.jar\n        target: /app/app.jar\n",
+            "services:\n  im:\n    volumes:\n      - ./im-app/nuwax-im-web-bootstrap.jar:/app/web.jar\n      - ./im-app/nuwax-im-gateway-bootstrap.jar:/app/gw.jar\n  collab:\n    volumes:\n      - ./repo-collab-app/dist:/app/dist\n",
         )
         .expect("compose");
 
-        // 旧备份（无 im-app）：恢复前拒绝
+        // 旧备份（无组件）：拒绝
         let old_backup = directory.path().join("old.tar.gz");
         write_tar_gz(&old_backup, &[("data/mysql/ibdata1", b"db")]);
-        let error = verify_backup_component_compatibility(&old_backup, &docker_dir).unwrap_err();
-        assert!(error.to_string().contains("im-app"), "{error}");
+        assert!(verify_backup_component_compatibility(&old_backup, &docker_dir).is_err());
 
-        // 新备份（含 im-app）：通过
-        let new_backup = directory.path().join("new.tar.gz");
+        // 半包：只有 web jar（gateway 缺失）：拒绝（文件级校验，F05）
+        let half_backup = directory.path().join("half.tar.gz");
         write_tar_gz(
-            &new_backup,
+            &half_backup,
             &[
                 ("im-app/nuwax-im-web-bootstrap.jar", b"jar"),
-                ("data/x", b"y"),
+                ("repo-collab-app/dist/index.js", b"entry"),
             ],
         );
-        verify_backup_component_compatibility(&new_backup, &docker_dir).expect("compatible backup");
+        let error = verify_backup_component_compatibility(&half_backup, &docker_dir).unwrap_err();
+        assert!(error.to_string().contains("gateway"), "{error}");
+
+        // 空目录（dist 无非空文件）：拒绝
+        let empty_backup = directory.path().join("empty.tar.gz");
+        write_tar_gz(
+            &empty_backup,
+            &[
+                ("im-app/nuwax-im-web-bootstrap.jar", b"jar"),
+                ("im-app/nuwax-im-gateway-bootstrap.jar", b"jar"),
+                ("repo-collab-app/dist/", b""),
+            ],
+        );
+        assert!(verify_backup_component_compatibility(&empty_backup, &docker_dir).is_err());
+
+        // 完整备份（files-only 形式：dist 只有 index.js 文件条目）：通过
+        let full_backup = directory.path().join("full.tar.gz");
+        write_tar_gz(
+            &full_backup,
+            &[
+                ("im-app/nuwax-im-web-bootstrap.jar", b"jar"),
+                ("im-app/nuwax-im-gateway-bootstrap.jar", b"jar"),
+                ("repo-collab-app/dist/index.js", b"entry"),
+                ("data/mysql/ibdata1", b"db"),
+            ],
+        );
+        verify_backup_component_compatibility(&full_backup, &docker_dir)
+            .expect("complete files-only backup must pass");
     }
 
     fn write_tar_gz(path: &std::path::Path, entries: &[(&str, &[u8])]) {
@@ -544,6 +581,9 @@ mod tests {
                 version: serde_json::json!("1.0.0"),
                 image_id: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                     .to_string(),
+                config_id:
+                    "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+                        .to_string(),
                 source: "registry.test/nuwax/im:1.0.0".to_string(),
                 target: "registry.test/nuwax/im:1.0.0".to_string(),
                 artifacts: {
@@ -592,6 +632,43 @@ mod tests {
         let mut manifest = manifest;
         manifest.release_sha256 = sha256_hex(canonical_json_string(&payload).as_bytes());
         (docker_dir, manifest)
+    }
+
+    /// F01 回归：构建方（component_delivery.py 真实输出，含 config_id）→ CLI 解析 →
+    /// canonical release_sha256 复算必须与 producer 记录一致（不忽略未知字段）
+    #[test]
+    fn delivery_manifest_roundtrips_real_producer_output() {
+        let fixture = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/delivery-from-producer.json"
+        ))
+        .expect("producer fixture");
+        let manifest = parse_delivery_manifest(&fixture).expect("real producer output must parse");
+        assert!(manifest.components.contains_key("nuwax-im"));
+        assert!(
+            manifest.components["nuwax-im"]
+                .config_id
+                .starts_with("sha256:"),
+            "config_id 必须保留独立语义"
+        );
+        assert_ne!(
+            manifest.components["nuwax-im"].config_id,
+            manifest.components["nuwax-im"].image_id
+        );
+
+        let payload = serde_json::to_value(DeliveryPayload {
+            contract_version: manifest.contract_version,
+            architecture: &manifest.architecture,
+            components: &manifest.components,
+            mysql: &manifest.mysql,
+            compose: &manifest.compose,
+        })
+        .expect("serialize");
+        assert_eq!(
+            sha256_hex(canonical_json_string(&payload).as_bytes()),
+            manifest.release_sha256,
+            "canonical 复算必须与 producer 的 release_sha256 一致"
+        );
     }
 
     #[test]
@@ -733,8 +810,10 @@ pub fn validate_application_connections(
     Ok(())
 }
 
-/// 解析服务环境条目的最终值：`KEY=raw`（raw 可能含 `${VAR}`，按 shell > env-file
-/// 插值）、`KEY`（值取 env_values[KEY]）、映射形式 `KEY: raw`。条目不存在 → None。
+/// 解析服务环境条目的最终值（与 `docker compose config` 语义一致）：
+/// - `KEY=raw` / `KEY: raw`：raw 经插值（shell > env-file，未定义 → 空）后的最终值；
+///   插值为空就是空，**不回退** env-file（显式空值语义，F03）；
+/// - `KEY`（裸键，无分隔符）/ `KEY:`（null）：值取 shell，其次 env-file（继承语义）。
 fn resolve_service_env(
     service: &serde_yaml::Value,
     selector: &str,
@@ -754,38 +833,43 @@ fn resolve_service_env_with(
     shell_lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
     let environment = service.get("environment")?;
-    let raw = match environment {
+    let (raw, bare): (String, bool) = match environment {
         serde_yaml::Value::Sequence(entries) => entries.iter().find_map(|entry| {
             let entry = entry.as_str()?;
-            let (key, value) = entry.split_once('=')?;
-            (key.trim() == selector).then(|| value.to_string())
+            match entry.split_once('=') {
+                Some((key, value)) if key.trim() == selector => Some((value.to_string(), false)),
+                None if entry.trim() == selector => Some((String::new(), true)),
+                _ => None,
+            }
         }),
         serde_yaml::Value::Mapping(entries) => entries.iter().find_map(|(key, value)| {
             (key.as_str()? == selector).then(|| match value {
-                serde_yaml::Value::String(raw) => raw.clone(),
-                serde_yaml::Value::Null => String::new(),
-                _ => String::new(),
+                serde_yaml::Value::String(raw) => (raw.clone(), false),
+                serde_yaml::Value::Null => (String::new(), true),
+                _ => (String::new(), false),
             })
         }),
         _ => None,
     }?;
 
-    let resolved = interpolate_env(
+    if bare {
+        return shell_lookup(selector).or_else(|| env_values.get(selector).cloned());
+    }
+    interpolate_env(
         &raw,
         &|name: &str| shell_lookup(name).or_else(|| env_values.get(name).cloned()),
         crate::container::interpolation::MissingVariables::Empty,
     )
-    .ok()?
-    .trim()
-    .to_string();
-    if resolved.is_empty() {
-        // `- KEY`（无值）条目：compose 从 shell/env-file 取值
-        return env_values
-            .get(selector)
-            .cloned()
-            .map(|value| value.trim().to_string());
-    }
-    Some(resolved)
+    .ok()
+}
+
+/// 用与运行时相同的 Compose env-file 解析器（引号/行内注释/插值/优先级）解析
+/// 合并后的 `.env` 文本。候选停服前预检与运行预检共享同一语义（F03）。
+pub fn compose_env_values_from_text(text: &str) -> Result<HashMap<String, String>> {
+    crate::container::config::compose_env::parse_env_values(text, &|key: &str| {
+        std::env::var(key).ok()
+    })
+    .map_err(|error| anyhow!("failed to parse merged .env text: {error}"))
 }
 
 // ───────────────────────── 交付清单（DELIVERY_MANIFEST.json v1） ─────────────────────────
@@ -807,6 +891,9 @@ pub struct DeliveryManifest {
 pub struct DeliveryComponent {
     pub version: serde_json::Value,
     pub image_id: String,
+    /// 镜像配置 blob 的 sha256（Docker 29 的 image_id 可能为 OCI index，二者语义不同，
+    /// 由构建方同时输出；canonical release payload 包含该字段）
+    pub config_id: String,
     pub source: String,
     pub target: String,
     pub artifacts: HashMap<String, String>,
@@ -1134,40 +1221,140 @@ pub fn verify_backup_component_compatibility(
     };
     let mounts = collect_bind_mount_sources(&compose_text)?;
     let component_roots = ["im-app", "repo-collab-app"];
-    let required: Vec<String> = mounts
-        .into_iter()
+    let required_files: Vec<String> = mounts
+        .iter()
         .filter(|source| {
             component_roots
                 .iter()
                 .any(|root| source == root || source.starts_with(&format!("{root}/")))
         })
+        .cloned()
         .collect();
-    if required.is_empty() {
+    if required_files.is_empty() {
         return Ok(());
     }
 
-    // 备份归档（tar.gz）一级目录集合
+    // 备份归档（tar.gz）条目清单：文件名 + 是否普通文件 + 大小
     let file = std::fs::File::open(backup_archive)
         .with_context(|| format!("cannot open backup archive: {}", backup_archive.display()))?;
     let decoder = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
-    let mut archived_roots: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut entries: Vec<(String, bool, u64)> = Vec::new();
     for entry in archive.entries()? {
         let entry = entry
             .with_context(|| format!("cannot read backup archive: {}", backup_archive.display()))?;
-        if let Some(root) = entry.path()?.to_string_lossy().split('/').next() {
-            archived_roots.insert(root.to_string());
+        let header = entry.header();
+        let name = entry.path()?.to_string_lossy().into_owned();
+        let is_file = header.entry_type().is_file();
+        let size = header.size().unwrap_or(0);
+        entries.push((name, is_file, size));
+    }
+
+    for source in &required_files {
+        let source_path = source.as_str();
+        let looks_like_file = source_path
+            .rsplit('/')
+            .next()
+            .is_some_and(|leaf| leaf.contains('.'));
+        if looks_like_file {
+            // 文件挂载：备份必须含该路径的普通文件条目且非空（半包拒绝）
+            let present = entries
+                .iter()
+                .any(|(name, is_file, size)| name == source_path && *is_file && *size > 0);
+            if !present {
+                bail!(
+                    "current compose mounts '{source}' but the backup archive does not contain \
+                     it as a non-empty regular file; refusing a half restore of {}",
+                    backup_archive.display()
+                );
+            }
+        } else {
+            // 目录挂载：备份必须含该目录下至少一个非空普通文件（files-only 归档合法）
+            let prefix = format!("{source_path}/");
+            let present = entries
+                .iter()
+                .any(|(name, is_file, size)| name.starts_with(&prefix) && *is_file && *size > 0);
+            if !present {
+                bail!(
+                    "current compose mounts '{source}' but the backup archive contains no \
+                     non-empty files under it; refusing a component-empty restore of {}",
+                    backup_archive.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// initdb 挂载契约：mysql 服务必须把清单声明的每个文件按其 `initdb_target`
+/// 挂到 `/docker-entrypoint-initdb.d/`（source 指向声明路径，target 文件名一致），
+/// 否则新装初始化顺序与清单声明脱节。
+pub fn validate_initdb_mount_contract(compose_text: &str, manifest: &SchemaManifest) -> Result<()> {
+    let compose: serde_yaml::Value = serde_yaml::from_str(compose_text)
+        .with_context(|| "cannot parse compose YAML for initdb mounts")?;
+    let mysql_service = compose
+        .get("services")
+        .and_then(|services| services.get(&manifest.mysql_target.service))
+        .ok_or_else(|| {
+            anyhow!(
+                "compose has no '{}' service for initdb mounts",
+                manifest.mysql_target.service
+            )
+        })?;
+    let Some(volumes) = mysql_service.get("volumes").and_then(|v| v.as_sequence()) else {
+        bail!(
+            "compose service '{}' declares no volumes; initdb mounts are missing",
+            manifest.mysql_target.service
+        );
+    };
+
+    let mut mounts: Vec<(String, String)> = Vec::new();
+    for volume in volumes {
+        if let Some(mapping) = volume.as_mapping() {
+            let source = mapping
+                .get(serde_yaml::Value::String("source".to_string()))
+                .and_then(|value| value.as_str())
+                .map(normalize_mount_source);
+            let target = mapping
+                .get(serde_yaml::Value::String("target".to_string()))
+                .and_then(|value| value.as_str());
+            if let (Some(source), Some(target)) = (source, target) {
+                mounts.push((source, target.to_string()));
+            }
         }
     }
 
-    for source in &required {
-        let root = source.split('/').next().unwrap_or(source);
-        if !archived_roots.contains(root) {
+    let mut expected: Vec<(String, String)> = Vec::new();
+    let push = |expected: &mut Vec<(String, String)>, path: &str, target: &str| {
+        let normalized = normalize_mount_source(path);
+        expected.push((normalized, format!("/docker-entrypoint-initdb.d/{target}")));
+    };
+    push(
+        &mut expected,
+        &manifest.bootstrap.path,
+        &manifest.bootstrap.initdb_target,
+    );
+    push(
+        &mut expected,
+        &manifest.permissions.path,
+        &manifest.permissions.initdb_target,
+    );
+    for schema in &manifest.schemas {
+        push(&mut expected, &schema.path, &schema.initdb_target);
+    }
+    for seed in &manifest.first_install_seeds {
+        push(&mut expected, &seed.path, &seed.initdb_target);
+    }
+
+    for (source, target) in &expected {
+        let mounted = mounts
+            .iter()
+            .any(|(mount_source, mount_target)| mount_source == source && mount_target == target);
+        if !mounted {
             bail!(
-                "current compose mounts '{source}' but backup {} predates these components; \
-                 restoring it would delete them while keeping the referencing compose. \
-                 Restore a matching-era full package instead, or remove the component services first",
-                backup_archive.display()
+                "initdb mount contract violated: expected {source} -> {target} on service '{}'; \
+                 new-install initialization order would diverge from the manifest",
+                manifest.mysql_target.service
             );
         }
     }

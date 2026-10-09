@@ -825,9 +825,10 @@ async fn manifest_scenario_body(
     .bind(format!("'{app_user}'@'%'"))
     .fetch_all(&pool)
     .await?;
+    // 权限模式中的库名以转义形态存储（`nuwax\_mmi\_...`），比对前还原
     let grants_text = grants
         .iter()
-        .map(|(grant,)| grant.clone())
+        .map(|(grant,)| grant.replace('\\', ""))
         .collect::<Vec<_>>()
         .join("\n");
     for database in [platform_db, im_db, custom_db] {
@@ -881,5 +882,72 @@ async fn manifest_scenario_body(
 
     let result = run_manifest_migration(executor, &manifest, &docker_root, app_user).await?;
     assert!(!result.has_executable_sql, "再次重跑应零差异");
+
+    // ── 场景 4（F04）：授权范围精确——相似库名不可访问 + 宽权限收敛 ──────
+    let sibling = platform_db.replacen('_', "1", 1); // nuwax1mmp_* 匹配未转义模式 nuwax_mmp_*
+    executor
+        .execute_single(&format!(
+            "CREATE DATABASE `{sibling}`; \
+             CREATE TABLE `{sibling}`.`users` (`id` bigint NOT NULL, PRIMARY KEY (`id`))"
+        ))
+        .await
+        .context("准备相似库失败")?;
+    // 模拟早期 CLI 的未转义宽授权行（`_` 通配会把相似库也覆盖到）
+    executor
+        .execute_privilege_statements(&[format!(
+            "GRANT ALL PRIVILEGES ON `{}`.* TO '{app_user}'@'%';",
+            platform_db
+        )])
+        .await
+        .context("预置宽授权失败")?;
+
+    run_manifest_migration(executor, &manifest, &docker_root, app_user)
+        .await
+        .context("场景4 收敛迁移失败")?;
+
+    // 以应用账号连接：目标库可访问、相似库必须被拒绝（宽权限行已收敛）
+    let app_pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            MySqlConnectOptions::new()
+                .host(&base.host)
+                .port(base.port)
+                .username(app_user)
+                .password("disposable")
+                .database(platform_db),
+        )
+        .await
+        .context("应用账号连接目标库失败（精确授权必须保留）")?;
+    let kept: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM `users` WHERE `name` = 'must-survive'")
+        .fetch_one(&app_pool)
+        .await
+        .context("应用账号必须能访问声明的目标库")?;
+    assert_eq!(kept, (1,));
+
+    let sibling_pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            MySqlConnectOptions::new()
+                .host(&base.host)
+                .port(base.port)
+                .username(app_user)
+                .password("disposable")
+                .database(&sibling),
+        )
+        .await;
+    match sibling_pool {
+        Ok(sibling_pool) => {
+            let leaked: Result<(i64,), _> = sqlx::query_as("SELECT COUNT(*) FROM `users`")
+                .fetch_one(&sibling_pool)
+                .await;
+            assert!(
+                leaked.is_err(),
+                "相似库（匹配未转义通配模式）必须不可访问——宽权限已被收敛"
+            );
+        }
+        Err(_) => {
+            // 连接被拒（无该库权限）同样证明收敛成功
+        }
+    }
     Ok(())
 }

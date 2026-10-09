@@ -5,7 +5,7 @@ use crate::container::interpolation::{MissingVariables, interpolate_env};
 use anyhow::{Result, ensure};
 use std::collections::HashMap;
 
-pub(super) fn parse_env_values(
+pub(crate) fn parse_env_values(
     source: &str,
     host_value: &impl Fn(&str) -> Option<String>,
 ) -> Result<HashMap<String, String>> {

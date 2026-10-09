@@ -94,21 +94,26 @@ pub fn merge_preserved_env_file(preserved_path: &Path, package_path: &Path) -> R
     fs::set_permissions(temp_file.path(), permissions)
         .context("Failed to preserve environment file permissions")?;
 
-    fs::remove_file(package_path).with_context(|| {
-        format!(
-            "Failed to replace package environment file: {}",
-            package_path.display()
-        )
-    })?;
-    temp_file
-        .persist(package_path)
-        .map_err(|error| error.error)
-        .with_context(|| {
+    // 原子替换：Unix 上 persist 即 rename-over（目标存在也原子覆盖）；
+    // 仅当平台拒绝覆盖（如 Windows）时才退回"删除再落盘"，缩小故障窗口
+    if let Err(persist_error) = temp_file.persist(package_path) {
+        let temp_file = persist_error.file;
+        fs::remove_file(package_path).with_context(|| {
             format!(
-                "Failed to install merged environment file: {}",
+                "Failed to replace package environment file: {}",
                 package_path.display()
             )
         })?;
+        temp_file
+            .persist(package_path)
+            .map_err(|error| error.error)
+            .with_context(|| {
+                format!(
+                    "Failed to install merged environment file: {}",
+                    package_path.display()
+                )
+            })?;
+    }
     fs::remove_file(preserved_path).with_context(|| {
         format!(
             "Failed to remove backed-up environment file: {}",
