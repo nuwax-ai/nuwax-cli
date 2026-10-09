@@ -11,6 +11,7 @@ use zip::read::ZipFile;
 // 导入匹配器模块
 pub mod device_env;
 pub mod env_manager;
+pub mod env_merge;
 
 // 重新导出匹配器模块
 // pub use matcher::*;
@@ -283,6 +284,30 @@ fn handle_extraction(
     extracted_files: &mut usize,
     extracted_size: &mut u64,
 ) -> Result<()> {
+    // C01/P1#2：目标 `.env` 已存在（用户配置）时不直接覆盖——先解到同目录临时文件，
+    // 与磁盘用户值合并（保留旧值、仅补包内新增键）后原子替换。否则 patch 包的
+    // 新增键永远不会到达磁盘（旧实现跳过解压，最后旧文件与自己合并）。
+    let is_env_file = dst
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == ".env");
+    if is_env_file && dst.exists() {
+        let incoming = dst
+            .parent()
+            .map(|parent| parent.join(".env.nuwax-incoming"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".env.nuwax-incoming"));
+        force_extract_file(entry, &incoming)?;
+        // 合并结果落在 incoming（保留磁盘文件权限），磁盘旧文件被移除
+        env_merge::merge_preserved_env_file(dst, &incoming)?;
+        std::fs::rename(&incoming, dst)?;
+        info!(
+            "🛡️ Merged package .env defaults into existing configuration: {path}",
+            path = dst.display()
+        );
+        *extracted_files += 1;
+        *extracted_size += entry.size();
+        return Ok(());
+    }
     force_extract_file(entry, dst)?;
     *extracted_files += 1;
     *extracted_size += entry.size();
@@ -560,14 +585,18 @@ async fn extract_zip_archive(
 
                     // 检查是否为保护目录路径
                     if is_upload_directory_path(&dst) {
-                        // 如果保护目录已存在，跳过解压以保护用户数据
-                        if dst.exists() {
+                        // 如果保护目录已存在，跳过解压以保护用户数据；
+                        // 例外：`.env` 是文件且属于用户配置——不下钻跳过，
+                        // 交给 handle_extraction 走"合并补键"路径（P1#2）
+                        let is_user_env_file =
+                            dst.is_file() && dst.file_name().is_some_and(|n| n == ".env");
+                        if dst.exists() && !is_user_env_file {
                             info!(
                                 "🛡️ Keeping existing directory, skipping replacement: {}",
                                 dst.display()
                             );
                             continue;
-                        } else {
+                        } else if !dst.exists() {
                             info!(
                                 "📁 Creating new protected directory structure: {}",
                                 dst.display()
@@ -575,11 +604,9 @@ async fn extract_zip_archive(
                         }
                     }
 
-                    // 强制覆盖：先删除再解压（彻底解决 Directory not empty 错误）
-                    force_extract_file(&mut entry, &dst)?;
-
-                    extracted_files += 1;
-                    extracted_size += entry.size();
+                    // 强制覆盖：先删除再解压（彻底解决 Directory not empty 错误）；
+                    // .env 已存在时由 handle_extraction 走合并路径（保留用户值、补新键）
+                    handle_extraction(&mut entry, &dst, &mut extracted_files, &mut extracted_size)?;
                 }
 
                 // 处理替换目录
@@ -908,4 +935,64 @@ pub fn setup_minimal_logging() {
         .with_target(false)
         .compact() // 使用紧凑格式
         .try_init();
+}
+
+/// 按名称读取归档内少量条目（不整包解压、不重复下载）。
+///
+/// 供停服务前的候选包预检使用：条目名匹配兼容带/不带 `docker/` 前缀；
+/// 不存在的条目不出现在返回值中，由调用方决定缺失是否致命。
+/// ZIP 读取走 CRC 校验，损坏条目报错。
+pub fn read_archive_entries(
+    archive_path: &std::path::Path,
+    names: &[&str],
+) -> Result<std::collections::HashMap<String, Vec<u8>>> {
+    let mut found = std::collections::HashMap::new();
+
+    match archive::detect_format_by_magic(archive_path)? {
+        client_core::utils::archive::ArchiveFormat::Zip => {
+            let file = std::fs::File::open(archive_path)?;
+            let mut zip = zip::ZipArchive::new(file)?;
+            for index in 0..zip.len() {
+                let mut entry = zip.by_index(index)?;
+                let raw_path = entry
+                    .enclosed_name()
+                    .ok_or_else(|| anyhow::anyhow!("Unsafe archive entry: {}", entry.name()))?
+                    .to_path_buf();
+                let normalized = raw_path
+                    .strip_prefix("docker")
+                    .unwrap_or(raw_path.as_path())
+                    .to_path_buf();
+                if let Some(wanted_name) = names
+                    .iter()
+                    .find(|name| std::path::Path::new(*name) == normalized)
+                {
+                    let mut bytes = Vec::with_capacity(entry.size() as usize);
+                    std::io::Read::read_to_end(&mut entry, &mut bytes)?;
+                    found.insert(wanted_name.to_string(), bytes);
+                }
+            }
+        }
+        client_core::utils::archive::ArchiveFormat::TarGz => {
+            let file = std::fs::File::open(archive_path)?;
+            let decoder = flate2::read::GzDecoder::new(file);
+            let mut tar = tar::Archive::new(decoder);
+            for entry in tar.entries()? {
+                let mut entry = entry?;
+                let raw_path = entry.path()?.to_path_buf();
+                let normalized = raw_path
+                    .strip_prefix("docker")
+                    .unwrap_or(raw_path.as_path())
+                    .to_path_buf();
+                if let Some(wanted_name) = names
+                    .iter()
+                    .find(|name| std::path::Path::new(*name) == normalized)
+                {
+                    let mut bytes = Vec::new();
+                    std::io::Read::read_to_end(&mut entry, &mut bytes)?;
+                    found.insert(wanted_name.to_string(), bytes);
+                }
+            }
+        }
+    }
+    Ok(found)
 }

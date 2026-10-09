@@ -12,7 +12,7 @@ use client_core::upgrade_strategy::UpgradeStrategy;
 use client_core::utils::archive::{self, ArchiveFormat};
 use rust_i18n::t;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -185,34 +185,45 @@ async fn run_staged_deployment(
     is_first_deployment: bool,
     target_version: &str,
 ) -> Result<()> {
-    // 部署前校验全部库表模板（多库清单，缺文件/解析失败即 Fail Fast）；
-    // 顺带收集库名，供配置预检校验应用连接目标
-    let mut template_databases = Vec::with_capacity(sql::SCHEMA_SQL_FILES.len());
-    for template_path in sql::SCHEMA_SQL_FILES {
-        let path = Path::new(template_path);
-        let content = fs::read_to_string(path).with_context(|| {
-            format!(
-                "{}",
-                t!(
-                    "auto_upgrade_deploy.schema_template_missing",
-                    path = path.display().to_string()
-                )
-            )
-        })?;
-        let template = parse_schema_template(&content)
-            .with_context(|| format!("Invalid schema template {template_path}"))?;
-        template_databases.push(template.database);
-    }
+    // 部署前校验迁移计划：manifest v1（解析+结构+文件校验）或 legacy 固定清单
+    // （缺文件/解析失败即 Fail Fast）；顺带收集库名供配置预检校验应用连接目标
+    let migration_plan = resolve_migration_plan(Path::new("docker"))?;
+    let (manifest, template_databases) = match &migration_plan {
+        MigrationPlan::Manifest(manifest) => (Some(manifest), manifest.database_names()),
+        MigrationPlan::Legacy => {
+            let mut template_databases = Vec::with_capacity(sql::SCHEMA_SQL_FILES.len());
+            for template_path in sql::SCHEMA_SQL_FILES {
+                let path = Path::new(template_path);
+                let content = fs::read_to_string(path).with_context(|| {
+                    format!(
+                        "{}",
+                        t!(
+                            "auto_upgrade_deploy.schema_template_missing",
+                            path = path.display().to_string()
+                        )
+                    )
+                })?;
+                let template = parse_schema_template(&content)
+                    .with_context(|| format!("Invalid schema template {template_path}"))?;
+                template_databases.push(template.database);
+            }
+            (None, template_databases)
+        }
+    };
 
     let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
     docker_manager.invalidate_compose_config_cache();
 
-    // C01/C03: 候选 Compose + 合并后 .env 的预检（启动 mysql、修改数据库之前的最后一道闸）：
-    // 必填键非空、应用库连接与本地多库迁移目标一致、宿主产物完整（失败只报键名/路径）
+    // C01/C03/C04: 候选 Compose + 合并后 .env 的预检（启动 mysql、修改数据库之前的最后一道闸）：
+    // 必填键非空、应用连接与 manifest 逐条映射一致（legacy 则按约定键）、
+    // 宿主产物完整 + 交付清单 hash（失败只报键名/库名/路径，不含任何凭据）
+    let delivery = load_delivery_manifest(Path::new("docker"))?;
     client_core::container::preflight::preflight_deploy_config(
         docker_manager.get_compose_file(),
         docker_manager.get_env_file(),
         &template_databases,
+        manifest.map(std::convert::AsRef::as_ref),
+        delivery.as_ref(),
     )
     .context("Deployment configuration preflight failed")?;
 
@@ -332,7 +343,7 @@ fn restore_preserved_docker_dirs(backup_dir: &Path, docker_dir: &Path) -> Result
 
         let new_path = docker_dir.join(dir_name);
         if dir_name == ".env" && old_path.is_file() && new_path.is_file() {
-            merge_preserved_env_file(&old_path, &new_path)?;
+            crate::utils::env_merge::merge_preserved_env_file(&old_path, &new_path)?;
             info!("🛡️ Preserved existing .env values and added missing package defaults");
             continue;
         }
@@ -356,111 +367,256 @@ fn restore_preserved_docker_dirs(backup_dir: &Path, docker_dir: &Path) -> Result
     Ok(())
 }
 
-fn merge_preserved_env_file(preserved_path: &Path, package_path: &Path) -> Result<()> {
-    let preserved = fs::read_to_string(preserved_path).with_context(|| {
-        format!(
-            "Failed to read existing environment file: {}",
-            preserved_path.display()
-        )
-    })?;
-    let package = fs::read_to_string(package_path).with_context(|| {
-        format!(
-            "Failed to read package environment file: {}",
-            package_path.display()
-        )
-    })?;
-    let merged = merge_env_contents(&preserved, &package);
-    let permissions = fs::metadata(preserved_path)
-        .with_context(|| {
-            format!(
-                "Failed to inspect existing environment file: {}",
-                preserved_path.display()
-            )
-        })?
-        .permissions();
-    let mut temp_file = tempfile::NamedTempFile::new_in(
-        package_path
-            .parent()
-            .context("Package environment file has no parent directory")?,
-    )
-    .context("Failed to create temporary merged environment file")?;
-    temp_file
-        .write_all(merged.as_bytes())
-        .context("Failed to write merged environment file")?;
-    temp_file
-        .as_file()
-        .sync_all()
-        .context("Failed to flush merged environment file")?;
-    fs::set_permissions(temp_file.path(), permissions)
-        .context("Failed to preserve environment file permissions")?;
-
-    fs::remove_file(package_path).with_context(|| {
-        format!(
-            "Failed to replace package environment file: {}",
-            package_path.display()
-        )
-    })?;
-    temp_file
-        .persist(package_path)
-        .map_err(|error| error.error)
-        .with_context(|| {
-            format!(
-                "Failed to install merged environment file: {}",
-                package_path.display()
-            )
-        })?;
-    fs::remove_file(preserved_path).with_context(|| {
-        format!(
-            "Failed to remove backed-up environment file: {}",
-            preserved_path.display()
-        )
-    })?;
-    Ok(())
+/// 迁移计划：包内 mysql-schema-manifest.json（v1 契约）或 legacy 固定清单
+enum MigrationPlan {
+    Manifest(Box<client_core::mysql_manifest::SchemaManifest>),
+    Legacy,
 }
 
-fn merge_env_contents(preserved: &str, package: &str) -> String {
-    let mut keys = preserved
-        .lines()
-        .filter_map(env_assignment_key)
-        .map(str::to_owned)
-        .collect::<std::collections::HashSet<_>>();
-    let mut merged = preserved.to_owned();
+/// 解析迁移计划：manifest 存在 → 解析 + 结构校验 + 文件校验（Fail Fast，
+/// 不降级到扫描 SQL）；不存在 → legacy。`docker_root` 为包内 docker/ 目录。
+fn resolve_migration_plan(docker_root: &Path) -> Result<MigrationPlan> {
+    let manifest_relative = Path::new(sql::SCHEMA_MANIFEST_PATH)
+        .strip_prefix("docker")
+        .unwrap_or(Path::new(sql::SCHEMA_MANIFEST_PATH));
+    let manifest_path = docker_root.join(manifest_relative);
+    if !manifest_path.exists() {
+        info!("📦 No mysql-schema-manifest.json in package; using legacy fixed schema list");
+        return Ok(MigrationPlan::Legacy);
+    }
+    let text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let manifest = client_core::mysql_manifest::parse_schema_manifest(&text)
+        .with_context(|| format!("Invalid {}", manifest_path.display()))?;
+    client_core::mysql_manifest::validate_manifest_files(&manifest, docker_root)
+        .context("mysql-schema-manifest references invalid files")?;
+    info!(
+        databases = ?manifest.database_names(),
+        schemas = manifest.schemas.len(),
+        "📦 mysql-schema-manifest v1 loaded"
+    );
+    Ok(MigrationPlan::Manifest(Box::new(manifest)))
+}
 
-    for line in package.lines() {
-        let Some(key) = env_assignment_key(line) else {
-            continue;
-        };
-        if keys.insert(key.to_owned()) {
-            if !merged.is_empty() && !merged.ends_with('\n') {
-                merged.push('\n');
+/// 读取包内交付清单（DELIVERY_MANIFEST.json v1）。
+/// 文件不存在 → None（legacy 包）；存在但损坏/不支持 → Fail Fast。
+fn load_delivery_manifest(
+    docker_root: &Path,
+) -> Result<Option<client_core::container::preflight::DeliveryManifest>> {
+    let relative = Path::new(sql::DELIVERY_MANIFEST_PATH)
+        .strip_prefix("docker")
+        .unwrap_or(Path::new(sql::DELIVERY_MANIFEST_PATH));
+    let path = docker_root.join(relative);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let delivery = client_core::container::preflight::parse_delivery_manifest(&text)
+        .with_context(|| format!("Invalid {}", path.display()))?;
+    Ok(Some(delivery))
+}
+
+/// 停止旧服务前的候选包预检（P1#3）：直接读取已下载/本地归档的少量条目
+/// （compose / .env / schema manifest / 交付清单 / 关键 schema / 组件产物），
+/// 不重复下载大包、不整包预解压。新增必填键缺失、坏清单、patch 缺关键
+/// schema、连接映射错误都在停止旧服务之前失败（旧服务保持运行）。
+fn preflight_candidate_package_at(archive_path: &Path, is_patch: bool) -> Result<()> {
+    let base_names = [
+        "docker-compose.yml",
+        ".env",
+        "config/mysql-schema-manifest.json",
+        "DELIVERY_MANIFEST.json",
+    ];
+    let entries =
+        crate::utils::read_archive_entries(archive_path, &base_names).with_context(|| {
+            format!(
+                "Failed to read candidate package entries from {}",
+                archive_path.display()
+            )
+        })?;
+
+    let compose_bytes = entries
+        .get("docker-compose.yml")
+        .ok_or_else(|| anyhow::anyhow!("candidate package has no docker-compose.yml"))?;
+    let compose_text = String::from_utf8(compose_bytes.clone())
+        .context("candidate package docker-compose.yml is not valid UTF-8")?;
+
+    // 合并 env：用户现值完全保留 + 包内默认补键；shell 优先级由连接校验的插值层处理
+    let user_env = fs::read_to_string(Path::new("docker").join(".env")).unwrap_or_default();
+    let package_env = entries
+        .get(".env")
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .unwrap_or_default();
+    let values = parse_env_text_to_map(&crate::utils::env_merge::merge_env_contents(
+        &user_env,
+        &package_env,
+    ));
+
+    let missing =
+        client_core::container::preflight::missing_required_env_keys(&compose_text, &values);
+    if !missing.is_empty() {
+        return Err(anyhow::anyhow!(
+            "candidate package requires environment keys that are missing or empty: {missing:?}; \
+             define them in docker/.env before upgrading"
+        ));
+    }
+
+    // schema manifest：存在即必须可解析且引用文件都在归档内（不降级、不扫描 SQL）
+    let manifest = match entries.get("config/mysql-schema-manifest.json") {
+        Some(bytes) => {
+            let text = String::from_utf8(bytes.clone())
+                .context("mysql-schema-manifest.json is not valid UTF-8")?;
+            let manifest = client_core::mysql_manifest::parse_schema_manifest(&text)
+                .context("candidate package carries an invalid mysql-schema-manifest")?;
+            let referenced = manifest.referenced_paths();
+            let refs: Vec<&str> = referenced.iter().map(String::as_str).collect();
+            let ref_entries = crate::utils::read_archive_entries(archive_path, &refs)?;
+            for path in &refs {
+                let bytes = ref_entries.get(*path).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "mysql-schema-manifest references {path}, missing from the package"
+                    )
+                })?;
+                if bytes.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "mysql-schema-manifest references {path}, but the package entry is empty"
+                    ));
+                }
             }
-            merged.push_str(line);
-            merged.push('\n');
+            client_core::container::preflight::validate_application_connections(
+                &compose_text,
+                &values,
+                &manifest,
+            )
+            .context("candidate package connection mapping does not match the migration targets")?;
+            Some(manifest)
+        }
+        None => {
+            // legacy 包：patch 必须携带全部关键 schema（不能沿用磁盘旧文件）
+            if is_patch {
+                for critical in client_core::constants::sql::CRITICAL_UPGRADE_FILES {
+                    let present = crate::utils::read_archive_entries(archive_path, &[critical])?
+                        .contains_key(*critical);
+                    if !present {
+                        return Err(anyhow::anyhow!(
+                            "patch package is missing critical schema file {critical}; \
+                             refusing to keep a stale schema (use a full package)"
+                        ));
+                    }
+                }
+            }
+            None
+        }
+    };
+    let _ = manifest;
+
+    // 交付清单：存在即校验（hash + release 身份 + 架构一致）
+    let mut delivery = None;
+    if let Some(bytes) = entries.get("DELIVERY_MANIFEST.json") {
+        let text = String::from_utf8(bytes.clone())
+            .context("DELIVERY_MANIFEST.json is not valid UTF-8")?;
+        let parsed = client_core::container::preflight::parse_delivery_manifest(&text)
+            .context("candidate package carries an invalid DELIVERY_MANIFEST")?;
+        let mut needed: Vec<String> = parsed.mysql.files.keys().cloned().collect();
+        needed.extend(
+            parsed
+                .components
+                .values()
+                .flat_map(|component| component.artifacts.keys().cloned()),
+        );
+        needed.push(parsed.compose.path.clone());
+        let refs: Vec<&str> = needed.iter().map(String::as_str).collect();
+        let delivery_entries = crate::utils::read_archive_entries(archive_path, &refs)?;
+        client_core::container::preflight::verify_delivery_against_entries(
+            &parsed,
+            &delivery_entries,
+        )
+        .context("candidate package contents do not match its DELIVERY_MANIFEST")?;
+        delivery = Some(parsed);
+    }
+
+    // 组件产物挂载存在性：候选 compose 挂载引用的组件路径必须在归档内
+    let component_roots: Vec<String> = delivery
+        .as_ref()
+        .map(|parsed| {
+            let mut roots: Vec<String> = parsed
+                .components
+                .values()
+                .flat_map(|component| {
+                    component
+                        .artifacts
+                        .keys()
+                        .map(|path| path.split('/').next().unwrap_or(path).to_string())
+                })
+                .collect();
+            roots.sort();
+            roots.dedup();
+            roots
+        })
+        .unwrap_or_else(|| vec!["im-app".to_string(), "repo-collab-app".to_string()]);
+    let mounts = client_core::container::preflight::collect_bind_mount_sources(&compose_text)?;
+    let component_mounts: Vec<String> = mounts
+        .into_iter()
+        .filter(|source| {
+            component_roots
+                .iter()
+                .any(|root| source == root || source.starts_with(&format!("{root}/")))
+        })
+        .collect();
+    if !component_mounts.is_empty() {
+        let refs: Vec<&str> = component_mounts.iter().map(String::as_str).collect();
+        let mount_entries = crate::utils::read_archive_entries(archive_path, &refs)?;
+        for source in &component_mounts {
+            if !mount_entries.contains_key(source.as_str()) {
+                return Err(anyhow::anyhow!(
+                    "candidate compose mounts '{source}' but the package does not contain it"
+                ));
+            }
         }
     }
 
-    merged
+    info!(
+        archive = %archive_path.display(),
+        "✅ Candidate package preflight passed (required keys, schema manifest, connections, delivery, artifacts)"
+    );
+    Ok(())
 }
 
-fn env_assignment_key(line: &str) -> Option<&str> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-    let assignment = line.strip_prefix("export ").unwrap_or(line);
-    let (key, _) = assignment.split_once('=')?;
-    let key = key.trim();
-    let mut characters = key.chars();
-    let first = characters.next()?;
-    if !(first == '_' || first.is_ascii_alphabetic())
-        || !characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
-    {
-        return None;
-    }
-    Some(key)
+/// 极简 .env 文本 → 键值映射（预检用；容忍 export 前缀与基础引号包裹）
+fn parse_env_text_to_map(text: &str) -> std::collections::HashMap<String, String> {
+    text.lines()
+        .filter_map(|line| {
+            let key = crate::utils::env_merge::env_assignment_key(line)?.to_string();
+            let assignment = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+            let (_, value) = assignment.split_once('=')?;
+            let value = value.trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                .unwrap_or(value);
+            Some((key, value.to_string()))
+        })
+        .collect()
 }
 
-/// 停止旧服务前的当前配置预检（C01）：必填键、本地库目标约定、宿主产物完整性。
+/// 在线升级的候选包预检包装：解析策略对应本地包路径并执行归档预检
+fn preflight_candidate_package(app: &CliApp, strategy: &UpgradeStrategy) -> Result<()> {
+    let Some(path) = docker_service::package_path_for_strategy(app, strategy)? else {
+        return Ok(());
+    };
+    if !path.exists() {
+        return Err(anyhow::anyhow!(
+            "upgrade package is not available after download: {}",
+            path.display()
+        ));
+    }
+    let is_patch = matches!(strategy, UpgradeStrategy::PatchUpgrade { .. });
+    preflight_candidate_package_at(&path, is_patch)
+}
+
+/// 停止旧服务前的当前配置预检（C01）：必填键、库目标/连接映射、宿主产物完整性。
 /// 候选新包的同一预检在解压后、修改数据库前由 `run_staged_deployment` 再执行一次。
 fn preflight_current_config() -> Result<()> {
     let compose = client_core::constants::docker::get_compose_file_path();
@@ -468,9 +624,21 @@ fn preflight_current_config() -> Result<()> {
     if !compose.is_file() || !env.is_file() {
         return Ok(());
     }
-    let template_databases = collect_existing_template_databases();
-    client_core::container::preflight::preflight_deploy_config(&compose, &env, &template_databases)
-        .context("Configuration preflight failed before stopping services")
+    let docker_root = Path::new("docker");
+    let plan = resolve_migration_plan(docker_root)?;
+    let (manifest, template_databases) = match &plan {
+        MigrationPlan::Manifest(manifest) => (Some(manifest), manifest.database_names()),
+        MigrationPlan::Legacy => (None, collect_existing_template_databases()),
+    };
+    let delivery = load_delivery_manifest(docker_root)?;
+    client_core::container::preflight::preflight_deploy_config(
+        &compose,
+        &env,
+        &template_databases,
+        manifest.map(std::convert::AsRef::as_ref),
+        delivery.as_ref(),
+    )
+    .context("Configuration preflight failed before stopping services")
 }
 
 /// 收集磁盘上现存且可解析的 schema 模板库名（宽容处理：旧部署可能尚无
@@ -544,7 +712,7 @@ impl OnlineEnvPreserve {
         }
         let env_path = docker_dir.join(".env");
         if env_path.is_file() {
-            merge_preserved_env_file(&self.preserve_path, &env_path)?;
+            crate::utils::env_merge::merge_preserved_env_file(&self.preserve_path, &env_path)?;
             info!("🛡️ Preserved existing .env values and added missing package defaults");
         } else {
             fs::create_dir_all(docker_dir).context("Failed to recreate docker directory")?;
@@ -663,9 +831,11 @@ pub async fn run_auto_upgrade_deploy(
     } else {
         info!("🔄 Upgrade deployment detected, services will be stopped first");
 
-        // C01: 停止旧服务前先对当前配置预检（必填键/库目标/产物完整性），
-        // 配置不完整时旧服务保持运行
+        // C01/P1#3: 停止旧服务前先对当前配置与候选包预检（必填键/连接映射/
+        // schema 清单/交付清单/产物），任何失败旧服务保持运行
         preflight_current_config()?;
+        preflight_candidate_package(app, &upgrade_strategy)
+            .context("Candidate package preflight failed before stopping services")?;
 
         // 3. 🛑 停止服务并等待（使用统一的公共方法）
         let stopped = docker_service::stop_docker_services_and_wait(
@@ -1235,7 +1405,67 @@ async fn archive_diff_sql_file(diff_sql_path: &Path, status: &str) -> Result<()>
     }
 }
 
-/// 连接MySQL容器并执行差异SQL（Live Diff）
+/// legacy 迁移路径（包内无 mysql-schema-manifest.json 的旧包）：
+/// 固定清单逐模板解析（建库/授权原句随模板 preamble 透传）→ 逐库 Live Diff。
+async fn legacy_live_diff(
+    temp_sql_dir: &Path,
+    executor: &MySqlExecutor,
+) -> Result<client_core::sql_diff::MultiDbDiffResult> {
+    let mut templates = Vec::with_capacity(sql::SCHEMA_SQL_FILES.len());
+    for template_path in sql::SCHEMA_SQL_FILES {
+        let source_path = Path::new(template_path);
+        let content = fs::read_to_string(source_path).with_context(|| {
+            format!(
+                "{}",
+                t!(
+                    "auto_upgrade_deploy.schema_template_missing",
+                    path = source_path.display().to_string()
+                )
+            )
+        })?;
+        let template = parse_schema_template(&content)
+            .with_context(|| format!("Invalid schema template {template_path}"))?;
+
+        // 同一库出现在多个模板文件属于配置错误（diff 会重复建表）
+        if templates
+            .iter()
+            .any(|existing: &client_core::sql_diff::SchemaTemplate| {
+                existing.database == template.database
+            })
+        {
+            return Err(anyhow::anyhow!(
+                "Duplicate schema template for database `{}` in SCHEMA_SQL_FILES",
+                template.database
+            ));
+        }
+
+        let new_sql_path = temp_sql_dir.join(format!("{}_new.sql", template.database));
+        if new_sql_path.exists() {
+            fs::remove_file(&new_sql_path)?;
+        }
+        fs::copy(source_path, &new_sql_path).context(t!(
+            "auto_upgrade_deploy.copy_sql_failed",
+            src = source_path.display(),
+            dst = new_sql_path.display()
+        ))?;
+        info!(
+            database = %template.database,
+            tables = template.tables.len(),
+            path = %new_sql_path.display(),
+            "📄 Copied schema template for database"
+        );
+
+        templates.push(template);
+    }
+
+    info!("📊 Generating SQL differences based on online schema (legacy fixed list)...");
+    let diff_result = generate_live_schema_diff_multi(executor, &templates, "target version")
+        .await
+        .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?;
+
+    Ok(diff_result)
+}
+
 async fn execute_sql_diff_upgrade(executor: &MySqlExecutor) -> Result<()> {
     let temp_sql_dir = Path::new(sql::TEMP_SQL_DIR);
     let diff_sql_path = temp_sql_dir.join(sql::DIFF_SQL_FILE);
@@ -1289,60 +1519,41 @@ async fn execute_sql_diff_upgrade(executor: &MySqlExecutor) -> Result<()> {
         path = temp_sql_dir.display()
     );
 
-    // 逐模板读取并解析（多库清单）：每个文件一个库（唯一 USE 归属），
-    // 拷贝到 temp_sql/{database}_new.sql 留档；缺文件/解析失败即 Fail Fast
-    let mut templates = Vec::with_capacity(sql::SCHEMA_SQL_FILES.len());
-    for template_path in sql::SCHEMA_SQL_FILES {
-        let source_path = Path::new(template_path);
-        let content = fs::read_to_string(source_path).with_context(|| {
-            format!(
-                "{}",
-                t!(
-                    "auto_upgrade_deploy.schema_template_missing",
-                    path = source_path.display().to_string()
-                )
+    // 迁移计划：manifest v1（bootstrap → 授权 → 逐库 Live Diff）或 legacy 固定清单
+    let migration_plan = resolve_migration_plan(Path::new("docker"))?;
+    let diff_result = match &migration_plan {
+        MigrationPlan::Manifest(manifest) => {
+            // manifest 路径：留档各库模板副本；bootstrap/授权独立于表差异执行
+            for schema in &manifest.schemas {
+                let source_path = Path::new("docker").join(&schema.path);
+                let new_sql_path = temp_sql_dir.join(format!("{}_new.sql", schema.database));
+                if new_sql_path.exists() {
+                    fs::remove_file(&new_sql_path)?;
+                }
+                fs::copy(&source_path, &new_sql_path).context(t!(
+                    "auto_upgrade_deploy.copy_sql_failed",
+                    src = source_path.display(),
+                    dst = new_sql_path.display()
+                ))?;
+                info!(
+                    database = %schema.database,
+                    path = %new_sql_path.display(),
+                    "📄 Copied schema template for database"
+                );
+            }
+            info!("📊 Manifest migration: bootstrap → permissions → per-database Live Diff...");
+            let app_user = executor.app_user().unwrap_or_default();
+            client_core::mysql_manifest::run_manifest_migration(
+                executor,
+                manifest,
+                Path::new("docker"),
+                app_user,
             )
-        })?;
-        let template = parse_schema_template(&content)
-            .with_context(|| format!("Invalid schema template {template_path}"))?;
-
-        // 同一库出现在多个模板文件属于配置错误（diff 会重复建表）
-        if templates
-            .iter()
-            .any(|existing: &client_core::sql_diff::SchemaTemplate| {
-                existing.database == template.database
-            })
-        {
-            return Err(anyhow::anyhow!(
-                "Duplicate schema template for database `{}` in SCHEMA_SQL_FILES",
-                template.database
-            ));
+            .await
+            .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?
         }
-
-        let new_sql_path = temp_sql_dir.join(format!("{}_new.sql", template.database));
-        if new_sql_path.exists() {
-            fs::remove_file(&new_sql_path)?;
-        }
-        fs::copy(source_path, &new_sql_path).context(t!(
-            "auto_upgrade_deploy.copy_sql_failed",
-            src = source_path.display(),
-            dst = new_sql_path.display()
-        ))?;
-        info!(
-            database = %template.database,
-            tables = template.tables.len(),
-            path = %new_sql_path.display(),
-            "📄 Copied schema template for database"
-        );
-
-        templates.push(template);
-    }
-
-    // 基于在线架构与模板逐库生成差异SQL（root 管理连接）
-    info!("📊 Generating SQL differences based on online schema...");
-    let diff_result = generate_live_schema_diff_multi(executor, &templates, "target version")
-        .await
-        .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?;
+        MigrationPlan::Legacy => legacy_live_diff(temp_sql_dir, executor).await?,
+    };
 
     info!(description = %diff_result.description, has_executable_sql = diff_result.has_executable_sql, has_warnings = diff_result.has_warnings, "📋 Difference generation completed");
 
@@ -1642,8 +1853,10 @@ pub async fn run_offline_deploy(
     } else {
         info!("🔄 Upgrade deployment detected, services will be stopped first");
 
-        // C01: 停止旧服务前先对当前配置预检，配置不完整时旧服务保持运行
+        // C01/P1#3: 停止旧服务前先对当前配置与离线包预检，任何失败旧服务保持运行
         preflight_current_config()?;
+        preflight_candidate_package_at(&archive_path, false)
+            .context("Offline package preflight failed before stopping services")?;
 
         // 停止服务并等待
         let stopped = docker_service::stop_docker_services_and_wait(
@@ -1822,6 +2035,119 @@ mod staged_deploy_tests {
         };
         active.discard();
         assert!(!preserve_path.exists(), "discard 必须清理临时副本");
+        Ok(())
+    }
+
+    /// P1#2 回归：真实 ZIP patch 提取器必须把包内新 .env 键合并进用户旧值
+    /// （旧缺陷：解压器跳过已存在的 .env，最后旧文件与自己合并，新键永不落地）
+    #[tokio::test]
+    async fn patch_extraction_merges_package_env_into_user_values() -> Result<()> {
+        use anyhow::Context as _;
+        use client_core::api_types::{PatchOperations, PatchPackageInfo, ReplaceOperations};
+        use client_core::upgrade_strategy::DownloadType;
+        use client_core::upgrade_strategy::UpgradeStrategy;
+
+        let directory = tempfile::tempdir()?;
+        let docker_dir = directory.path().join("docker");
+        std::fs::create_dir_all(docker_dir.join("config"))?;
+        std::fs::write(
+            docker_dir.join(".env"),
+            "MYSQL_PASSWORD=user-secret\nPORT=8080\n",
+        )?;
+
+        let archive_path = directory.path().join("patch.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"MYSQL_PASSWORD=package-default\nNEW_REQUIRED=package-value\n")?;
+        zip.start_file(
+            "docker/config/app.conf",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(b"content\n")?;
+        // C04 契约：patch 必须携带全部关键 schema（缺文件会被提取器硬拒绝）
+        for critical in client_core::constants::sql::CRITICAL_UPGRADE_FILES {
+            zip.start_file(
+                format!("docker/{critical}"),
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            zip.write_all(
+                b"USE agent_platform;\nCREATE TABLE `t` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n",
+            )?;
+        }
+        zip.finish()?;
+
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: Some(ReplaceOperations {
+                        files: vec![".env".to_string(), "config/app.conf".to_string()],
+                        directories: Vec::new(),
+                    }),
+                    delete: None,
+                },
+            },
+            target_version: "0.0.90.0".parse().context("version")?,
+            download_type: DownloadType::Patch,
+        };
+
+        // 提取器按相对 CWD 的 docker/ 工作；nextest 每测试独立进程，chdir 安全
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extraction = crate::utils::extract_docker_service(&archive_path, &strategy).await;
+        std::env::set_current_dir(cwd)?;
+        extraction?;
+
+        let merged = std::fs::read_to_string(docker_dir.join(".env"))?;
+        assert!(
+            merged.contains("MYSQL_PASSWORD=user-secret"),
+            "用户值必须保留: {merged}"
+        );
+        assert!(merged.contains("PORT=8080"), "用户值必须保留: {merged}");
+        assert!(
+            merged.contains("NEW_REQUIRED=package-value"),
+            "包内新键必须补齐: {merged}"
+        );
+        assert!(
+            !merged.contains("package-default"),
+            "包内占位值不得覆盖用户密钥: {merged}"
+        );
+        Ok(())
+    }
+
+    /// P1#3 回归：候选包预检在缺新必填键时失败（旧服务无需停止即可发现）
+    #[test]
+    fn candidate_package_preflight_rejects_missing_required_keys() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let docker_dir = directory.path().join("docker");
+        std::fs::create_dir_all(&docker_dir)?;
+        std::fs::write(docker_dir.join(".env"), "EXISTING=1\n")?;
+
+        let archive_path = directory.path().join("full.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        zip.start_file(
+            "docker-compose.yml",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(
+            b"services:\n  backend:\n    environment:\n      - SECRET=${NEW_MUST_SET:?}\n",
+        )?;
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"OTHER=2\n")?;
+        zip.finish()?;
+
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let result = super::preflight_candidate_package_at(&archive_path, false);
+        std::env::set_current_dir(cwd)?;
+        let error = result.expect_err("missing required key must fail the preflight");
+        assert!(
+            error.to_string().contains("NEW_MUST_SET"),
+            "错误必须指名缺失键: {error}"
+        );
         Ok(())
     }
 

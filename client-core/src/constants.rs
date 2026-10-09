@@ -596,10 +596,18 @@ pub mod sql {
     /// Schema 模板清单：Live Diff 逐库对比的目标 DDL。
     /// 每个文件对应一个数据库（靠文件内唯一的 `USE` 语句归属库），
     /// 纯数据文件（如 init_mysql_data.sql）不属于此清单。
+    /// 注意：这是 legacy 路径（包内无 mysql-schema-manifest.json 时使用）。
     pub const SCHEMA_SQL_FILES: &[&str] = &[
         "docker/config/init_mysql.sql",
         "docker/config/init_mysql_im.sql",
     ];
+
+    /// 包内 MySQL schema 清单（mysql-schema-manifest-v1 契约入口）；
+    /// 存在即启用 manifest 路径，不存在走 legacy 固定清单
+    pub const SCHEMA_MANIFEST_PATH: &str = "docker/config/mysql-schema-manifest.json";
+
+    /// 包内交付清单（DELIVERY_MANIFEST.json v1：产物/SQL/Compose hash 与发布身份）
+    pub const DELIVERY_MANIFEST_PATH: &str = "docker/DELIVERY_MANIFEST.json";
 
     /// 关键升级文件列表（增量升级时必须强制更新）
     /// 这些文件对于数据库升级至关重要，必须始终保持最新版本

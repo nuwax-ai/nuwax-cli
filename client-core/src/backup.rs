@@ -3,6 +3,7 @@ use crate::{
     database::{BackupRecord, BackupStatus, BackupType, Database},
     error::DuckError,
 };
+use anyhow::Context as _;
 use anyhow::Result;
 use chrono::Utc;
 use flate2::Compression;
@@ -233,6 +234,14 @@ impl BackupManager {
         // 停止服务，准备恢复
         info!("Stopping services...");
         self.docker_manager.stop_services().await?;
+
+        // P1#5: 破坏性清理前核对组件兼容：当前 Compose 引用的组件目录
+        // 必须存在于该备份，否则恢复会留下不完整部署（新 Compose + 缺组件）
+        crate::container::preflight::verify_backup_component_compatibility(
+            &backup_path,
+            target_dir,
+        )
+        .context("Backup is incompatible with the current deployment components")?;
 
         // 清理现有数据目录，但保留配置文件
         self.clear_data_directories(target_dir, dirs_to_exculde)

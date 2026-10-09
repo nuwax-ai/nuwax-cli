@@ -11,6 +11,8 @@ use std::path::Path;
 /// 专为Duck Client自动升级部署设计
 pub struct MySqlExecutor {
     pool: Pool,
+    /// 应用账号（管理连接捕获的 MYSQL_USER；manifest permissions 授权对象）
+    app_user: Option<String>,
 }
 
 /// MySQL配置适配现有系统
@@ -23,6 +25,8 @@ pub struct MySqlConfig {
     /// 默认库：应用连接为 `MYSQL_DATABASE`；root 管理连接为 `None`
     /// （多库迁移时库切换由 diff 内的 `USE` 段完成）
     pub database: Option<String>,
+    /// 应用账号（root 管理连接捕获 `MYSQL_USER`，供 manifest permissions 授权）
+    pub app_user: Option<String>,
 }
 
 /// 从 compose 解析出的 mysql 服务连接要素（与凭据用途无关）
@@ -143,12 +147,14 @@ impl MySqlConfig {
             user,
             password,
             database: Some(database),
+            app_user: None,
         })
     }
 
     /// root 管理连接：多库 schema 迁移（Live Diff）专用。
     /// 建库（CREATE DATABASE）、授权（GRANT）与跨库 DDL 均超出应用账号权限；
     /// 不设默认库，库切换由生成的 diff 内 `USE` 段完成。
+    /// `app_user` 捕获官方镜像创建的应用账号（manifest permissions 授权对象）。
     /// 缺少 `MYSQL_ROOT_PASSWORD` 时 Fail Fast，错误信息不回显任何凭据。
     pub async fn for_container_admin(
         compose_file: Option<&str>,
@@ -164,6 +170,7 @@ impl MySqlConfig {
                     "'mysql' service environment must define MYSQL_ROOT_PASSWORD for schema migration"
                 )
             })?;
+        let app_user = endpoint.env.get("MYSQL_USER").cloned();
 
         Ok(MySqlConfig {
             host: "127.0.0.1".to_string(),
@@ -171,6 +178,7 @@ impl MySqlConfig {
             user: "root".to_string(),
             password,
             database: None,
+            app_user,
         })
     }
 }
@@ -240,7 +248,15 @@ impl MySqlExecutor {
             .pass(Some(config.password.clone()))
             .db_name(config.database.clone());
         let pool = Pool::new(opts);
-        Self { pool }
+        Self {
+            pool,
+            app_user: config.app_user.clone(),
+        }
+    }
+
+    /// 应用账号（管理连接捕获的 `MYSQL_USER`）
+    pub fn app_user(&self) -> Option<&str> {
+        self.app_user.as_deref()
     }
 
     /// 测试连接是否可用
@@ -648,6 +664,7 @@ mod tests {
                 .to_string(),
             password: options.pass().unwrap_or_default().to_string(),
             database: Some(database.to_string()),
+            app_user: None,
         };
         let executor = MySqlExecutor::new(config);
         executor.test_connection().await?;

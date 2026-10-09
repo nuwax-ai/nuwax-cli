@@ -31,6 +31,7 @@ pub mod device_info;
 pub mod downloader;
 pub mod error;
 pub mod mysql_executor;
+pub mod mysql_manifest;
 pub mod patch_executor;
 pub mod release_version;
 pub mod sql_diff;

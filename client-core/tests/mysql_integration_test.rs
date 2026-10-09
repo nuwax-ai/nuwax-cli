@@ -594,6 +594,7 @@ fn mysql_config_from_url(raw_url: &str) -> Result<MySqlConfig> {
         user,
         password,
         database: Some(database),
+        app_user: None,
     })
 }
 
@@ -642,3 +643,243 @@ ALTER TABLE `users`
     DROP INDEX `idx_email`,
     DROP COLUMN `status`;
 "#;
+
+/// manifest v1 存量迁移场景（隔离库名 + 随机应用账号，用后即删）：
+/// schema 文件为拆分后的纯 USE + 表结构（无 CREATE DATABASE/GRANT）。
+///
+/// 1. 平台库已存在含数据、IM 与 bootstrap_only 库缺失 → bootstrap 建库 +
+///    应用账号授权 + IM 补建；平台数据保留；授权覆盖全部声明库；
+/// 2. 零表差异但清单新增 bootstrap_only 库 → bootstrap/授权仍独立执行；
+/// 3. 双库漂移 → Live Diff 应用；幂等重跑零执行。
+#[tokio::test]
+#[ignore = "requires TEST_MYSQL_URL pointing to a disposable MySQL instance"]
+async fn manifest_migration_scenarios() -> Result<()> {
+    let url = std::env::var("TEST_MYSQL_URL").context("TEST_MYSQL_URL is required")?;
+    let base = mysql_config_from_url(&url)?;
+    let suffix = uuid::Uuid::now_v7().simple();
+    let platform_db = format!("nuwax_mmp_{suffix}");
+    let im_db = format!("nuwax_mmi_{suffix}");
+    let custom_db = format!("nuwax_mmc_{suffix}");
+    // MySQL 用户名上限 32 字符，取 uuid 尾部 16 位保证唯一
+    let app_user = format!("nuwax_app_{}", &suffix.to_string()[24..]);
+
+    let mut admin = MySqlConfig {
+        host: base.host.clone(),
+        port: base.port,
+        user: base.user.clone(),
+        password: base.password.clone(),
+        database: None,
+        app_user: None,
+    };
+    admin.app_user = Some(app_user.clone());
+    let executor = MySqlExecutor::new(admin);
+    executor.test_connection().await?;
+
+    executor
+        .execute_single(&format!(
+            "CREATE USER IF NOT EXISTS '{app_user}'@'%' IDENTIFIED BY 'disposable'"
+        ))
+        .await
+        .context("创建应用账号失败")?;
+
+    let outcome = manifest_scenario_body(
+        &executor,
+        &app_user,
+        &platform_db,
+        &im_db,
+        &custom_db,
+        &base,
+    )
+    .await;
+
+    for database in [&platform_db, &im_db, &custom_db] {
+        executor
+            .execute_single(&format!("DROP DATABASE IF EXISTS `{database}`"))
+            .await
+            .ok();
+    }
+    executor
+        .execute_single(&format!("DROP USER IF EXISTS '{app_user}'@'%'"))
+        .await
+        .ok();
+    outcome
+}
+
+async fn manifest_scenario_body(
+    executor: &MySqlExecutor,
+    app_user: &str,
+    platform_db: &str,
+    im_db: &str,
+    custom_db: &str,
+    base: &MySqlConfig,
+) -> Result<()> {
+    use client_core::mysql_manifest::{
+        parse_schema_manifest, run_manifest_migration, validate_manifest_files,
+    };
+
+    let workspace = tempfile::tempdir()?;
+    let docker_root = workspace.path().join("docker");
+    std::fs::create_dir_all(docker_root.join("config"))?;
+
+    let bootstrap_v1 = format!(
+        "CREATE DATABASE IF NOT EXISTS `{platform_db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n\
+         CREATE DATABASE IF NOT EXISTS `{custom_db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n\
+         CREATE DATABASE IF NOT EXISTS `{im_db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;\n"
+    );
+    let platform_v1 = format!(
+        "USE `{platform_db}`;\nCREATE TABLE `users` (`id` bigint NOT NULL, `name` varchar(64), PRIMARY KEY (`id`));\n"
+    );
+    let im_v1 = format!(
+        "USE `{im_db}`;\nCREATE TABLE `im_msg` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n"
+    );
+
+    std::fs::write(
+        docker_root.join("config/init_mysql_databases.sql"),
+        &bootstrap_v1,
+    )?;
+    std::fs::write(
+        docker_root.join("config/init_mysql_permissions.sh"),
+        "#!/bin/sh\nexit 0\n",
+    )?;
+    std::fs::write(docker_root.join("config/platform.sql"), &platform_v1)?;
+    std::fs::write(docker_root.join("config/im.sql"), &im_v1)?;
+
+    let manifest_json = |custom_bootstrap: bool| {
+        format!(
+            r#"{{
+  "contract_version": 1,
+  "requires": {{ "cli_capability": "mysql-schema-manifest-v1" }},
+  "mysql_target": {{ "service": "mysql", "internal_port": 3306 }},
+  "application_connections": [],
+  "databases": [
+    {{ "name": "{platform_db}", "bootstrap_only": false }},
+    {{ "name": "{custom_db}", "bootstrap_only": {custom_bootstrap} }},
+    {{ "name": "{im_db}", "bootstrap_only": false }}
+  ],
+  "bootstrap": {{ "path": "config/init_mysql_databases.sql", "idempotent": true, "initdb_target": "00_init_mysql_databases.sql" }},
+  "permissions": {{ "path": "config/init_mysql_permissions.sh", "user_env": "MYSQL_USER", "databases": "bootstrap", "initdb_target": "01_init_mysql_permissions.sh" }},
+  "schemas": [
+    {{ "database": "{platform_db}", "path": "config/platform.sql", "initdb_target": "10_platform.sql" }},
+    {{ "database": "{im_db}", "path": "config/im.sql", "initdb_target": "20_im.sql" }}
+  ],
+  "first_install_seeds": []
+}}"#
+        )
+    };
+    let manifest = parse_schema_manifest(&manifest_json(true)).context("清单解析失败")?;
+    validate_manifest_files(&manifest, &docker_root).context("清单文件校验失败")?;
+
+    // ── 场景 1：平台库存在含数据，IM/bootstrap_only 库缺失 ────────────────
+    executor
+        .execute_single(&format!(
+            "CREATE DATABASE `{platform_db}`;              CREATE TABLE `{platform_db}`.`users` (`id` bigint NOT NULL, `name` varchar(64), PRIMARY KEY (`id`));              INSERT INTO `{platform_db}`.`users` VALUES (1, 'must-survive')"
+        ))
+        .await
+        .context("准备平台库失败")?;
+
+    let result = run_manifest_migration(executor, &manifest, &docker_root, app_user)
+        .await
+        .context("场景1 manifest 迁移失败")?;
+    assert!(result.has_executable_sql, "IM 补建应产生可执行差异");
+    // 部署命令负责执行生成的 diff；此处模拟同一顺序
+    executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .context("场景1 diff 执行失败")?;
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            MySqlConnectOptions::new()
+                .host(&base.host)
+                .port(base.port)
+                .username(&base.user)
+                .password(&base.password)
+                .database(platform_db),
+        )
+        .await?;
+    let kept: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM `users` WHERE `name` = 'must-survive'")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(kept, (1,), "平台库业务数据必须保留");
+
+    let dbs: Vec<(String,)> = sqlx::query_as(
+        "SELECT schema_name FROM information_schema.schemata WHERE schema_name IN (?, ?) ORDER BY schema_name",
+    )
+    .bind(im_db)
+    .bind(custom_db)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(dbs.len(), 2, "bootstrap 必须独立于表差异建齐全部库");
+
+    let im_tables: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?")
+            .bind(im_db)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(im_tables, (1,), "IM schema 补建 1 张表");
+
+    let grants: Vec<(String,)> = sqlx::query_as(
+        "SELECT TABLE_SCHEMA FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = ? GROUP BY TABLE_SCHEMA",
+    )
+    .bind(format!("'{app_user}'@'%'"))
+    .fetch_all(&pool)
+    .await?;
+    let grants_text = grants
+        .iter()
+        .map(|(grant,)| grant.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for database in [platform_db, im_db, custom_db] {
+        assert!(
+            grants_text.contains(database),
+            "授权必须覆盖声明库 {database}: {grants_text}"
+        );
+    }
+
+    // ── 场景 2：零表差异 + 授权独立（重跑幂等 + bootstrap/授权始终执行） ──
+    let result = run_manifest_migration(executor, &manifest, &docker_root, app_user)
+        .await
+        .context("场景2 重跑失败")?;
+    assert!(
+        !result.has_executable_sql,
+        "收敛后应零表差异（bootstrap/授权仍已独立执行）: {}",
+        result.description
+    );
+
+    // ── 场景 3：双库漂移 → Live Diff 应用；幂等 ──────────────────────────
+    let platform_v2 = format!(
+        "USE `{platform_db}`;\nCREATE TABLE `users` (`id` bigint NOT NULL, `name` varchar(64), `email` varchar(255), PRIMARY KEY (`id`));\n"
+    );
+    let im_v2 = format!(
+        "USE `{im_db}`;\nCREATE TABLE `im_msg` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n\
+         CREATE TABLE `im_conv` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n"
+    );
+    std::fs::write(docker_root.join("config/platform.sql"), &platform_v2)?;
+    std::fs::write(docker_root.join("config/im.sql"), &im_v2)?;
+    validate_manifest_files(&manifest, &docker_root)?;
+
+    let result = run_manifest_migration(executor, &manifest, &docker_root, app_user)
+        .await
+        .context("场景3 漂移迁移失败")?;
+    assert!(result.has_executable_sql, "双库漂移都应被检出");
+    executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .context("场景3 diff 执行失败")?;
+    let email_column: Vec<(String,)> =
+        sqlx::query_as("SHOW COLUMNS FROM `users` WHERE Field = 'email'")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(email_column.len(), 1, "平台库新列已应用");
+    let im_tables: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?")
+            .bind(im_db)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(im_tables, (2,), "IM 库新表已应用");
+
+    let result = run_manifest_migration(executor, &manifest, &docker_root, app_user).await?;
+    assert!(!result.has_executable_sql, "再次重跑应零差异");
+    Ok(())
+}

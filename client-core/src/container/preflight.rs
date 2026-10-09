@@ -9,11 +9,17 @@
 //!
 //! 所有错误信息只包含键名/库名/路径，绝不回显任何凭据值。
 
+use crate::container::interpolate_env;
 use crate::container::load_env_values;
-use anyhow::{Result, anyhow};
+use crate::mysql_manifest::SchemaManifest;
+use anyhow::Context as _;
+use anyhow::{Result, anyhow, bail};
 use regex::Regex;
+use sha2::Digest;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::path::Path;
+use tracing::info;
 
 /// 扫描 compose 文本中的必填变量引用：`${VAR:?}`、`${VAR?}`（含带提示信息形式）。
 /// 带 `:-` / `-` 默认值的形式不算必填（有兜底值）。
@@ -157,6 +163,8 @@ pub fn preflight_deploy_config(
     compose_path: &Path,
     env_path: &Path,
     template_databases: &[String],
+    manifest: Option<&SchemaManifest>,
+    delivery: Option<&DeliveryManifest>,
 ) -> Result<()> {
     let compose_text = std::fs::read_to_string(compose_path).map_err(|error| {
         anyhow!(
@@ -180,8 +188,67 @@ pub fn preflight_deploy_config(
         ));
     }
 
-    validate_local_db_targets(&values, template_databases)?;
-    validate_host_artifacts(env_path.parent().unwrap_or(Path::new(".")))?;
+    match manifest {
+        // manifest 路径：逐条 (service, role) 校验候选 Compose 最终连接值
+        Some(manifest) => validate_application_connections(&compose_text, &values, manifest)?,
+        // legacy 路径：约定键扫描
+        None => validate_local_db_targets(&values, template_databases)?,
+    }
+
+    let docker_dir = env_path.parent().unwrap_or(Path::new("."));
+    validate_component_artifacts(docker_dir, &compose_text, delivery)?;
+    Ok(())
+}
+
+/// 归档侧的交付清单校验（停服务前预检用）：对读取到的条目字节做
+/// SHA256 一致性检查（compose / mysql 清单文件 / 组件产物），并复算 release_sha256。
+/// 与磁盘版 `verify_delivery_manifest` 同语义，数据源为归档条目。
+pub fn verify_delivery_against_entries(
+    manifest: &DeliveryManifest,
+    entries: &HashMap<String, Vec<u8>>,
+) -> Result<()> {
+    let compose = entries
+        .get(manifest.compose.path.as_str())
+        .ok_or_else(|| anyhow!("archive is missing compose {}", manifest.compose.path))?;
+    if sha256_hex(compose) != manifest.compose.sha256 {
+        bail!(
+            "delivery compose {} hash mismatch against archive bytes",
+            manifest.compose.path
+        );
+    }
+
+    for (path, expected) in &manifest.mysql.files {
+        let bytes = entries
+            .get(path.as_str())
+            .ok_or_else(|| anyhow!("archive is missing mysql file {path}"))?;
+        if sha256_hex(bytes) != *expected {
+            bail!("mysql file {path} hash mismatch against archive bytes");
+        }
+    }
+
+    for component in manifest.components.values() {
+        for (path, expected) in &component.artifacts {
+            let bytes = entries
+                .get(path.as_str())
+                .ok_or_else(|| anyhow!("archive is missing component artifact {path}"))?;
+            if sha256_hex(bytes) != *expected {
+                bail!("component artifact {path} hash mismatch against archive bytes");
+            }
+        }
+    }
+
+    let payload = serde_json::to_value(DeliveryPayload {
+        contract_version: manifest.contract_version,
+        architecture: &manifest.architecture,
+        components: &manifest.components,
+        mysql: &manifest.mysql,
+        compose: &manifest.compose,
+    })
+    .with_context(|| "cannot re-serialize delivery manifest")?;
+    let canonical = canonical_json_string(&payload);
+    if sha256_hex(canonical.as_bytes()) != manifest.release_sha256 {
+        bail!("DELIVERY_MANIFEST release_sha256 mismatch against archive contents");
+    }
     Ok(())
 }
 
@@ -299,4 +366,810 @@ mod tests {
         std::fs::write(docker_dir.join("repo-collab-app/dist/index.js"), b"").expect("asset");
         validate_host_artifacts(docker_dir).expect("complete dist must pass");
     }
+
+    const MANIFEST_JSON: &str = r#"{
+      "contract_version": 1,
+      "requires": { "cli_capability": "mysql-schema-manifest-v1" },
+      "mysql_target": { "service": "mysql", "internal_port": 3306 },
+      "application_connections": [
+        { "service": "nuwax-im-business", "role": "primary", "database": "nuwax_im",
+          "host": "mysql", "port": 3306,
+          "environment": { "host": "IM_DB_HOST", "port": "IM_DB_PORT", "database": "IM_DB_NAME" } }
+      ],
+      "databases": [
+        { "name": "agent_platform", "bootstrap_only": false },
+        { "name": "nuwax_im", "bootstrap_only": false }
+      ],
+      "bootstrap": { "path": "config/bootstrap.sql", "idempotent": true, "initdb_target": "00_bootstrap.sql" },
+      "permissions": { "path": "config/permissions.sh", "user_env": "MYSQL_USER", "databases": "bootstrap", "initdb_target": "01_permissions.sh" },
+      "schemas": [
+        { "database": "agent_platform", "path": "config/platform.sql", "initdb_target": "10_platform.sql" },
+        { "database": "nuwax_im", "path": "config/im.sql", "initdb_target": "20_im.sql" }
+      ],
+      "first_install_seeds": []
+    }"#;
+
+    const COMPOSE_YAML: &str = "services:\n  nuwax-im-business:\n    environment:\n      - IM_DB_HOST=${IM_DB_HOST}\n      - IM_DB_PORT=${IM_DB_PORT}\n      - IM_DB_NAME=${IM_DB_NAME}\n";
+
+    #[test]
+    fn connections_match_migration_targets_pass() {
+        let manifest =
+            crate::mysql_manifest::parse_schema_manifest(MANIFEST_JSON).expect("manifest");
+        let values = env_map(&[
+            ("IM_DB_HOST", "mysql"),
+            ("IM_DB_PORT", "3306"),
+            ("IM_DB_NAME", "nuwax_im"),
+        ]);
+        validate_application_connections(COMPOSE_YAML, &values, &manifest)
+            .expect("correct mapping must pass");
+    }
+
+    #[test]
+    fn connections_reject_cross_database_and_missing_values() {
+        let manifest =
+            crate::mysql_manifest::parse_schema_manifest(MANIFEST_JSON).expect("manifest");
+
+        // IM 连到 agent_platform：库名在 manifest 声明中，但不是该连接的目标 → 必须拒绝
+        let wrong_db = env_map(&[
+            ("IM_DB_HOST", "mysql"),
+            ("IM_DB_PORT", "3306"),
+            ("IM_DB_NAME", "agent_platform"),
+        ]);
+        let error =
+            validate_application_connections(COMPOSE_YAML, &wrong_db, &manifest).unwrap_err();
+        assert!(error.to_string().contains("agent_platform"), "{error}");
+
+        // 外部主机
+        let external = env_map(&[
+            ("IM_DB_HOST", "db.example.com"),
+            ("IM_DB_PORT", "3306"),
+            ("IM_DB_NAME", "nuwax_im"),
+        ]);
+        assert!(validate_application_connections(COMPOSE_YAML, &external, &manifest).is_err());
+
+        // selector 值缺失（键不在服务 environment，也不在 env 中）
+        let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        assert!(validate_application_connections(COMPOSE_YAML, &empty, &manifest).is_err());
+
+        // 非内部端口
+        let wrong_port = env_map(&[
+            ("IM_DB_HOST", "mysql"),
+            ("IM_DB_PORT", "13306"),
+            ("IM_DB_NAME", "nuwax_im"),
+        ]);
+        assert!(validate_application_connections(COMPOSE_YAML, &wrong_port, &manifest).is_err());
+    }
+
+    #[test]
+    fn service_env_resolution_follows_shell_over_env_file_precedence() {
+        // compose 条目 IM_DB_NAME=${NUWAX_CONN_SELECTOR_XYZ}：env-file 与 shell 给出不同值时，
+        // 最终值必须按 shell > env-file 取（与 docker compose config 语义一致）
+        let compose: serde_yaml::Value = serde_yaml::from_str(
+            "services:\n  im:\n    environment:\n      - IM_DB_NAME=${NUWAX_CONN_SELECTOR_XYZ}\n",
+        )
+        .expect("yaml");
+        let service = &compose["services"]["im"];
+        let env_file = env_map(&[("NUWAX_CONN_SELECTOR_XYZ", "agent_platform")]);
+
+        // 无 shell 值：取 env-file（错误目标）
+        let resolved = resolve_service_env_with(service, "IM_DB_NAME", &env_file, |_: &str| None)
+            .expect("env-file value");
+        assert_eq!(resolved, "agent_platform");
+
+        // shell 给出正确目标：优先于 env-file
+        let resolved = resolve_service_env_with(service, "IM_DB_NAME", &env_file, |name: &str| {
+            (name == "NUWAX_CONN_SELECTOR_XYZ").then(|| "nuwax_im".to_string())
+        })
+        .expect("shell value");
+        assert_eq!(resolved, "nuwax_im");
+    }
+
+    #[test]
+    fn backup_guard_rejects_component_free_backup_when_compose_references_it() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let docker_dir = directory.path().join("docker");
+        std::fs::create_dir_all(&docker_dir).expect("mkdir");
+        std::fs::write(
+            docker_dir.join("docker-compose.yml"),
+            "services:\n  nuwax-im-business:\n    volumes:\n      - type: bind\n        source: ./im-app/nuwax-im-web-bootstrap.jar\n        target: /app/app.jar\n",
+        )
+        .expect("compose");
+
+        // 旧备份（无 im-app）：恢复前拒绝
+        let old_backup = directory.path().join("old.tar.gz");
+        write_tar_gz(&old_backup, &[("data/mysql/ibdata1", b"db")]);
+        let error = verify_backup_component_compatibility(&old_backup, &docker_dir).unwrap_err();
+        assert!(error.to_string().contains("im-app"), "{error}");
+
+        // 新备份（含 im-app）：通过
+        let new_backup = directory.path().join("new.tar.gz");
+        write_tar_gz(
+            &new_backup,
+            &[
+                ("im-app/nuwax-im-web-bootstrap.jar", b"jar"),
+                ("data/x", b"y"),
+            ],
+        );
+        verify_backup_component_compatibility(&new_backup, &docker_dir).expect("compatible backup");
+    }
+
+    fn write_tar_gz(path: &std::path::Path, entries: &[(&str, &[u8])]) {
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(path).expect("create"),
+            flate2::Compression::default(),
+        );
+        let mut archive = tar::Builder::new(encoder);
+        for (name, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, name, *bytes)
+                .expect("append");
+        }
+        archive.finish().expect("finish");
+        archive
+            .into_inner()
+            .expect("inner")
+            .finish()
+            .expect("flush");
+    }
+
+    fn write_delivery_workspace(
+        directory: &std::path::Path,
+    ) -> (std::path::PathBuf, DeliveryManifest) {
+        let docker_dir = directory.join("docker");
+        std::fs::create_dir_all(docker_dir.join("im-app")).expect("mkdir");
+        std::fs::create_dir_all(docker_dir.join("config")).expect("mkdir config");
+        std::fs::write(docker_dir.join("docker-compose.yml"), b"services: {}\n").expect("compose");
+        std::fs::write(docker_dir.join("config/mysql-schema-manifest.json"), b"{}")
+            .expect("manifest");
+        std::fs::write(
+            docker_dir.join("im-app/nuwax-im-web-bootstrap.jar"),
+            b"jar-web",
+        )
+        .expect("jar");
+        std::fs::write(
+            docker_dir.join("im-app/nuwax-im-gateway-bootstrap.jar"),
+            b"jar-gw",
+        )
+        .expect("jar");
+
+        let hash_of = |path: &std::path::Path| sha256_hex(&std::fs::read(path).expect("read"));
+        let mut components = std::collections::HashMap::new();
+        components.insert(
+            "nuwax-im".to_string(),
+            DeliveryComponent {
+                version: serde_json::json!("1.0.0"),
+                image_id: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+                source: "registry.test/nuwax/im:1.0.0".to_string(),
+                target: "registry.test/nuwax/im:1.0.0".to_string(),
+                artifacts: {
+                    let mut artifacts = std::collections::HashMap::new();
+                    artifacts.insert(
+                        "im-app/nuwax-im-web-bootstrap.jar".to_string(),
+                        hash_of(&docker_dir.join("im-app/nuwax-im-web-bootstrap.jar")),
+                    );
+                    artifacts.insert(
+                        "im-app/nuwax-im-gateway-bootstrap.jar".to_string(),
+                        hash_of(&docker_dir.join("im-app/nuwax-im-gateway-bootstrap.jar")),
+                    );
+                    artifacts
+                },
+            },
+        );
+        let manifest = DeliveryManifest {
+            contract_version: 1,
+            architecture: "amd64".to_string(),
+            components,
+            mysql: DeliveryMysql {
+                manifest: "config/mysql-schema-manifest.json".to_string(),
+                files: {
+                    let mut files = std::collections::HashMap::new();
+                    files.insert(
+                        "config/mysql-schema-manifest.json".to_string(),
+                        hash_of(&docker_dir.join("config/mysql-schema-manifest.json")),
+                    );
+                    files
+                },
+            },
+            compose: DeliveryCompose {
+                path: "docker-compose.yml".to_string(),
+                sha256: hash_of(&docker_dir.join("docker-compose.yml")),
+            },
+            release_sha256: String::new(),
+        };
+        let payload = serde_json::to_value(DeliveryPayload {
+            contract_version: manifest.contract_version,
+            architecture: &manifest.architecture,
+            components: &manifest.components,
+            mysql: &manifest.mysql,
+            compose: &manifest.compose,
+        })
+        .expect("serialize");
+        let mut manifest = manifest;
+        manifest.release_sha256 = sha256_hex(canonical_json_string(&payload).as_bytes());
+        (docker_dir, manifest)
+    }
+
+    #[test]
+    fn delivery_verification_passes_and_rejects_tampered_artifacts() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (docker_dir, manifest) = write_delivery_workspace(directory.path());
+        verify_delivery_manifest(&manifest, &docker_dir, Some("amd64"))
+            .expect("consistent delivery must pass");
+        // 架构不匹配
+        assert!(verify_delivery_manifest(&manifest, &docker_dir, Some("arm64")).is_err());
+
+        // 混版：替换一个 jar（hash 不再匹配交付清单）
+        std::fs::write(
+            docker_dir.join("im-app/nuwax-im-gateway-bootstrap.jar"),
+            b"jar-mixed",
+        )
+        .expect("jar");
+        let error = verify_delivery_manifest(&manifest, &docker_dir, Some("amd64")).unwrap_err();
+        assert!(error.to_string().contains("gateway"), "{error}");
+    }
+
+    #[test]
+    fn component_artifacts_follow_active_mounts() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (docker_dir, _manifest) = write_delivery_workspace(directory.path());
+        // compose 挂载 im-app jar + repo-collab dist（缺失）
+        std::fs::write(
+            docker_dir.join("docker-compose.yml"),
+            "services:\n  im:\n    volumes:\n      - ./im-app/nuwax-im-web-bootstrap.jar:/app/app.jar\n  collab:\n    volumes:\n      - ./repo-collab-app/dist:/app/dist\n",
+        )
+        .expect("compose");
+        let compose_text =
+            std::fs::read_to_string(docker_dir.join("docker-compose.yml")).expect("read");
+        let error = validate_component_artifacts(&docker_dir, &compose_text, None).unwrap_err();
+        assert!(error.to_string().contains("repo-collab-app"), "{error}");
+
+        // 补齐 dist/index.js 后通过
+        std::fs::create_dir_all(docker_dir.join("repo-collab-app/dist")).expect("mkdir");
+        std::fs::write(docker_dir.join("repo-collab-app/dist/index.js"), b"entry").expect("entry");
+        validate_component_artifacts(&docker_dir, &compose_text, None).expect("complete artifacts");
+
+        // 启用服务缺整个组件目录（删除 im-app 根但 compose 仍挂载）→ 拒绝
+        std::fs::remove_dir_all(docker_dir.join("im-app")).expect("remove");
+        assert!(validate_component_artifacts(&docker_dir, &compose_text, None).is_err());
+    }
+}
+
+// ───────────────────────── 连接映射校验（manifest.application_connections） ─────────────────────────
+
+/// 按清单逐条校验候选 Compose 最终插值后的服务连接值。
+///
+/// 每条 `(service, role)` 独立匹配自己的目标：selector 环境变量在该服务
+/// environment 中的最终值（`docker compose config` 语义：条目值经 shell > env-file
+/// 插值）必须与声明的 host/port/database 精确一致；值缺失同样失败。
+/// 不做"库名属于已知集合并集"式的放行——IM 配成 agent_platform 必须被拒绝。
+pub fn validate_application_connections(
+    compose_text: &str,
+    env_values: &HashMap<String, String>,
+    manifest: &SchemaManifest,
+) -> Result<()> {
+    let compose: serde_yaml::Value = serde_yaml::from_str(compose_text)
+        .with_context(|| "preflight cannot parse candidate compose YAML")?;
+
+    for connection in &manifest.application_connections {
+        let service = &compose["services"][&connection.service];
+        if service.is_null() {
+            return Err(anyhow!(
+                "candidate compose has no service '{}' required by connection ({}, {})",
+                connection.service,
+                connection.service,
+                connection.role
+            ));
+        }
+
+        if let Some(host_selector) = &connection.environment.host {
+            let value = resolve_service_env(service, host_selector, env_values)
+                .with_context(|| {
+                    format!(
+                        "connection ({}, {}): host selector '{host_selector}' is not set on service '{}'",
+                        connection.service, connection.role, connection.service
+                    )
+                })?;
+            if value != connection.host {
+                return Err(anyhow!(
+                    "connection ({}, {}): host selector '{host_selector}' resolves to '{value}', \
+                     must stay on the local Compose service '{}'",
+                    connection.service,
+                    connection.role,
+                    connection.host
+                ));
+            }
+        }
+
+        let port = resolve_service_env(service, &connection.environment.port, env_values)
+            .with_context(|| {
+                format!(
+                    "connection ({}, {}): port selector '{}' is not set on service '{}'",
+                    connection.service,
+                    connection.role,
+                    connection.environment.port,
+                    connection.service
+                )
+            })?;
+        let port: u16 = port.trim().parse().with_context(|| {
+            format!(
+                "connection ({}, {}): port selector '{}' resolves to non-integer '{port}'",
+                connection.service, connection.role, connection.environment.port
+            )
+        })?;
+        if port != connection.port {
+            return Err(anyhow!(
+                "connection ({}, {}): port selector resolves to {port}, must be the mysql internal port {}",
+                connection.service,
+                connection.role,
+                connection.port
+            ));
+        }
+
+        let database = resolve_service_env(service, &connection.environment.database, env_values)
+            .with_context(|| {
+            format!(
+                "connection ({}, {}): database selector '{}' is not set on service '{}'",
+                connection.service,
+                connection.role,
+                connection.environment.database,
+                connection.service
+            )
+        })?;
+        if database != connection.database {
+            return Err(anyhow!(
+                "connection ({}, {}): database selector resolves to '{database}', \
+                 which is not this connection's migration target '{}'",
+                connection.service,
+                connection.role,
+                connection.database
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 解析服务环境条目的最终值：`KEY=raw`（raw 可能含 `${VAR}`，按 shell > env-file
+/// 插值）、`KEY`（值取 env_values[KEY]）、映射形式 `KEY: raw`。条目不存在 → None。
+fn resolve_service_env(
+    service: &serde_yaml::Value,
+    selector: &str,
+    env_values: &HashMap<String, String>,
+) -> Option<String> {
+    resolve_service_env_with(service, selector, env_values, |name| {
+        std::env::var(name).ok()
+    })
+}
+
+/// `shell_lookup` 注入 shell 环境读取（生产为 `std::env::var`；测试注入受控值，
+/// 保持 shell > env-file 的插值优先级可测）
+fn resolve_service_env_with(
+    service: &serde_yaml::Value,
+    selector: &str,
+    env_values: &HashMap<String, String>,
+    shell_lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let environment = service.get("environment")?;
+    let raw = match environment {
+        serde_yaml::Value::Sequence(entries) => entries.iter().find_map(|entry| {
+            let entry = entry.as_str()?;
+            let (key, value) = entry.split_once('=')?;
+            (key.trim() == selector).then(|| value.to_string())
+        }),
+        serde_yaml::Value::Mapping(entries) => entries.iter().find_map(|(key, value)| {
+            (key.as_str()? == selector).then(|| match value {
+                serde_yaml::Value::String(raw) => raw.clone(),
+                serde_yaml::Value::Null => String::new(),
+                _ => String::new(),
+            })
+        }),
+        _ => None,
+    }?;
+
+    let resolved = interpolate_env(
+        &raw,
+        &|name: &str| shell_lookup(name).or_else(|| env_values.get(name).cloned()),
+        crate::container::interpolation::MissingVariables::Empty,
+    )
+    .ok()?
+    .trim()
+    .to_string();
+    if resolved.is_empty() {
+        // `- KEY`（无值）条目：compose 从 shell/env-file 取值
+        return env_values
+            .get(selector)
+            .cloned()
+            .map(|value| value.trim().to_string());
+    }
+    Some(resolved)
+}
+
+// ───────────────────────── 交付清单（DELIVERY_MANIFEST.json v1） ─────────────────────────
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryManifest {
+    pub contract_version: u32,
+    pub architecture: String,
+    #[serde(default)]
+    pub components: HashMap<String, DeliveryComponent>,
+    pub mysql: DeliveryMysql,
+    pub compose: DeliveryCompose,
+    pub release_sha256: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryComponent {
+    pub version: serde_json::Value,
+    pub image_id: String,
+    pub source: String,
+    pub target: String,
+    pub artifacts: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryMysql {
+    pub manifest: String,
+    pub files: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryCompose {
+    pub path: String,
+    pub sha256: String,
+}
+
+pub fn parse_delivery_manifest(text: &str) -> Result<DeliveryManifest> {
+    let manifest: DeliveryManifest = serde_json::from_str(text)
+        .with_context(|| "DELIVERY_MANIFEST.json is not a valid v1 document")?;
+    if manifest.contract_version != 1 {
+        bail!(
+            "unsupported DELIVERY_MANIFEST contract_version {} (supported: 1)",
+            manifest.contract_version
+        );
+    }
+    if !manifest
+        .release_sha256
+        .chars()
+        .all(|c| c.is_ascii_hexdigit())
+        || manifest.release_sha256.len() != 64
+    {
+        bail!("DELIVERY_MANIFEST release_sha256 must be a 64-char hex digest");
+    }
+    Ok(manifest)
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("cannot read file for hashing: {}", path.display()))?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// 校验交付清单与磁盘一致（同包同版证明）：Compose/MySQL 清单文件/组件产物的
+/// SHA256 必须与实际文件一致；`local_architecture` 给定时须与清单架构一致。
+pub fn verify_delivery_manifest(
+    manifest: &DeliveryManifest,
+    docker_root: &Path,
+    local_architecture: Option<&str>,
+) -> Result<()> {
+    if let Some(architecture) = local_architecture
+        && !architecture.is_empty()
+        && manifest.architecture != architecture
+    {
+        bail!(
+            "DELIVERY_MANIFEST architecture '{}' does not match this host ('{architecture}')",
+            manifest.architecture
+        );
+    }
+
+    let mut checked = 0usize;
+    let compose_path = docker_root.join(&manifest.compose.path);
+    let actual = file_sha256(&compose_path)?;
+    if actual != manifest.compose.sha256 {
+        bail!(
+            "compose {} hash mismatch: delivery manifest recorded {}, disk has {actual}",
+            compose_path.display(),
+            manifest.compose.sha256
+        );
+    }
+    checked += 1;
+
+    for (path, expected) in &manifest.mysql.files {
+        let actual = file_sha256(&docker_root.join(path))?;
+        if actual != *expected {
+            bail!(
+                "mysql file {path} hash mismatch: delivery manifest recorded {expected}, disk has {actual}"
+            );
+        }
+        checked += 1;
+    }
+
+    for component in manifest.components.values() {
+        for (path, expected) in &component.artifacts {
+            let full = docker_root.join(path);
+            if !full.is_file() || std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0) == 0 {
+                bail!(
+                    "component artifact {path} recorded in DELIVERY_MANIFEST is missing or empty"
+                );
+            }
+            let actual = file_sha256(&full)?;
+            if actual != *expected {
+                bail!(
+                    "component artifact {path} hash mismatch: delivery manifest recorded {expected}, disk has {actual}"
+                );
+            }
+            checked += 1;
+        }
+    }
+
+    // release_sha256：按构建侧同样的规范形（键排序、紧凑分隔、UTF-8 直通）重算
+    let payload = serde_json::to_value(DeliveryPayload {
+        contract_version: manifest.contract_version,
+        architecture: &manifest.architecture,
+        components: &manifest.components,
+        mysql: &manifest.mysql,
+        compose: &manifest.compose,
+    })
+    .with_context(|| "cannot re-serialize delivery manifest")?;
+    let canonical = canonical_json_string(&payload);
+    let recomputed = sha256_hex(canonical.as_bytes());
+    if recomputed != manifest.release_sha256 {
+        bail!(
+            "DELIVERY_MANIFEST release_sha256 mismatch: recorded {}, recomputed {recomputed} \
+             (staged files do not form the declared release)",
+            manifest.release_sha256
+        );
+    }
+
+    info!(
+        files_checked = checked,
+        "Delivery manifest verified against disk"
+    );
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct DeliveryPayload<'a> {
+    contract_version: u32,
+    architecture: &'a str,
+    components: &'a HashMap<String, DeliveryComponent>,
+    mysql: &'a DeliveryMysql,
+    compose: &'a DeliveryCompose,
+}
+
+/// Python `json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`
+/// 的等价规范形（用于 release_sha256 复算；键按码点排序，字符串 UTF-8 直通）
+fn canonical_json_string(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    canonical_json(value, &mut out);
+    out
+}
+
+fn canonical_json(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (index, key) in keys.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                canonical_json(&serde_json::Value::String((*key).clone()), out);
+                out.push(':');
+                let value = map.get(key.as_str()).unwrap_or(&serde_json::Value::Null);
+                canonical_json(value, out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        serde_json::Value::String(text) => {
+            let encoded =
+                serde_json::to_string(&serde_json::Value::String(text.clone())).unwrap_or_default();
+            out.push_str(&encoded);
+        }
+        other => {
+            let encoded = serde_json::to_string(other).unwrap_or_default();
+            out.push_str(&encoded);
+        }
+    }
+}
+
+// ───────────────────────── 挂载驱动的组件产物校验 ─────────────────────────
+
+/// 收集 compose 全部 bind 挂载的宿主相对路径（相对 docker/；支持长/短语法）
+pub fn collect_bind_mount_sources(compose_text: &str) -> Result<Vec<String>> {
+    let compose: serde_yaml::Value = serde_yaml::from_str(compose_text)
+        .with_context(|| "cannot parse compose YAML for bind mounts")?;
+    let mut sources = Vec::new();
+    let services = compose
+        .get("services")
+        .and_then(|services| services.as_mapping())
+        .ok_or_else(|| anyhow!("compose has no services"))?;
+    for service in services.values() {
+        let Some(volumes) = service.get("volumes") else {
+            continue;
+        };
+        if let Some(entries) = volumes.as_sequence() {
+            for entry in entries {
+                match entry {
+                    serde_yaml::Value::String(short) => {
+                        // 短语法 `source:target[:mode]`，只接受显式相对 bind 源（./ 或 ../）
+                        let source = short.split(':').next().unwrap_or(short);
+                        if source.starts_with("./") || source.starts_with("../") {
+                            sources.push(normalize_mount_source(source));
+                        }
+                    }
+                    serde_yaml::Value::Mapping(long) => {
+                        let bind = long
+                            .get(serde_yaml::Value::String("type".to_string()))
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|kind| kind == "bind");
+                        if !bind {
+                            continue;
+                        }
+                        if let Some(source) = long
+                            .get(serde_yaml::Value::String("source".to_string()))
+                            .and_then(|value| value.as_str())
+                        {
+                            sources.push(normalize_mount_source(source));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    sources.sort();
+    sources.dedup();
+    Ok(sources)
+}
+
+fn normalize_mount_source(source: &str) -> String {
+    let normalized = source.strip_prefix("./").unwrap_or(source);
+    normalized
+        .strip_prefix("docker/")
+        .unwrap_or(normalized)
+        .to_string()
+}
+
+/// 挂载驱动的组件产物完整性：
+/// - 引用组件目录（im-app/、repo-collab-app/）的每个挂载源必须实际存在且非空
+///   （启用服务缺整个目录也会在此失败）；
+/// - 有交付清单时叠加 hash 校验（verify_delivery_manifest）；
+/// - 无交付清单（legacy 包）退回启发式：目录存在 → 双 jar / dist 非空。
+pub fn validate_component_artifacts(
+    docker_dir: &Path,
+    compose_text: &str,
+    delivery: Option<&DeliveryManifest>,
+) -> Result<()> {
+    let component_roots: Vec<String> = delivery
+        .map(|manifest| {
+            let mut roots: Vec<String> = manifest
+                .components
+                .values()
+                .flat_map(|component| {
+                    component
+                        .artifacts
+                        .keys()
+                        .map(|path| path.split('/').next().unwrap_or(path).to_string())
+                })
+                .collect();
+            roots.sort();
+            roots.dedup();
+            roots
+        })
+        .unwrap_or_else(|| vec!["im-app".to_string(), "repo-collab-app".to_string()]);
+
+    let mounts = collect_bind_mount_sources(compose_text)?;
+    for source in &mounts {
+        let in_component = component_roots
+            .iter()
+            .any(|root| source == root || source.starts_with(&format!("{root}/")));
+        if !in_component {
+            continue;
+        }
+        let full = docker_dir.join(source);
+        let present = if full.is_dir() {
+            full.read_dir()
+                .map(|entries| entries.flatten().next().is_some())
+                .unwrap_or(false)
+        } else {
+            full.is_file()
+                && std::fs::metadata(&full)
+                    .map(|meta| meta.len() > 0)
+                    .unwrap_or(false)
+        };
+        if !present {
+            bail!(
+                "compose mounts '{source}' but the path is missing or empty under {} \
+                 (component artifacts must be complete before services start)",
+                docker_dir.display()
+            );
+        }
+    }
+
+    if let Some(delivery) = delivery {
+        verify_delivery_manifest(delivery, docker_dir, None)?;
+        return Ok(());
+    }
+
+    // legacy 启发式
+    validate_host_artifacts(docker_dir)
+}
+
+// ───────────────────────── 备份/回滚兼容预检 ─────────────────────────
+
+/// 恢复旧备份前的组件兼容检查：当前 Compose 引用的组件产物目录（im-app、
+/// repo-collab-app 等 bind 挂载）必须存在于备份归档中。旧备份早于组件引入时，
+/// 恢复流程会清理这些目录却保留引用它们的新 Compose，留下不完整部署——
+/// 必须在任何破坏性清理之前失败，而不是假称旧备份包含旧 Compose。
+pub fn verify_backup_component_compatibility(
+    backup_archive: &Path,
+    docker_dir: &Path,
+) -> Result<()> {
+    let Ok(compose_text) = std::fs::read_to_string(docker_dir.join("docker-compose.yml")) else {
+        return Ok(());
+    };
+    let mounts = collect_bind_mount_sources(&compose_text)?;
+    let component_roots = ["im-app", "repo-collab-app"];
+    let required: Vec<String> = mounts
+        .into_iter()
+        .filter(|source| {
+            component_roots
+                .iter()
+                .any(|root| source == root || source.starts_with(&format!("{root}/")))
+        })
+        .collect();
+    if required.is_empty() {
+        return Ok(());
+    }
+
+    // 备份归档（tar.gz）一级目录集合
+    let file = std::fs::File::open(backup_archive)
+        .with_context(|| format!("cannot open backup archive: {}", backup_archive.display()))?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let mut archived_roots: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in archive.entries()? {
+        let entry = entry
+            .with_context(|| format!("cannot read backup archive: {}", backup_archive.display()))?;
+        if let Some(root) = entry.path()?.to_string_lossy().split('/').next() {
+            archived_roots.insert(root.to_string());
+        }
+    }
+
+    for source in &required {
+        let root = source.split('/').next().unwrap_or(source);
+        if !archived_roots.contains(root) {
+            bail!(
+                "current compose mounts '{source}' but backup {} predates these components; \
+                 restoring it would delete them while keeping the referencing compose. \
+                 Restore a matching-era full package instead, or remove the component services first",
+                backup_archive.display()
+            );
+        }
+    }
+    Ok(())
 }

@@ -577,38 +577,9 @@ pub async fn extract_docker_service_with_upgrade_strategy(
     upgrade_strategy: UpgradeStrategy,
 ) -> Result<()> {
     //区分升级策略,来进行解压
-    let file_zip: PathBuf = match &upgrade_strategy {
-        UpgradeStrategy::FullUpgrade {
-            target_version,
-            download_type,
-            ..
-        } => {
-            // 强制升级策略，直接解压并覆盖现有文件
-            info!("📦 Starting Docker service package extraction...");
-
-            let base_version = target_version.base_version_string();
-
-            app.config.get_version_download_file_path(
-                &base_version,
-                &download_type.to_string(),
-                None,
-            )?
-        }
-        UpgradeStrategy::PatchUpgrade { target_version, .. } => {
-            //增量升级
-            let base_version = target_version.base_version_string();
-            let full_version = target_version.to_string();
-
-            app.config.get_version_download_file_path(
-                &base_version,
-                &full_version.to_string(),
-                None,
-            )?
-        }
-        UpgradeStrategy::NoUpgrade { .. } => {
-            // 无需升级
-            return Ok(());
-        }
+    let Some(file_zip) = package_path_for_strategy(app, &upgrade_strategy)? else {
+        // 无需升级
+        return Ok(());
     };
 
     info!(
@@ -621,6 +592,39 @@ pub async fn extract_docker_service_with_upgrade_strategy(
 
     info!("✅ Docker service package extraction complete");
     Ok(())
+}
+
+/// 按升级策略解析已下载包的本地路径（不触发下载）。
+/// `NoUpgrade` 返回 `None`。供停服务前的候选包预检读取少量条目使用。
+pub fn package_path_for_strategy(
+    app: &CliApp,
+    upgrade_strategy: &UpgradeStrategy,
+) -> Result<Option<PathBuf>> {
+    let file_zip: PathBuf = match upgrade_strategy {
+        UpgradeStrategy::FullUpgrade {
+            target_version,
+            download_type,
+            ..
+        } => {
+            let base_version = target_version.base_version_string();
+            app.config.get_version_download_file_path(
+                &base_version,
+                &download_type.to_string(),
+                None,
+            )?
+        }
+        UpgradeStrategy::PatchUpgrade { target_version, .. } => {
+            let base_version = target_version.base_version_string();
+            let full_version = target_version.to_string();
+            app.config.get_version_download_file_path(
+                &base_version,
+                &full_version.to_string(),
+                None,
+            )?
+        }
+        UpgradeStrategy::NoUpgrade { .. } => return Ok(None),
+    };
+    Ok(Some(file_zip))
 }
 
 /// 获取系统架构信息
