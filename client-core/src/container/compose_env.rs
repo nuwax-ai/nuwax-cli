@@ -3,14 +3,35 @@
 
 use crate::container::interpolation::{MissingVariables, interpolate_env};
 use anyhow::{Result, ensure};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+type HostValueLookup<'a> = dyn Fn(&str) -> Option<String> + 'a;
 
 pub(crate) fn parse_env_values(
     source: &str,
     host_value: &impl Fn(&str) -> Option<String>,
 ) -> Result<HashMap<String, String>> {
+    Ok(parse_env_records(source, Some(host_value))?.values)
+}
+
+/// Discover real declarations without evaluating RHS interpolation. The same
+/// record reader skips multiline quoted values and retains bare declarations.
+pub(crate) fn declared_env_keys(source: &str) -> Result<HashSet<String>> {
+    Ok(parse_env_records(source, None)?.declared_keys)
+}
+
+struct ParsedEnvRecords {
+    values: HashMap<String, String>,
+    declared_keys: HashSet<String>,
+}
+
+fn parse_env_records(
+    source: &str,
+    host_value: Option<&HostValueLookup<'_>>,
+) -> Result<ParsedEnvRecords> {
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let mut values = HashMap::new();
+    let mut declared_keys = HashSet::new();
     let mut position = 0;
     let mut assignment = 0;
     while position < source.len() {
@@ -35,8 +56,9 @@ pub(crate) fn parse_env_values(
                 }),
             "Invalid Compose environment assignment {assignment}"
         );
+        declared_keys.insert(key.to_string());
         let Some(separator) = separator else {
-            if let Some(value) = host_value(key) {
+            if let Some(value) = host_value.and_then(|lookup| lookup(key)) {
                 values.insert(key.to_string(), value);
             }
             position = next_line(source, end);
@@ -48,20 +70,27 @@ pub(crate) fn parse_env_values(
         let rhs_position = rhs.as_ptr() as usize - source.as_ptr() as usize;
         let (value, literal, record_end) = parse_value(source, rhs_position)
             .map_err(|_| anyhow::anyhow!("Invalid Compose environment assignment {assignment}"))?;
-        let value = if literal {
-            value
-        } else {
-            interpolate_env(
-                &value,
-                &|name| host_value(name).or_else(|| values.get(name).cloned()),
-                MissingVariables::Empty,
-            )
-            .map_err(|_| anyhow::anyhow!("Invalid Compose environment assignment {assignment}"))?
-        };
-        values.insert(key.to_string(), value);
+        if let Some(host_value) = host_value {
+            let value = if literal {
+                value
+            } else {
+                interpolate_env(
+                    &value,
+                    &|name| host_value(name).or_else(|| values.get(name).cloned()),
+                    MissingVariables::Empty,
+                )
+                .map_err(|_| {
+                    anyhow::anyhow!("Invalid Compose environment assignment {assignment}")
+                })?
+            };
+            values.insert(key.to_string(), value);
+        }
         position = next_line(source, record_end);
     }
-    Ok(values)
+    Ok(ParsedEnvRecords {
+        values,
+        declared_keys,
+    })
 }
 
 fn line_end(source: &str, start: usize) -> usize {

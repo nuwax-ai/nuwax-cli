@@ -16,7 +16,7 @@ pub struct MountInfo {
 }
 
 // Drive-letter colons belong to a path, while later colons separate target/options.
-fn short_volume_parts(spec: &str) -> Option<(&str, &str, Option<&str>)> {
+pub(crate) fn short_volume_parts(spec: &str) -> Option<(&str, &str, Option<&str>)> {
     fn delimiter(path: &str) -> Option<usize> {
         let bytes = path.as_bytes();
         let drive_prefix = bytes.len() >= 3

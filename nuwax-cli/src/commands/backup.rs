@@ -2,11 +2,10 @@ use crate::app::CliApp;
 use crate::docker_service::DockerService;
 use anyhow::Result;
 use client_core::backup::{BackupManager, BackupOptions};
-use client_core::constants::docker;
 use client_core::database::BackupType;
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::{error, info, warn};
 
 /// JSON 格式的备份信息（用于 GUI 集成）
@@ -31,6 +30,7 @@ pub struct JsonBackupListResponse {
 
 /// 创建备份
 pub async fn run_backup(app: &CliApp) -> Result<()> {
+    let deployment_root = client_core::backup_release::deployment_root(&app.docker_manager)?;
     // 1. 检查Docker环境
     let compose_path = Path::new(&app.config.docker.compose_file);
 
@@ -181,17 +181,15 @@ pub async fn run_backup(app: &CliApp) -> Result<()> {
     info!("🔄 Starting backup creation...");
 
     // 执行需要备份的目录: data, app 及新增应用宿主产物（im-app 双 jar、repo-collab-app dist）
-    let source_paths = vec![
-        docker::get_data_dir_path(),
-        docker::get_app_dir_path(),
-        docker::get_im_app_dir_path(),
-        docker::get_repo_collab_app_dir_path(),
-    ];
+    let source_paths = ["data", "app", "im-app", "repo-collab-app"]
+        .into_iter()
+        .map(|name| deployment_root.join(name))
+        .collect();
 
     let backup_options = BackupOptions {
         backup_type: BackupType::Manual,
         service_version: app.config.get_docker_versions(),
-        work_dir: PathBuf::from("./docker"),
+        work_dir: deployment_root,
         source_paths,
         compression_level: 6, // 平衡压缩率和速度
     };
@@ -679,20 +677,24 @@ async fn run_rollback_with_exculde(
     dirs_to_exculde: &[&str],
 ) -> Result<()> {
     info!("🛡️ Using smart data rollback mode");
-    info!("   📁 Will restore: data/, app/ directories");
-    info!("   🔧 Will keep: docker-compose.yml, .env and other config files");
+    info!(
+        "   📁 Release-aware backups restore matching application files, Compose/configuration and locally available immutable runtime images"
+    );
+    info!(
+        "   🔧 User .env stays unchanged; application-only rollback requires identical saved MySQL schema/config fingerprints"
+    );
     info!(
         "   Directories not restored:{dirs}",
         dirs = format!("{:?}", dirs_to_exculde)
     );
 
     // 使用 BackupManager 的智能数据恢复功能
-    let docker_dir = std::path::Path::new("./docker");
+    let docker_dir = client_core::backup_release::deployment_root(&app.docker_manager)?;
     match app
         .backup_manager
         .restore_data_from_backup_with_exculde(
             backup_id,
-            docker_dir,
+            &docker_dir,
             auto_start_service,
             dirs_to_exculde,
         )
@@ -700,6 +702,16 @@ async fn run_rollback_with_exculde(
     {
         Ok(_) => {
             info!("✅ Smart data restore complete");
+
+            let record = app
+                .database
+                .get_backup_by_id(backup_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Restored backup record is missing"))?;
+            let mut restored_config = app.config.clone();
+            std::sync::Arc::make_mut(&mut restored_config)
+                .write_docker_versions(record.service_version);
+            restored_config.save_to_file(&app.config_path)?;
 
             // 设置正确的权限
             let mysql_data_dir = docker_dir.join("data/mysql");
@@ -720,9 +732,15 @@ async fn run_rollback_with_exculde(
             }
 
             info!("💡 Data restore info:");
-            info!("   ✅ All database data restored");
+            if !dirs_to_exculde.contains(&"data") {
+                info!("   ✅ Database data restored from the cold backup");
+            } else {
+                info!("   ✅ Current database data retained");
+            }
             info!("   ✅ All application files restored");
-            info!("   ✅ Config files kept at latest version");
+            info!(
+                "   ✅ User environment retained; release configuration restored when present in the backup"
+            );
 
             if auto_start_service {
                 info!("   ✅ Docker services auto-started");

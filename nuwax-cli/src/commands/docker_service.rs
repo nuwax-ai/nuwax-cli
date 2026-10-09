@@ -571,29 +571,6 @@ pub async fn setup_image_tags(app: &CliApp) -> Result<()> {
     Ok(())
 }
 
-/// 解压Docker服务包, 并根据升级策略进行处理
-pub async fn extract_docker_service_with_upgrade_strategy(
-    app: &CliApp,
-    upgrade_strategy: UpgradeStrategy,
-) -> Result<()> {
-    //区分升级策略,来进行解压
-    let Some(file_zip) = package_path_for_strategy(app, &upgrade_strategy)? else {
-        // 无需升级
-        return Ok(());
-    };
-
-    info!(
-        "📦 Found Docker service package: {path}",
-        path = file_zip.display()
-    );
-
-    // 使用utils中的解压函数
-    crate::utils::extract_docker_service(&file_zip, &upgrade_strategy).await?;
-
-    info!("✅ Docker service package extraction complete");
-    Ok(())
-}
-
 /// 按升级策略解析已下载包的本地路径（不触发下载）。
 /// `NoUpgrade` 返回 `None`。供停服务前的候选包预检读取少量条目使用。
 pub fn package_path_for_strategy(

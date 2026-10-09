@@ -14,6 +14,36 @@ pub(crate) fn interpolate_env(
     lookup: &impl Fn(&str) -> Option<String>,
     missing: MissingVariables,
 ) -> Result<String> {
+    interpolate_env_with_required(input, lookup, missing, &mut RequiredPolicy::Fail)
+}
+
+/// Collect only required references evaluated by Compose's interpolation rules.
+/// Escaped dollars and unselected default/alternate words are never inspected.
+pub(crate) fn missing_required_variables(
+    input: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Vec<String>> {
+    let mut keys = Vec::new();
+    interpolate_env_with_required(
+        input,
+        lookup,
+        MissingVariables::Empty,
+        &mut RequiredPolicy::Collect(&mut keys),
+    )?;
+    Ok(keys)
+}
+
+enum RequiredPolicy<'a> {
+    Fail,
+    Collect(&'a mut Vec<String>),
+}
+
+fn interpolate_env_with_required(
+    input: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
+    missing: MissingVariables,
+    required: &mut RequiredPolicy<'_>,
+) -> Result<String> {
     let mut output = String::with_capacity(input.len());
     let mut position = 0;
     while position < input.len() {
@@ -23,7 +53,7 @@ pub(crate) fn interpolate_env(
             position += 2;
         } else if remainder.starts_with('$') {
             if let Some((reference, end)) = parse_reference(input, position)? {
-                output.push_str(&resolve(reference, lookup, missing)?);
+                output.push_str(&resolve(reference, lookup, missing, required)?);
                 position = end;
             } else {
                 output.push('$');
@@ -154,6 +184,7 @@ fn resolve(
     reference: Reference<'_>,
     lookup: &impl Fn(&str) -> Option<String>,
     missing: MissingVariables,
+    required: &mut RequiredPolicy<'_>,
 ) -> Result<String> {
     let value = lookup(reference.name);
     match reference.operation {
@@ -164,7 +195,7 @@ fn resolve(
         },
         Operation::Default { word, empty } => {
             if value.as_ref().is_none_or(|value| empty && value.is_empty()) {
-                interpolate_env(word, lookup, missing)
+                interpolate_env_with_required(word, lookup, missing, required)
             } else {
                 Ok(value.unwrap_or_default())
             }
@@ -174,17 +205,20 @@ fn resolve(
                 .as_ref()
                 .is_some_and(|value| !empty || !value.is_empty())
             {
-                interpolate_env(word, lookup, missing)
+                interpolate_env_with_required(word, lookup, missing, required)
             } else {
                 Ok(String::new())
             }
         }
         Operation::Required { empty } => {
             if value.as_ref().is_none_or(|value| empty && value.is_empty()) {
-                bail!(
-                    "Required Compose environment variable is missing or empty: {}",
-                    reference.name
-                );
+                match required {
+                    RequiredPolicy::Fail => bail!(
+                        "Required Compose environment variable is missing or empty: {}",
+                        reference.name
+                    ),
+                    RequiredPolicy::Collect(keys) => keys.push(reference.name.to_string()),
+                }
             }
             Ok(value.unwrap_or_default())
         }

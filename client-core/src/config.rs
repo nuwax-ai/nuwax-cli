@@ -344,6 +344,10 @@ impl AppConfig {
         TEMPLATE
             .replace("{docker_service_version}", &self.get_docker_versions())
             .replace("{compose_file}", &compose_file)
+            .replace(
+                "{env_file}",
+                &toml::Value::String(self.docker.env_file.clone()).to_string(),
+            )
             .replace("{backup_storage_dir}", &backup_storage_dir)
             .replace("{cache_dir}", &cache_dir)
             .replace("{download_dir}", &download_dir)
@@ -461,6 +465,22 @@ mod tests {
     use super::*;
     use std::fs::File;
     use tempfile::TempDir;
+
+    #[test]
+    fn selected_env_path_survives_version_save_and_reload() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.toml");
+        for selected in ["docker/secrets/operator.env", r"C:\deployment\operator.env"] {
+            let mut config = AppConfig::default();
+            config.docker.env_file = selected.to_string();
+            config.write_docker_versions("9.0.2.0".to_string());
+            config.save_to_file(&path)?;
+            let restored = AppConfig::load_from_file(&path)?;
+            assert_eq!(restored.docker.env_file, selected);
+            assert_eq!(restored.get_docker_versions(), "9.0.2.0");
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_version_config_new() {

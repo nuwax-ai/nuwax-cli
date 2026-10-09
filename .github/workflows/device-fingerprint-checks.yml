@@ -8,6 +8,12 @@ name: Device fingerprint checks
       - 'client-core/src/container/**'
       - 'client-core/src/constants.rs'
       - 'client-core/src/mysql_executor.rs'
+      - 'client-core/src/mysql_manifest.rs'
+      - 'client-core/src/backup.rs'
+      - 'client-core/src/backup_release.rs'
+      - 'client-core/src/config.rs'
+      - 'client-core/templates/config.toml.template'
+      - 'client-core/tests/fixtures/**'
       - 'nuwax-cli/src/utils/**'
       - 'nuwax-cli/src/commands/docker_service.rs'
       - 'nuwax-cli/src/commands/auto_upgrade_deploy.rs'
@@ -22,6 +28,12 @@ name: Device fingerprint checks
       - 'client-core/src/container/**'
       - 'client-core/src/constants.rs'
       - 'client-core/src/mysql_executor.rs'
+      - 'client-core/src/mysql_manifest.rs'
+      - 'client-core/src/backup.rs'
+      - 'client-core/src/backup_release.rs'
+      - 'client-core/src/config.rs'
+      - 'client-core/templates/config.toml.template'
+      - 'client-core/tests/fixtures/**'
       - 'nuwax-cli/src/utils/**'
       - 'nuwax-cli/src/commands/docker_service.rs'
       - 'nuwax-cli/src/commands/auto_upgrade_deploy.rs'
@@ -83,6 +95,8 @@ jobs:
         run: cargo test --locked -p client-core isolated_compose_environment_tests
       - name: Test configured deployment paths
         run: cargo test --locked -p nuwax-cli custom_deployment_paths_tests
+      - name: Test selected environment path persistence
+        run: cargo test --locked -p client-core --lib selected_env_path_survives_version_save_and_reload
       - name: Test cross-platform path roots and parents
         run: cargo test --locked -p client-core container::path_utils::tests
       - name: Test short and long Compose mount sources
@@ -95,3 +109,13 @@ jobs:
         run: cargo test --locked -p client-core container::interpolation::tests
       - name: Test Compose environment file syntax
         run: cargo test --locked -p client-core container::config::compose_env::tests
+      - name: Test deployment preflight and MySQL delivery contracts
+        run: |
+          cargo test --locked -p client-core --lib container::preflight::tests
+          cargo test --locked -p client-core --lib mysql_manifest::tests
+      - name: Test release-consistent backup and rollback
+        run: cargo test --locked -p client-core --lib release_snapshot_tests
+      - name: Test package application and environment preservation
+        run: |
+          cargo test --locked -p nuwax-cli --bin nuwax-cli utils::env_merge::tests
+          cargo test --locked -p nuwax-cli --bin nuwax-cli commands::auto_upgrade_deploy::tests -- --test-threads=1

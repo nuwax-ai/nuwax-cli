@@ -35,18 +35,150 @@ fn create_docker_manager(
     docker_service::select_docker_manager(configured, config_file.clone(), project_name.clone())
 }
 
+/// A package root is independent of the location of the operator's secrets file.
+/// Archive extraction currently supports the canonical package compose only;
+/// reject unsupported overrides before stopping or replacing any deployment.
+struct DeploymentContext {
+    manager: Arc<DockerManager>,
+    package_root: PathBuf,
+}
+
+impl DeploymentContext {
+    fn new(
+        configured: &Arc<DockerManager>,
+        config_file: &Option<PathBuf>,
+        project_name: &Option<String>,
+    ) -> Result<Self> {
+        let manager = create_docker_manager(configured, config_file, project_name)?;
+        let package_root = absolute_deployment_path(Path::new("docker"))?;
+        Self::validate_paths(
+            manager.get_compose_file(),
+            manager.get_env_file(),
+            &package_root,
+        )?;
+        Ok(Self {
+            manager,
+            package_root,
+        })
+    }
+
+    fn validate_paths(compose: &Path, env: &Path, package_root: &Path) -> Result<()> {
+        if absolute_deployment_path(compose)? != package_root.join("docker-compose.yml") {
+            anyhow::bail!(
+                "Automatic package deployment only supports {}/docker-compose.yml; custom Compose overrides cannot safely be applied by this package extractor",
+                package_root.display()
+            );
+        }
+        if absolute_deployment_path(env)? == package_root.join("docker-compose.yml") {
+            anyhow::bail!("The selected environment file must not be the package Compose file");
+        }
+        Ok(())
+    }
+}
+
+fn absolute_deployment_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+/// A directory move invalidates aliases whose link or resolved target is inside
+/// the package root. System aliases above that root (such as /var) remain valid.
+fn validate_offline_env_aliases(env_path: &Path, package_root: &Path) -> Result<()> {
+    let root = absolute_deployment_path(package_root)?;
+    let canonical_root = if root.exists() {
+        fs::canonicalize(&root).context("Failed to resolve the offline package root")?
+    } else {
+        let parent = root
+            .parent()
+            .context("Offline package root has no parent")?;
+        let name = root
+            .file_name()
+            .context("Offline package root has no name")?;
+        fs::canonicalize(parent)
+            .context("Failed to resolve the offline package parent")?
+            .join(name)
+    };
+    let selected = absolute_deployment_path(env_path)?;
+    for ancestor in selected.ancestors() {
+        let metadata = match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).context("Failed to inspect the selected environment path");
+            }
+        };
+        if !metadata.file_type().is_symlink() {
+            continue;
+        }
+        let target = fs::canonicalize(ancestor)
+            .context("Offline environment aliases must resolve before replacing the package")?;
+        let location = match (ancestor.parent(), ancestor.file_name()) {
+            (Some(parent), Some(name)) => fs::canonicalize(parent)
+                .context("Failed to resolve an environment alias parent")?
+                .join(name),
+            _ => ancestor.to_path_buf(),
+        };
+        if location.starts_with(&canonical_root) || target.starts_with(&canonical_root) {
+            anyhow::bail!(
+                "Offline package replacement cannot preserve an environment alias stored in or targeting the package root; use a regular environment file inside docker/ or an external alias whose real target is outside docker/"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn read_package_env_defaults(path: &Path) -> Result<String> {
+    crate::utils::read_archive_entries(path, &[".env"])?
+        .remove(".env")
+        .map(String::from_utf8)
+        .transpose()
+        .context("Package .env is not valid UTF-8")
+        .map(|value| value.unwrap_or_default())
+}
+
 /// 离线完整包在停止旧服务前必须能提供全部库表模板（多库清单，Fail Fast）。
 /// 每个清单文件恰好一份、内容通过 parse_schema_template 校验（唯一 USE + 非空表集）。
 fn validate_offline_archive_sql(archive_path: &Path) -> Result<()> {
-    let expected: Vec<std::path::PathBuf> = sql::SCHEMA_SQL_FILES
-        .iter()
-        .map(|file| {
-            Path::new(file)
-                .strip_prefix("docker")
-                .unwrap_or(Path::new(file))
-                .to_path_buf()
+    let manifest_bytes =
+        crate::utils::read_archive_entries(archive_path, &["config/mysql-schema-manifest.json"])?
+            .remove("config/mysql-schema-manifest.json");
+    let manifest = manifest_bytes
+        .map(|bytes| -> Result<_> {
+            let text =
+                String::from_utf8(bytes).context("Offline schema manifest is not valid UTF-8")?;
+            client_core::mysql_manifest::parse_schema_manifest(&text)
         })
-        .collect();
+        .transpose()?;
+    let expected: Vec<PathBuf> = match manifest.as_ref() {
+        Some(manifest) => manifest
+            .schemas
+            .iter()
+            .map(|schema| PathBuf::from(&schema.path))
+            .collect(),
+        None => sql::SCHEMA_SQL_FILES
+            .iter()
+            .map(|file| {
+                Path::new(file)
+                    .strip_prefix("docker")
+                    .unwrap_or(Path::new(file))
+                    .to_path_buf()
+            })
+            .collect(),
+    };
     let is_target = |path: &Path| -> Option<usize> { expected.iter().position(|e| e == path) };
 
     let mut found: Vec<Option<String>> = vec![None; expected.len()];
@@ -107,8 +239,20 @@ fn validate_offline_archive_sql(archive_path: &Path) -> Result<()> {
         let content = content.ok_or_else(|| {
             anyhow::anyhow!("Offline archive is missing {}", template_path.display())
         })?;
-        parse_schema_template(&content)
+        let template = parse_schema_template(&content)
             .with_context(|| format!("Invalid schema template {}", template_path.display()))?;
+        if let Some(manifest) = manifest.as_ref()
+            && let Some(schema) = manifest
+                .schemas
+                .iter()
+                .find(|schema| Path::new(&schema.path) == template_path.as_path())
+            && template.database != schema.database
+        {
+            anyhow::bail!(
+                "Offline schema {} USE does not match its manifest database",
+                template_path.display()
+            );
+        }
     }
     Ok(())
 }
@@ -182,19 +326,22 @@ async fn run_staged_deployment(
     frontend_port: Option<u16>,
     config_file: Option<PathBuf>,
     project_name: Option<String>,
-    is_first_deployment: bool,
+    context: &DeploymentContext,
+    had_existing_compose: bool,
     target_version: &str,
 ) -> Result<()> {
     // 部署前校验迁移计划：manifest v1（解析+结构+文件校验）或 legacy 固定清单
     // （缺文件/解析失败即 Fail Fast）；顺带收集库名供配置预检校验应用连接目标
-    let migration_plan = resolve_migration_plan(Path::new("docker"))?;
+    let migration_plan = resolve_migration_plan(&context.package_root)?;
     let (manifest, template_databases) = match &migration_plan {
         MigrationPlan::Manifest(manifest) => (Some(manifest), manifest.database_names()),
         MigrationPlan::Legacy => {
             let mut template_databases = Vec::with_capacity(sql::SCHEMA_SQL_FILES.len());
             for template_path in sql::SCHEMA_SQL_FILES {
-                let path = Path::new(template_path);
-                let content = fs::read_to_string(path).with_context(|| {
+                let path = context
+                    .package_root
+                    .join(template_path.trim_start_matches("docker/"));
+                let content = fs::read_to_string(&path).with_context(|| {
                     format!(
                         "{}",
                         t!(
@@ -211,29 +358,32 @@ async fn run_staged_deployment(
         }
     };
 
-    let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
+    let docker_manager = &context.manager;
     docker_manager.invalidate_compose_config_cache();
 
     // C01/C03/C04: 候选 Compose + 合并后 .env 的预检（启动 mysql、修改数据库之前的最后一道闸）：
     // 必填键非空、应用连接与 manifest 逐条映射一致（legacy 则按约定键）、
     // 宿主产物完整 + 交付清单 hash（失败只报键名/库名/路径，不含任何凭据）
-    let delivery = load_delivery_manifest(Path::new("docker"))?;
-    client_core::container::preflight::preflight_deploy_config(
+    let delivery = load_delivery_manifest(&context.package_root)?;
+    client_core::container::preflight::preflight_deploy_config_at(
         docker_manager.get_compose_file(),
         docker_manager.get_env_file(),
+        &context.package_root,
         &template_databases,
         manifest.map(std::convert::AsRef::as_ref),
         delivery.as_ref(),
     )
     .context("Deployment configuration preflight failed")?;
     if let Some(manifest) = manifest {
-        let compose_text = fs::read_to_string(docker_manager.get_compose_file())
-            .context("Failed to read candidate compose for initdb mount checks")?;
-        client_core::container::preflight::validate_initdb_mount_contract(&compose_text, manifest)
-            .context("Candidate compose violates the initdb mount contract")?;
+        client_core::container::preflight::validate_initdb_mount_contract_at(
+            docker_manager.get_compose_file(),
+            &context.package_root,
+            manifest,
+        )
+        .context("Candidate compose violates the initdb mount contract")?;
     }
 
-    if !is_first_deployment {
+    if had_existing_compose {
         // stop_docker_services_and_wait 在没有运行容器时可能跳过 down；这里清理旧的已停止容器。
         docker_manager
             .stop_services()
@@ -258,14 +408,11 @@ async fn run_staged_deployment(
     )
     .await?;
 
-    if is_first_deployment {
-        info!("🆕 MySQL initialization completed; Live Diff is not required");
-    } else {
-        info!(
-            "🔄 MySQL is connectable; applying live schema differences before applications start"
-        );
-        execute_sql_diff_upgrade(&executor).await?;
-    }
+    // MySQL decides whether initdb/seeds apply from the actual data volume.
+    // Once it is connectable, always perform idempotent bootstrap/Live Diff:
+    // an empty host directory or a custom data mount cannot justify skipping it.
+    info!("🔄 MySQL is connectable; applying live schema differences before applications start");
+    execute_sql_diff_upgrade(&executor, &context.package_root).await?;
 
     let startup_layers = docker_manager.get_compose_startup_layers(&mysql_stage)?;
     for layer in startup_layers {
@@ -296,7 +443,7 @@ async fn run_staged_deployment(
             Duration::from_secs(client_core::constants::timeout::HEALTH_CHECK_TIMEOUT),
         )
         .await?;
-    let health_checker = HealthChecker::new(docker_manager);
+    let health_checker = HealthChecker::new(docker_manager.clone());
     health_checker
         .wait_for_services_ready(Duration::from_secs(
             client_core::constants::timeout::HEALTH_CHECK_INTERVAL,
@@ -432,6 +579,11 @@ fn preflight_candidate_package_at(
     is_patch: bool,
     user_env_path: &Path,
 ) -> Result<()> {
+    if is_patch && archive::detect_format_by_magic(archive_path)? != ArchiveFormat::Zip {
+        anyhow::bail!(
+            "Incremental package application requires ZIP; use a full package for TAR.GZ archives"
+        );
+    }
     let base_names = [
         "docker-compose.yml",
         ".env",
@@ -454,21 +606,34 @@ fn preflight_candidate_package_at(
 
     // 合并 env：用户现值完全保留 + 包内默认补键；解析走与运行时相同的
     // Compose env-file 解析器（引号/行内注释/插值-未定义为空/优先级，F03）
-    let user_env = fs::read_to_string(user_env_path).unwrap_or_default();
+    let user_env = match fs::read_to_string(user_env_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to read selected environment file {}",
+                    user_env_path.display()
+                )
+            });
+        }
+    };
     let package_env = entries
         .get(".env")
-        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .map(|bytes| String::from_utf8(bytes.clone()))
+        .transpose()
+        .context("Candidate package .env is not valid UTF-8")?
         .unwrap_or_default();
     let values = client_core::container::preflight::compose_env_values_from_text(
-        &crate::utils::env_merge::merge_env_contents(&user_env, &package_env),
+        &crate::utils::env_merge::merge_env_contents(&user_env, &package_env)?,
     )?;
 
     let missing =
-        client_core::container::preflight::missing_required_env_keys(&compose_text, &values);
+        client_core::container::preflight::missing_required_env_keys(&compose_text, &values)?;
     if !missing.is_empty() {
         return Err(anyhow::anyhow!(
             "candidate package requires environment keys that are missing or empty: {missing:?}; \
-             define them in docker/.env before upgrading"
+             define them in the selected environment file before upgrading"
         ));
     }
 
@@ -629,20 +794,24 @@ fn preflight_candidate_package(
 /// 停止旧服务前的当前配置预检（C01）：必填键、库目标/连接映射、宿主产物完整性。
 /// 路径来自最终选定的 DockerManager（--config / 项目配置覆盖生效，F06）。
 /// 候选新包的同一预检在解压后、修改数据库前由 `run_staged_deployment` 再执行一次。
-fn preflight_current_config(compose_path: &Path, env_path: &Path) -> Result<()> {
-    if !compose_path.is_file() || !env_path.is_file() {
+fn preflight_current_config(
+    compose_path: &Path,
+    env_path: &Path,
+    docker_root: &Path,
+) -> Result<()> {
+    if !compose_path.is_file() {
         return Ok(());
     }
-    let docker_root = env_path.parent().unwrap_or(Path::new("docker"));
     let plan = resolve_migration_plan(docker_root)?;
     let (manifest, template_databases) = match &plan {
         MigrationPlan::Manifest(manifest) => (Some(manifest), manifest.database_names()),
         MigrationPlan::Legacy => (None, collect_existing_template_databases(docker_root)),
     };
     let delivery = load_delivery_manifest(docker_root)?;
-    client_core::container::preflight::preflight_deploy_config(
+    client_core::container::preflight::preflight_deploy_config_at(
         compose_path,
         env_path,
+        docker_root,
         &template_databases,
         manifest.map(std::convert::AsRef::as_ref),
         delivery.as_ref(),
@@ -664,88 +833,77 @@ fn collect_existing_template_databases(docker_root: &Path) -> Vec<String> {
         .collect()
 }
 
-/// 在线升级（full/patch）期间的 `.env` 保留守卫（C01）。
-///
-/// full 清理不保护普通文件、patch 变更清单可能包含 `.env`——两者都会丢用户配置。
-/// 守卫在清理前把 `docker/.env` 复制到 docker/ 之外的临时位置：
-/// - 解压成功 → 与包内 `.env` 合并（保留用户值、仅补新包新增键，复用离线路径的
-///   `merge_preserved_env_file`：原子写入、保留权限、失败不污染）；
-/// - 包内没有 `.env` → 原样还原；
-/// - 解压失败 → 原样还原，保证失败不污染。
+/// Immutable in-memory snapshot of the selected operator environment.
+/// Capture before stopping services; apply package defaults or restore the
+/// original contents atomically to the same file, without secrets backup files.
 struct OnlineEnvPreserve {
-    preserve_path: PathBuf,
-    active: bool,
+    env_path: PathBuf,
+    preserved: Option<String>,
+    permissions: Option<fs::Permissions>,
 }
 
 impl OnlineEnvPreserve {
-    fn capture(docker_dir: &Path) -> Result<Self> {
-        let env_path = docker_dir.join(".env");
-        if !env_path.is_file() {
-            return Ok(Self {
-                preserve_path: PathBuf::new(),
-                active: false,
-            });
-        }
-        let preserve_path = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(format!(".nuwax-env-preserve-{}", std::process::id()));
-        Self::capture_at(&env_path, preserve_path)
-    }
-
-    fn capture_at(env_path: &Path, preserve_path: PathBuf) -> Result<Self> {
-        if !env_path.is_file() {
-            return Ok(Self {
-                preserve_path: PathBuf::new(),
-                active: false,
-            });
-        }
-        fs::copy(env_path, &preserve_path).with_context(|| {
-            format!(
-                "Failed to preserve existing .env before upgrade: {}",
-                env_path.display()
-            )
-        })?;
-        info!(
-            "🛡️ Preserved existing .env before package cleanup: {path}",
-            path = preserve_path.display()
-        );
+    fn capture(env_path: &Path) -> Result<Self> {
+        let preserved = match fs::read_to_string(env_path) {
+            Ok(contents) => Some(contents),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && fs::symlink_metadata(env_path).is_err() =>
+            {
+                None
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Failed to preserve selected environment file {}",
+                        env_path.display()
+                    )
+                });
+            }
+        };
+        let permissions = if preserved.is_some() {
+            Some(fs::metadata(env_path)?.permissions())
+        } else {
+            None
+        };
         Ok(Self {
-            preserve_path,
-            active: true,
+            env_path: env_path.to_path_buf(),
+            preserved,
+            permissions,
         })
     }
 
-    fn merge_into(&self, docker_dir: &Path) -> Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-        let env_path = docker_dir.join(".env");
-        if env_path.is_file() {
-            crate::utils::env_merge::merge_preserved_env_file(&self.preserve_path, &env_path)?;
-            info!("🛡️ Preserved existing .env values and added missing package defaults");
-        } else {
-            fs::create_dir_all(docker_dir).context("Failed to recreate docker directory")?;
-            fs::rename(&self.preserve_path, &env_path)
-                .context("Failed to restore preserved .env")?;
-            info!("🛡️ Restored preserved .env (package shipped none)");
+    fn merge_defaults(&self, defaults: &str) -> Result<()> {
+        let merged = crate::utils::env_merge::merge_env_contents(
+            self.preserved.as_deref().unwrap_or_default(),
+            defaults,
+        )?;
+        crate::utils::env_merge::write_env_contents(
+            &self.env_path,
+            &merged,
+            self.permissions.clone(),
+        )
+    }
+
+    fn restore(&self) -> Result<()> {
+        if let Some(contents) = self.preserved.as_ref() {
+            crate::utils::env_merge::write_env_contents(
+                &self.env_path,
+                contents,
+                self.permissions.clone(),
+            )?;
         }
         Ok(())
     }
+}
 
-    /// 解压失败时原样还原用户 `.env`（覆盖包内半解压产物）
-    fn restore(&self, docker_dir: &Path) -> Result<()> {
-        if !self.active || !self.preserve_path.is_file() {
-            return Ok(());
-        }
-        let env_path = docker_dir.join(".env");
-        if env_path.exists() {
-            fs::remove_file(&env_path).context("Failed to remove partial package .env")?;
-        } else {
-            fs::create_dir_all(docker_dir).context("Failed to recreate docker directory")?;
-        }
-        fs::rename(&self.preserve_path, &env_path).context("Failed to restore preserved .env")?;
-        info!("🛡️ Restored user .env after failed extraction");
-        Ok(())
+fn env_snapshot_for_strategy(
+    strategy: &UpgradeStrategy,
+    env_path: &Path,
+) -> Result<Option<OnlineEnvPreserve>> {
+    match strategy {
+        UpgradeStrategy::NoUpgrade { .. } => Ok(None),
+        _ => OnlineEnvPreserve::capture(env_path).map(Some),
     }
 }
 
@@ -805,6 +963,9 @@ pub async fn run_auto_upgrade_deploy(
     // 注意：CLI版本检查已经在 main.rs 中优先处理，这里不再重复检查
     info!("✅ CLI version pre-check complete, starting upgrade deployment");
 
+    let context = DeploymentContext::new(&app.docker_manager, &config_file, &project_name)?;
+    let docker_manager = &context.manager;
+
     // 1. 获取最新版本信息并下载
     info!("📥 Downloading the latest Docker service version...");
 
@@ -820,28 +981,23 @@ pub async fn run_auto_upgrade_deploy(
         | UpgradeStrategy::NoUpgrade { target_version } => target_version.to_string(),
     };
 
-    // 2. 🔍 检查部署类型：第一次部署 vs 升级部署
-    let is_first_deployment = is_first_deployment().await;
-
-    // F06：最终选定的 DockerManager（--config / 项目配置覆盖生效）——预检与
-    // 后续挂载目录检查统一使用其 compose/env 路径，不重复按默认路径取上下文
-    let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
-
-    if is_first_deployment {
-        info!("🆕 First deployment detected, using fresh initialization");
-    } else {
-        info!("🔄 Upgrade deployment detected, services will be stopped first");
-
-        // C01/P1#3/F06: 停止旧服务前先对当前配置与候选包预检（必填键/连接映射/
-        // schema 清单/交付清单/产物）；路径取自最终选定的 DockerManager，
-        // --config / 项目配置覆盖与实际部署一致（manager 已在分支外创建）
-        preflight_current_config(
-            docker_manager.get_compose_file(),
-            docker_manager.get_env_file(),
-        )?;
-        preflight_candidate_package(app, &upgrade_strategy, docker_manager.get_env_file())
-            .context("Candidate package preflight failed before stopping services")?;
-
+    let had_existing_compose = docker_manager.get_compose_file().is_file();
+    preflight_current_config(
+        docker_manager.get_compose_file(),
+        docker_manager.get_env_file(),
+        &context.package_root,
+    )?;
+    // Initial installations also validate the candidate before extraction.
+    preflight_candidate_package(app, &upgrade_strategy, docker_manager.get_env_file())
+        .context("Candidate package preflight failed before stopping services")?;
+    let package_path = docker_service::package_path_for_strategy(app, &upgrade_strategy)?;
+    let package_defaults = package_path
+        .as_deref()
+        .map(read_package_env_defaults)
+        .transpose()?
+        .unwrap_or_default();
+    let env_preserve = env_snapshot_for_strategy(&upgrade_strategy, docker_manager.get_env_file())?;
+    if had_existing_compose {
         // 3. 🛑 停止服务并等待（使用统一的公共方法）
         let stopped = docker_service::stop_docker_services_and_wait(
             app,
@@ -887,85 +1043,25 @@ pub async fn run_auto_upgrade_deploy(
     // 6. 📦 解压新的Docker服务包（在服务停止后）
     info!("📦 Extracting Docker service package...");
 
-    // C01: 清理/解压期间保留用户 .env——full 清理与 patch 变更删除都不再丢配置；
-    // 解压成功后与包内 .env 合并补键，失败时原样还原
-    let docker_dir = std::path::Path::new("docker");
-    // F02：NoUpgrade（版本未变）无新包——不清理、不捕获保存副本，直接走
-    // 分阶段重新部署（停服→原文件重启）；避免已 discard 的副本进入合并路径
-    let env_preserve = match &upgrade_strategy {
-        UpgradeStrategy::NoUpgrade { .. } => None,
-        _ => Some(OnlineEnvPreserve::capture(docker_dir)?),
-    };
-
-    // 清理现有的docker目录以避免路径冲突
-    if docker_dir.exists() {
-        // 增量升级/全量升级
-        match upgrade_strategy.clone() {
-            UpgradeStrategy::PatchUpgrade { patch_info, .. } => {
-                // 增量升级逻辑
-                let changed_files = patch_info.get_changed_files();
-                //基于 docker_dir 目录下, 清理 changed_files 的相对路径的文件/目录
-                // .env 即便出现在变更清单也只做"合并补键"，绝不删除用户配置（C01）
-
-                let remove_file_or_dir = changed_files
-                    .iter()
-                    .filter(|path| {
-                        let normalized = path.trim_start_matches("./");
-                        normalized != ".env" && normalized != "docker/.env"
-                    })
-                    .map(|path| PathBuf::from(docker_dir).join(path))
-                    .collect::<Vec<_>>();
-
-                let remove_file_or_dir: Vec<&Path> =
-                    remove_file_or_dir.iter().map(|p| p.as_path()).collect();
-                match safe_remove_file_or_dir(&remove_file_or_dir).await {
-                    Ok(_) => info!(
-                        "✅ Cleaned files/directories successfully: {files}",
-                        files = &remove_file_or_dir
-                            .iter()
-                            .map(|p| p.to_string_lossy())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    Err(e) => warn!(
-                        "⚠️ Failed to clean files/directories: {error}; continuing extraction",
-                        error = e.to_string()
-                    ),
-                }
-            }
-            UpgradeStrategy::FullUpgrade { .. } => {
-                // 全量升级逻辑
-                info!("🧹 Cleaning existing docker directory to avoid file conflicts...");
-                match safe_remove_docker_directory(docker_dir).await {
-                    Ok(_) => info!("✅ Docker directory cleanup completed"),
-                    Err(e) => {
-                        warn!(
-                            "⚠️ Failed to clean docker directory: {error}; continuing extraction",
-                            error = e.to_string()
-                        );
-                        return Err(anyhow::anyhow!(t!(
-                            "auto_upgrade_deploy.clean_docker_dir_error",
-                            error = e.to_string()
-                        )));
-                    }
-                }
-            }
-            UpgradeStrategy::NoUpgrade { .. } => {
-                //do nothing：无包可解压，docker/ 保持原样进入 run_staged_deployment
-                info!("Version unchanged, no upgrade required");
-            }
+    // Extraction is the sole owner of cleanup and protects the selected env.
+    let extraction = match package_path.as_deref() {
+        Some(path) => {
+            crate::utils::extract_docker_service_with_env(
+                path,
+                &upgrade_strategy,
+                docker_manager.get_env_file(),
+            )
+            .await
         }
-    }
-
-    // 解压新的Docker服务包（使用最新版本）
-    match docker_service::extract_docker_service_with_upgrade_strategy(app, upgrade_strategy).await
-    {
+        None => Ok(()),
+    };
+    match extraction {
         Ok(_) => {
             info!("✅ Docker service package extracted");
 
             // C01: 与包内 .env 合并（保留用户值、仅补新包新增键；NoUpgrade 无守卫）
             if let Some(env_preserve) = env_preserve.as_ref() {
-                env_preserve.merge_into(docker_dir)?;
+                env_preserve.merge_defaults(&package_defaults)?;
             }
 
             // 🔧 自动修复关键脚本文件权限
@@ -980,7 +1076,7 @@ pub async fn run_auto_upgrade_deploy(
             );
             // C01: 解压失败原样还原用户 .env，保证失败不污染
             if let Some(env_preserve) = env_preserve.as_ref()
-                && let Err(restore_error) = env_preserve.restore(docker_dir)
+                && let Err(restore_error) = env_preserve.restore()
             {
                 warn!(
                     "⚠️ Failed to restore preserved .env after extraction failure: {error}",
@@ -996,7 +1092,8 @@ pub async fn run_auto_upgrade_deploy(
         frontend_port,
         config_file,
         project_name,
-        is_first_deployment,
+        &context,
+        had_existing_compose,
         &target_version,
     )
     .await
@@ -1185,198 +1282,6 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-/// 检测是否为第一次部署
-async fn is_first_deployment() -> bool {
-    let docker_dir = std::path::Path::new("docker");
-    let docker_compose_file = docker_dir.join("docker-compose.yml");
-    let docker_data_dir = docker_dir.join("data/mysql");
-
-    // 如果docker目录不存在，肯定是第一次部署
-    if !docker_dir.exists() {
-        return true;
-    }
-
-    // 🔧 关键修复：如果docker-compose.yml文件不存在，视为首次部署
-    // 因为没有compose文件就无法管理现有服务
-    if !docker_compose_file.exists() {
-        info!("📝 docker-compose.yml not found; treated as first deployment");
-        return true;
-    }
-
-    // 如果docker/data目录不存在，也是第一次部署
-    if !docker_data_dir.exists() {
-        return true;
-    }
-
-    false
-}
-
-/// 递归复制目录
-#[allow(dead_code)]
-fn copy_dir_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if !src.exists() {
-        return Ok(());
-    }
-
-    fs::create_dir_all(dst)?;
-
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursively(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
-
-    Ok(())
-}
-
-//批量删除文件,或者目录
-async fn safe_remove_file_or_dir(paths: &[&Path]) -> Result<()> {
-    for path in paths {
-        if !path.exists() {
-            continue;
-        }
-
-        if path.is_file() {
-            fs::remove_file(path)?;
-        } else if path.is_dir() {
-            safe_remove_docker_directory(path).await?;
-        }
-    }
-    Ok(())
-}
-
-/// 安全地删除目录，处理"Directory not empty"错误（保留upload目录）
-async fn safe_remove_docker_directory(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let mut attempts = 0;
-    const MAX_ATTEMPTS: usize = sql::MAX_CLEANUP_ATTEMPTS;
-
-    while attempts < MAX_ATTEMPTS {
-        attempts += 1;
-
-        // 首先尝试安全删除（保留upload目录）
-        if let Err(e) = force_cleanup_directory(path).await {
-            warn!(
-                "⚠️ Safe directory deletion failed (attempt {attempts}/{max}): {error}",
-                attempts = attempts,
-                max = MAX_ATTEMPTS,
-                error = e.to_string()
-            );
-
-            if attempts >= MAX_ATTEMPTS {
-                return Err(anyhow::anyhow!(t!(
-                    "auto_upgrade_deploy.safe_delete_max_attempts",
-                    max = MAX_ATTEMPTS,
-                    path = path.display(),
-                    error = e.to_string()
-                )));
-            }
-        } else {
-            info!("✅ Directory safely deleted: {path}", path = path.display());
-            return Ok(());
-        }
-    }
-
-    unreachable!()
-}
-
-/// 强制清理目录内容（保留upload目录）
-async fn force_cleanup_directory(path: &Path) -> Result<()> {
-    info!(path = %path.display(), "🧹 Attempting forced cleanup of directory contents");
-
-    if !path.exists() {
-        return Ok(());
-    }
-
-    // 收集清理失败的文件列表
-    let mut failed_items: Vec<(PathBuf, String)> = Vec::new();
-    let mut skipped_count = 0;
-    let mut deleted_count = 0;
-
-    // 递归遍历并删除文件
-    match std::fs::read_dir(path) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                let entry_path = entry.path();
-                let file_name = entry.file_name();
-                let file_name_str = file_name.to_string_lossy();
-
-                // 排除指定目录，不进行删除
-                if client_core::constants::docker::EXCLUDE_DIRS.contains(&file_name_str.as_ref())
-                    && entry_path.is_dir()
-                {
-                    info!(path = %entry_path.display(), "📁 Skip protected directory");
-                    skipped_count += 1;
-                    continue;
-                }
-
-                if entry_path.is_dir() {
-                    // 递归删除子目录
-                    if let Err(e) = Box::pin(force_cleanup_directory(&entry_path)).await {
-                        warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete subdirectory");
-                        failed_items.push((entry_path.clone(), e.to_string()));
-                    }
-
-                    // 尝试删除空目录
-                    if let Err(e) = std::fs::remove_dir(&entry_path) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete empty directory");
-                            failed_items.push((entry_path, e.to_string()));
-                        }
-                    } else {
-                        deleted_count += 1;
-                    }
-                } else if let Err(e) = std::fs::remove_file(&entry_path) {
-                    warn!(path = %entry_path.display(), error = %e, "📄 Failed to delete file");
-                    failed_items.push((entry_path, e.to_string()));
-                } else {
-                    deleted_count += 1;
-                }
-            }
-        }
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "📂 Failed to read directory content");
-            return Err(e.into());
-        }
-    }
-
-    // 报告清理结果
-    if !failed_items.is_empty() {
-        warn!(
-            failed_count = failed_items.len(),
-            deleted_count = deleted_count,
-            skipped_count = skipped_count,
-            "⚠️ Directory cleanup completed, but some parts failed"
-        );
-        for (path, error) in failed_items.iter().take(5) {
-            warn!("  - {}: {}", path.display(), error);
-        }
-        if failed_items.len() > 5 {
-            warn!(
-                "  ... and {count} more failed items",
-                count = failed_items.len() - 5
-            );
-        }
-    } else {
-        info!(
-            deleted_count = deleted_count,
-            skipped_count = skipped_count,
-            "✅ Directory cleanup successful"
-        );
-    }
-
-    Ok(())
-}
-
 /// 归档差异SQL文件
 ///
 /// # 参数
@@ -1422,11 +1327,12 @@ async fn archive_diff_sql_file(diff_sql_path: &Path, status: &str) -> Result<()>
 async fn legacy_live_diff(
     temp_sql_dir: &Path,
     executor: &MySqlExecutor,
+    package_root: &Path,
 ) -> Result<client_core::sql_diff::MultiDbDiffResult> {
     let mut templates = Vec::with_capacity(sql::SCHEMA_SQL_FILES.len());
     for template_path in sql::SCHEMA_SQL_FILES {
-        let source_path = Path::new(template_path);
-        let content = fs::read_to_string(source_path).with_context(|| {
+        let source_path = package_root.join(template_path.trim_start_matches("docker/"));
+        let content = fs::read_to_string(&source_path).with_context(|| {
             format!(
                 "{}",
                 t!(
@@ -1455,7 +1361,7 @@ async fn legacy_live_diff(
         if new_sql_path.exists() {
             fs::remove_file(&new_sql_path)?;
         }
-        fs::copy(source_path, &new_sql_path).context(t!(
+        fs::copy(&source_path, &new_sql_path).context(t!(
             "auto_upgrade_deploy.copy_sql_failed",
             src = source_path.display(),
             dst = new_sql_path.display()
@@ -1478,7 +1384,7 @@ async fn legacy_live_diff(
     Ok(diff_result)
 }
 
-async fn execute_sql_diff_upgrade(executor: &MySqlExecutor) -> Result<()> {
+async fn execute_sql_diff_upgrade(executor: &MySqlExecutor, package_root: &Path) -> Result<()> {
     let temp_sql_dir = Path::new(sql::TEMP_SQL_DIR);
     let diff_sql_path = temp_sql_dir.join(sql::DIFF_SQL_FILE);
 
@@ -1532,12 +1438,12 @@ async fn execute_sql_diff_upgrade(executor: &MySqlExecutor) -> Result<()> {
     );
 
     // 迁移计划：manifest v1（bootstrap → 授权 → 逐库 Live Diff）或 legacy 固定清单
-    let migration_plan = resolve_migration_plan(Path::new("docker"))?;
+    let migration_plan = resolve_migration_plan(package_root)?;
     let diff_result = match &migration_plan {
         MigrationPlan::Manifest(manifest) => {
             // manifest 路径：留档各库模板副本；bootstrap/授权独立于表差异执行
             for schema in &manifest.schemas {
-                let source_path = Path::new("docker").join(&schema.path);
+                let source_path = package_root.join(&schema.path);
                 let new_sql_path = temp_sql_dir.join(format!("{}_new.sql", schema.database));
                 if new_sql_path.exists() {
                     fs::remove_file(&new_sql_path)?;
@@ -1558,13 +1464,13 @@ async fn execute_sql_diff_upgrade(executor: &MySqlExecutor) -> Result<()> {
             client_core::mysql_manifest::run_manifest_migration(
                 executor,
                 manifest,
-                Path::new("docker"),
+                package_root,
                 app_user,
             )
             .await
             .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?
         }
-        MigrationPlan::Legacy => legacy_live_diff(temp_sql_dir, executor).await?,
+        MigrationPlan::Legacy => legacy_live_diff(temp_sql_dir, executor, package_root).await?,
     };
 
     info!(description = %diff_result.description, has_executable_sql = diff_result.has_executable_sql, has_warnings = diff_result.has_warnings, "📋 Difference generation completed");
@@ -1835,6 +1741,10 @@ pub async fn run_offline_deploy(
         path = archive_path.display()
     );
 
+    let context = DeploymentContext::new(&app.docker_manager, &config_file, &project_name)?;
+    let docker_manager = &context.manager;
+    validate_offline_env_aliases(docker_manager.get_env_file(), &context.package_root)?;
+
     // 1. 验证文件存在
     if !archive_path.exists() {
         return Err(anyhow::anyhow!(
@@ -1857,24 +1767,17 @@ pub async fn run_offline_deploy(
         version = version.to_string()
     );
 
-    // 3. 检测是否首次部署（DockerManager 已提前创建：F06 路径统一）
-    let docker_manager = create_docker_manager(&app.docker_manager, &config_file, &project_name)?;
-    let is_first_deployment = is_first_deployment().await;
-
-    if is_first_deployment {
-        info!("🆕 First deployment detected, using fresh initialization");
-    } else {
-        info!("🔄 Upgrade deployment detected, services will be stopped first");
-
-        // C01/P1#3/F06: 停止旧服务前先对当前配置与离线包预检；路径取自
-        // 最终选定的 DockerManager（--config / 项目配置覆盖生效；已在分支外创建）
-        preflight_current_config(
-            docker_manager.get_compose_file(),
-            docker_manager.get_env_file(),
-        )?;
-        preflight_candidate_package_at(&archive_path, false, docker_manager.get_env_file())
-            .context("Offline package preflight failed before stopping services")?;
-
+    let had_existing_compose = docker_manager.get_compose_file().is_file();
+    preflight_current_config(
+        docker_manager.get_compose_file(),
+        docker_manager.get_env_file(),
+        &context.package_root,
+    )?;
+    preflight_candidate_package_at(&archive_path, false, docker_manager.get_env_file())
+        .context("Offline package preflight failed before stopping services")?;
+    let package_defaults = read_package_env_defaults(&archive_path)?;
+    let env_preserve = OnlineEnvPreserve::capture(docker_manager.get_env_file())?;
+    if had_existing_compose {
         // 停止服务并等待
         let stopped = docker_service::stop_docker_services_and_wait(
             app,
@@ -1915,7 +1818,7 @@ pub async fn run_offline_deploy(
     };
 
     // 直接解压本地文件。先把旧 docker 目录改名备份，解压失败时恢复。
-    let docker_dir = std::path::Path::new("docker");
+    let docker_dir = context.package_root.as_path();
     let backup_dir = create_docker_backup_path();
     let had_existing_docker_dir = docker_dir.exists();
     if had_existing_docker_dir {
@@ -1924,15 +1827,23 @@ pub async fn run_offline_deploy(
             .context("Failed to backup existing docker directory")?;
     }
 
-    if let Err(e) = crate::utils::extract_docker_service(&archive_path, &upgrade_strategy).await {
+    if let Err(e) = crate::utils::extract_docker_service_with_env(
+        &archive_path,
+        &upgrade_strategy,
+        docker_manager.get_env_file(),
+    )
+    .await
+    {
         warn!("⚠️ Extract failed, restoring previous docker directory");
         restore_docker_backup(&backup_dir, docker_dir)?;
+        env_preserve.restore()?;
         return Err(e);
     }
 
     if had_existing_docker_dir {
         restore_preserved_docker_dirs(&backup_dir, docker_dir)?;
     }
+    env_preserve.merge_defaults(&package_defaults)?;
     info!("✅ Docker service package extracted");
 
     let target_version = version.to_string();
@@ -1943,7 +1854,8 @@ pub async fn run_offline_deploy(
             frontend_port,
             config_file,
             project_name,
-            is_first_deployment,
+            &context,
+            had_existing_compose,
             &target_version,
         )
         .await
@@ -1967,9 +1879,9 @@ pub async fn run_offline_deploy(
 }
 
 #[cfg(test)]
-mod staged_deploy_tests {
+mod tests {
     use super::{OnlineEnvPreserve, restore_preserved_docker_dirs, validate_offline_archive_sql};
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use flate2::{Compression, write::GzEncoder};
     use std::{fs::File, io::Write, path::Path};
 
@@ -2007,44 +1919,252 @@ mod staged_deploy_tests {
     }
 
     #[test]
-    fn online_env_preserve_merges_keeps_and_restores_user_values() -> Result<()> {
+    fn tar_patch_is_rejected_during_candidate_preflight() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let docker_dir = directory.path().join("docker");
-        std::fs::create_dir_all(&docker_dir)?;
-        let env_path = docker_dir.join(".env");
-        let preserve_path = directory.path().join(".nuwax-env-preserve-test");
+        let archive = directory.path().join("patch.tar.gz");
+        write_archive(&archive, Some(valid_platform_sql()), Some(valid_im_sql()))?;
+        let error =
+            super::preflight_candidate_package_at(&archive, true, &directory.path().join(".env"))
+                .err()
+                .context("TAR.GZ incremental application must fail before extraction")?;
+        assert!(error.to_string().contains("ZIP"));
+        Ok(())
+    }
 
-        // 用户配置存在 → 捕获
-        std::fs::write(&env_path, "MYSQL_PASSWORD=user-secret\nPORT=8080\n")?;
-        let preserve = OnlineEnvPreserve::capture_at(&env_path, preserve_path.clone())?;
-        assert!(preserve.active);
-
-        // 解压成功 + 包内携带新键：合并——用户值保留、仅补新键
-        std::fs::write(&env_path, "MYSQL_PASSWORD=package-default\nNEW_KEY=added\n")?;
-        preserve.merge_into(&docker_dir)?;
-        let merged = std::fs::read_to_string(&env_path)?;
-        assert!(merged.contains("MYSQL_PASSWORD=user-secret"));
-        assert!(merged.contains("PORT=8080"));
-        assert!(merged.contains("NEW_KEY=added"));
-        assert!(!preserve_path.exists(), "合并后临时副本必须清理");
-
-        // 解压失败路径：包内半解压 .env 被用户原值覆盖
-        std::fs::write(&env_path, "MYSQL_PASSWORD=partial-garbage\n")?;
-        let preserve = OnlineEnvPreserve::capture_at(&env_path, preserve_path.clone())?;
-        std::fs::write(&env_path, "MYSQL_PASSWORD=partial-garbage\n")?;
-        preserve.restore(&docker_dir)?;
+    #[test]
+    fn selected_env_defaults_and_restore_use_the_selected_file() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(docker.join("secrets"))?;
+        let selected = docker.join("secrets/operator.env");
+        let default = docker.join(".env");
+        std::fs::write(&selected, "EXISTING=operator\n")?;
+        std::fs::write(&default, "EXISTING=default\n")?;
+        let snapshot = OnlineEnvPreserve::capture(&selected)?;
+        snapshot.merge_defaults("EXISTING=package\nNEW_KEY=added\n")?;
         assert_eq!(
-            std::fs::read_to_string(&env_path)?,
-            "MYSQL_PASSWORD=partial-garbage\n"
+            std::fs::read_to_string(&selected)?,
+            "EXISTING=operator\nNEW_KEY=added\n"
         );
-        assert!(!preserve_path.exists(), "还原后临时副本必须清理");
+        assert_eq!(std::fs::read_to_string(&default)?, "EXISTING=default\n");
+        snapshot.restore()?;
+        assert_eq!(std::fs::read_to_string(&selected)?, "EXISTING=operator\n");
+        assert_eq!(
+            std::fs::read_dir(directory.path())?.count(),
+            1,
+            "no secrets backup is left on disk"
+        );
+        Ok(())
+    }
 
-        // 包内没有 .env：原样还原为用户文件
-        std::fs::remove_file(&env_path)?;
-        let preserve =
-            OnlineEnvPreserve::capture_at(&(docker_dir.join(".env")), preserve_path.clone())?;
-        assert!(!preserve.active, "env 不存在时为空守卫");
-        assert!(!preserve_path.exists(), "未激活守卫不产生临时副本");
+    #[test]
+    fn absent_selected_env_is_created_from_defaults() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let selected = directory.path().join("secrets/operator.env");
+        let snapshot = OnlineEnvPreserve::capture(&selected)?;
+        snapshot.merge_defaults("NEW_KEY=added\n")?;
+        assert_eq!(std::fs::read_to_string(&selected)?, "NEW_KEY=added\n");
+        Ok(())
+    }
+
+    #[test]
+    fn context_rejects_custom_compose_before_package_changes() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        let env = directory.path().join("secrets/operator.env");
+        super::DeploymentContext::validate_paths(&root.join("docker-compose.yml"), &env, &root)?;
+        assert!(
+            super::DeploymentContext::validate_paths(&root.join("custom.yml"), &env, &root)
+                .is_err()
+        );
+        assert!(
+            !root.exists(),
+            "context validation must not mutate package files"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn offline_rejects_external_leaf_and_parent_aliases_into_moving_package() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir()?;
+        let package = directory.path().join("docker");
+        std::fs::create_dir_all(package.join("secrets"))?;
+        let target = package.join("secrets/operator.env");
+        std::fs::write(&target, "OPERATOR=fixture\n")?;
+        let leaf = directory.path().join("external.env");
+        symlink(&target, &leaf)?;
+        assert!(super::validate_offline_env_aliases(&leaf, &package).is_err());
+
+        let parent = directory.path().join("external-secrets");
+        symlink(package.join("secrets"), &parent)?;
+        assert!(
+            super::validate_offline_env_aliases(&parent.join("operator.env"), &package).is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&target)?, "OPERATOR=fixture\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn offline_accepts_plain_inner_env_and_aliases_with_stable_external_targets() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir()?;
+        let package = directory.path().join("docker");
+        std::fs::create_dir_all(package.join("secrets"))?;
+        let inner = package.join("secrets/operator.env");
+        std::fs::write(&inner, "OPERATOR=fixture\n")?;
+        super::validate_offline_env_aliases(&inner, &package)?;
+
+        let external = directory.path().join("stable.env");
+        std::fs::write(&external, "OPERATOR=external-fixture\n")?;
+        let alias = directory.path().join("external-alias.env");
+        symlink(&external, &alias)?;
+        super::validate_offline_env_aliases(&alias, &package)?;
+
+        let inside_alias = package.join("inside-alias.env");
+        symlink(&external, &inside_alias)?;
+        assert!(super::validate_offline_env_aliases(&inside_alias, &package).is_err());
+
+        // An alias above the package root is equivalent to macOS /var or /tmp:
+        // its target is an ancestor of the root, not something moved with it.
+        let system_parent = directory.path().join("system-parent-alias");
+        symlink(directory.path(), &system_parent)?;
+        super::validate_offline_env_aliases(
+            &system_parent.join("docker/secrets/operator.env"),
+            &system_parent.join("docker"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn no_upgrade_has_no_env_snapshot_to_restore_or_consume() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let env = directory.path().join("operator.env");
+        std::fs::write(&env, "EXISTING=operator\n")?;
+        let strategy = client_core::upgrade_strategy::UpgradeStrategy::NoUpgrade {
+            target_version: "0.0.92.0".parse()?,
+        };
+        assert!(super::env_snapshot_for_strategy(&strategy, &env)?.is_none());
+        assert_eq!(std::fs::read_to_string(&env)?, "EXISTING=operator\n");
+        assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn full_extraction_preserves_nested_selected_env_then_merges_new_keys() -> Result<()> {
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(docker.join("secrets"))?;
+        let selected = docker.join("secrets/operator.env");
+        std::fs::write(&selected, "EXISTING=operator\n")?;
+        std::fs::write(docker.join("secrets/obsolete.conf"), "old")?;
+        std::fs::write(docker.join(".env"), "EXISTING=default\n")?;
+        let archive = directory.path().join("full.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive)?);
+        for (path, contents) in [
+            ("docker/.env", "EXISTING=package\nNEW_KEY=added\n"),
+            (
+                "docker/secrets/operator.env",
+                "package-must-not-replace-operator",
+            ),
+            ("docker/secrets/new.conf", "new"),
+        ] {
+            zip.start_file(path, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(contents.as_bytes())?;
+        }
+        zip.finish()?;
+        let snapshot = OnlineEnvPreserve::capture(&selected)?;
+        let strategy = UpgradeStrategy::FullUpgrade {
+            url: String::new(),
+            hash: String::new(),
+            signature: String::new(),
+            target_version: "0.0.92.0".parse()?,
+            download_type: DownloadType::Full,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extracted =
+            crate::utils::extract_docker_service_with_env(&archive, &strategy, &selected).await;
+        std::env::set_current_dir(cwd)?;
+        extracted?;
+        assert_eq!(std::fs::read_to_string(&selected)?, "EXISTING=operator\n");
+        assert!(!docker.join("secrets/obsolete.conf").exists());
+        assert_eq!(
+            std::fs::read_to_string(docker.join("secrets/new.conf"))?,
+            "new"
+        );
+        snapshot.merge_defaults(&super::read_package_env_defaults(&archive)?)?;
+        assert_eq!(
+            std::fs::read_to_string(&selected)?,
+            "EXISTING=operator\nNEW_KEY=added\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(docker.join(".env"))?,
+            "EXISTING=default\nNEW_KEY=added\n"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn full_tar_preserves_nested_selected_env_and_merges_unselected_defaults() -> Result<()> {
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(docker.join("secrets"))?;
+        let selected = docker.join("secrets/operator.env");
+        std::fs::write(&selected, "EXISTING=operator\n")?;
+        std::fs::write(docker.join("secrets/obsolete.conf"), "old")?;
+        std::fs::write(docker.join(".env"), "EXISTING=default\n")?;
+        let archive = directory.path().join("full.tar.gz");
+        let encoder = GzEncoder::new(File::create(&archive)?, Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        for (path, contents) in [
+            ("docker/.env", "EXISTING=package\nNEW_KEY=added\n"),
+            (
+                "docker/secrets/operator.env",
+                "package-must-not-replace-operator",
+            ),
+            ("docker/secrets/new.conf", "new"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            tar.append_data(&mut header, path, contents.as_bytes())?;
+        }
+        tar.into_inner()?.finish()?;
+        let snapshot = OnlineEnvPreserve::capture(&selected)?;
+        let strategy = UpgradeStrategy::FullUpgrade {
+            url: String::new(),
+            hash: String::new(),
+            signature: String::new(),
+            target_version: "0.0.92.0".parse()?,
+            download_type: DownloadType::Full,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extracted =
+            crate::utils::extract_docker_service_with_env(&archive, &strategy, &selected).await;
+        std::env::set_current_dir(cwd)?;
+        extracted?;
+        assert_eq!(std::fs::read_to_string(&selected)?, "EXISTING=operator\n");
+        assert!(!docker.join("secrets/obsolete.conf").exists());
+        assert_eq!(
+            std::fs::read_to_string(docker.join("secrets/new.conf"))?,
+            "new"
+        );
+        snapshot.merge_defaults(&super::read_package_env_defaults(&archive)?)?;
+        assert_eq!(
+            std::fs::read_to_string(&selected)?,
+            "EXISTING=operator\nNEW_KEY=added\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(docker.join(".env"))?,
+            "EXISTING=default\nNEW_KEY=added\n"
+        );
         Ok(())
     }
 
@@ -2241,6 +2361,28 @@ mod staged_deploy_tests {
             zip.start_file(name, zip::write::SimpleFileOptions::default())?;
             zip.write_all(bytes)?;
         }
+        let compose = b"services: {}\n";
+        zip.start_file(
+            "docker/docker-compose.yml",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(compose)?;
+        let delivery = test_delivery_manifest(
+            compose,
+            &[
+                ("config/mysql-schema-manifest.json", &manifest_json[..]),
+                ("config/init_mysql_databases.sql", &new_bootstrap[..]),
+                ("config/init_mysql_permissions.sh", &new_permissions[..]),
+                ("config/init_mysql.sql", &new_platform[..]),
+                ("config/init_mysql_im.sql", &new_im[..]),
+            ],
+            &[],
+        )?;
+        zip.start_file(
+            "docker/DELIVERY_MANIFEST.json",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(delivery.as_bytes())?;
         zip.finish()?;
 
         // ops 只声明 app.conf——schema/manifest 全不在变更清单里
@@ -2287,6 +2429,166 @@ mod staged_deploy_tests {
         assert!(
             std::fs::read_to_string(docker_dir.join("config/mysql-schema-manifest.json"))?
                 .contains("mysql-schema-manifest-v1")
+        );
+        Ok(())
+    }
+
+    fn test_delivery_manifest(
+        compose: &[u8],
+        mysql_files: &[(&str, &[u8])],
+        artifacts: &[(&str, &[u8])],
+    ) -> Result<String> {
+        let hash = client_core::device_info::fingerprint::sha256_hex;
+        let files: std::collections::BTreeMap<_, _> = mysql_files
+            .iter()
+            .map(|(path, bytes)| (path.to_string(), hash(bytes)))
+            .collect();
+        let artifact_hashes: std::collections::BTreeMap<_, _> = artifacts
+            .iter()
+            .map(|(path, bytes)| (path.to_string(), hash(bytes)))
+            .collect();
+        let components = if artifacts.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "fixture": {
+                "version": "fixture", "image_id": format!("sha256:{}", "1".repeat(64)), "config_id": format!("sha256:{}", "2".repeat(64)),
+                "source": "registry.fixture/im:latest", "target": "registry.fixture/im:latest", "artifacts": artifact_hashes
+            }})
+        };
+        let mut payload = serde_json::json!({"contract_version":1,"architecture":crate::docker_service::get_system_architecture().as_str(),"components":components,
+            "mysql":{"manifest":"config/mysql-schema-manifest.json","files":files}, "compose":{"path":"docker-compose.yml","sha256":hash(compose)}});
+        // serde_json's map is sorted by key, matching the producer's canonical form.
+        let release = hash(serde_json::to_string(&payload)?.as_bytes());
+        payload.as_object_mut().context("payload object")?.insert(
+            "release_sha256".to_string(),
+            serde_json::Value::String(release),
+        );
+        Ok(serde_json::to_string(&payload)?)
+    }
+
+    #[tokio::test]
+    async fn patch_forces_delivery_and_compose_even_when_operations_omit_them() -> Result<()> {
+        use anyhow::Context as _;
+        use client_core::api_types::{PatchOperations, PatchPackageInfo, ReplaceOperations};
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(docker.join("config"))?;
+        std::fs::write(
+            docker.join("docker-compose.yml"),
+            "services: {old: {image: fixture}}\n",
+        )?;
+        std::fs::write(docker.join("DELIVERY_MANIFEST.json"), "old release")?;
+        let compose = b"services: {}\n";
+        let platform = valid_platform_sql().as_bytes();
+        let im = valid_im_sql().as_bytes();
+        let delivery = test_delivery_manifest(
+            compose,
+            &[
+                ("config/init_mysql.sql", platform),
+                ("config/init_mysql_im.sql", im),
+            ],
+            &[],
+        )?;
+        let archive_path = directory.path().join("patch.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        for (path, bytes) in [
+            ("docker-compose.yml", &compose[..]),
+            ("DELIVERY_MANIFEST.json", delivery.as_bytes()),
+            ("config/init_mysql.sql", platform),
+            ("config/init_mysql_im.sql", im),
+        ] {
+            zip.start_file(
+                format!("docker/{path}"),
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            zip.write_all(bytes)?;
+        }
+        zip.finish()?;
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: Some(ReplaceOperations {
+                        files: Vec::new(),
+                        directories: Vec::new(),
+                    }),
+                    delete: None,
+                },
+            },
+            target_version: "0.0.92.0".parse().context("version")?,
+            download_type: DownloadType::Patch,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let result = crate::utils::extract_docker_service(&archive_path, &strategy).await;
+        std::env::set_current_dir(cwd)?;
+        result?;
+        assert_eq!(std::fs::read(docker.join("docker-compose.yml"))?, compose);
+        assert_eq!(
+            std::fs::read_to_string(docker.join("DELIVERY_MANIFEST.json"))?,
+            delivery
+        );
+        let manifest = client_core::container::preflight::parse_delivery_manifest(&delivery)?;
+        client_core::container::preflight::verify_delivery_manifest(&manifest, &docker, None)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_patch_manifest_fails_before_changing_disk() -> Result<()> {
+        use anyhow::Context as _;
+        use client_core::api_types::{PatchOperations, PatchPackageInfo, ReplaceOperations};
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(docker.join("config"))?;
+        std::fs::write(docker.join("config/app.conf"), "old")?;
+        let archive_path = directory.path().join("patch.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        for (path, bytes) in [
+            (
+                "config/mysql-schema-manifest.json",
+                &b"invalid manifest"[..],
+            ),
+            ("config/app.conf", &b"new"[..]),
+            ("config/init_mysql.sql", valid_platform_sql().as_bytes()),
+            ("config/init_mysql_im.sql", valid_im_sql().as_bytes()),
+        ] {
+            zip.start_file(
+                format!("docker/{path}"),
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            zip.write_all(bytes)?;
+        }
+        zip.finish()?;
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: Some(ReplaceOperations {
+                        files: vec!["config/app.conf".to_string()],
+                        directories: Vec::new(),
+                    }),
+                    delete: None,
+                },
+            },
+            target_version: "0.0.92.0".parse().context("version")?,
+            download_type: DownloadType::Patch,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let result = crate::utils::extract_docker_service(&archive_path, &strategy).await;
+        std::env::set_current_dir(cwd)?;
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(docker.join("config/app.conf"))?,
+            "old"
         );
         Ok(())
     }
@@ -2349,6 +2651,43 @@ mod staged_deploy_tests {
         // 两模板齐全且合法
         write_archive(&archive, Some(valid_platform_sql()), Some(valid_im_sql()))?;
         validate_offline_archive_sql(&archive)?;
+        Ok(())
+    }
+
+    #[test]
+    fn offline_manifest_uses_declared_schema_paths_and_checks_database_identity() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive_path = directory.path().join("bundle.zip");
+        let manifest = serde_json::json!({
+            "contract_version":1,"requires":{"cli_capability":"mysql-schema-manifest-v1"},
+            "mysql_target":{"service":"mysql","internal_port":3306},"application_connections":[],
+            "databases":[{"name":"custom_app","bootstrap_only":false}],
+            "bootstrap":{"path":"config/bootstrap.sql","idempotent":true,"initdb_target":"00_bootstrap.sql"},
+            "permissions":{"path":"config/permissions.sh","user_env":"MYSQL_USER","databases":"bootstrap","initdb_target":"01_permissions.sh"},
+            "schemas":[{"database":"custom_app","path":"config/custom-schema.sql","initdb_target":"10_custom.sql"}],
+            "first_install_seeds":[]
+        });
+        let write = |database: &str| -> Result<()> {
+            let mut archive = zip::ZipWriter::new(File::create(&archive_path)?);
+            archive.start_file(
+                "docker/config/mysql-schema-manifest.json",
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            archive.write_all(serde_json::to_string(&manifest)?.as_bytes())?;
+            archive.start_file(
+                "docker/config/custom-schema.sql",
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            archive.write_all(
+                format!("USE {database};\nCREATE TABLE example (id INT);\n").as_bytes(),
+            )?;
+            archive.finish()?;
+            Ok(())
+        };
+        write("custom_app")?;
+        validate_offline_archive_sql(&archive_path)?;
+        write("other_app")?;
+        assert!(validate_offline_archive_sql(&archive_path).is_err());
         Ok(())
     }
 

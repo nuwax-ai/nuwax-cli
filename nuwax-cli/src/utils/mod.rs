@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use client_core::{
     constants::docker::get_docker_work_dir, upgrade_strategy::UpgradeStrategy, utils::archive,
 };
@@ -284,22 +284,15 @@ fn handle_extraction(
     extracted_files: &mut usize,
     extracted_size: &mut u64,
 ) -> Result<()> {
-    // C01/P1#2：目标 `.env` 已存在（用户配置）时不直接覆盖——先解到同目录临时文件，
-    // 与磁盘用户值合并（保留旧值、仅补包内新增键）后原子替换。否则 patch 包的
-    // 新增键永远不会到达磁盘（旧实现跳过解压，最后旧文件与自己合并）。
+    // Read incoming defaults completely before replacing the live environment.
     let is_env_file = dst
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name == ".env");
     if is_env_file && dst.exists() {
-        let incoming = dst
-            .parent()
-            .map(|parent| parent.join(".env.nuwax-incoming"))
-            .unwrap_or_else(|| std::path::PathBuf::from(".env.nuwax-incoming"));
-        force_extract_file(entry, &incoming)?;
-        // 合并结果落在 incoming（保留磁盘文件权限），磁盘旧文件被移除
-        env_merge::merge_preserved_env_file(dst, &incoming)?;
-        std::fs::rename(&incoming, dst)?;
+        let mut defaults = String::new();
+        entry.read_to_string(&mut defaults)?;
+        env_merge::merge_env_file_defaults(dst, &defaults)?;
         info!(
             "🛡️ Merged package .env defaults into existing configuration: {path}",
             path = dst.display()
@@ -335,7 +328,10 @@ fn is_upload_directory_path(path: &std::path::Path) -> bool {
 }
 
 /// 安全删除 docker 目录，保留 upload 目录
-fn safe_remove_docker_directory(output_dir: &std::path::Path) -> Result<()> {
+fn safe_remove_docker_directory(
+    output_dir: &std::path::Path,
+    protected: &[std::path::PathBuf],
+) -> Result<()> {
     if !output_dir.exists() {
         return Ok(());
     }
@@ -359,6 +355,13 @@ fn safe_remove_docker_directory(output_dir: &std::path::Path) -> Result<()> {
             info!("🛡️ Keeping directory: {}", path.display());
             continue;
         }
+        if is_protected_env_path(&path, protected) {
+            continue;
+        }
+        if path.is_dir() && contains_protected_env_path(&path, protected) {
+            safe_remove_docker_directory(&path, protected)?;
+            continue;
+        }
 
         // 删除其他文件或目录
         if path.is_dir() {
@@ -379,6 +382,84 @@ pub async fn extract_docker_service(
     archive_path: &std::path::Path,
     upgrade_strategy: &UpgradeStrategy,
 ) -> Result<()> {
+    extract_docker_service_with_env(archive_path, upgrade_strategy, Path::new("docker/.env")).await
+}
+
+fn absolute_clean_path(path: &Path) -> Result<std::path::PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    // Preserve the leaf (an .env symlink alias), while resolving the existing
+    // parent/ancestor. macOS /var and /private/var and Windows canonical drive
+    // prefixes must identify the same protected file. Missing new directories
+    // are appended only after resolving their nearest existing ancestor.
+    let Some(leaf) = normalized.file_name() else {
+        return std::fs::canonicalize(&normalized).map_err(Into::into);
+    };
+    let mut suffix = vec![leaf.to_os_string()];
+    let mut ancestor = normalized
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Path has no parent"))?;
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(mut canonical) => {
+                for component in suffix.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = ancestor.file_name().ok_or_else(|| {
+                    anyhow::anyhow!("No existing ancestor for {}", normalized.display())
+                })?;
+                suffix.push(component.to_os_string());
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("Path has no existing parent"))?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Failed to resolve parent of {}", normalized.display())
+                });
+            }
+        }
+    }
+}
+
+fn is_protected_env_path(path: &Path, protected: &[std::path::PathBuf]) -> bool {
+    absolute_clean_path(path).is_ok_and(|absolute| protected.contains(&absolute))
+        || std::fs::canonicalize(path).is_ok_and(|canonical| protected.contains(&canonical))
+}
+
+fn contains_protected_env_path(path: &Path, protected: &[std::path::PathBuf]) -> bool {
+    absolute_clean_path(path)
+        .is_ok_and(|absolute| protected.iter().any(|env| env.starts_with(&absolute)))
+        || std::fs::canonicalize(path)
+            .is_ok_and(|canonical| protected.iter().any(|env| env.starts_with(&canonical)))
+}
+
+/// Keep the selected environment file and its symlink target during extraction.
+pub async fn extract_docker_service_with_env(
+    archive_path: &Path,
+    upgrade_strategy: &UpgradeStrategy,
+    env_path: &Path,
+) -> Result<()> {
+    let mut protected = vec![absolute_clean_path(env_path)?];
+    if env_path.exists() {
+        protected.push(std::fs::canonicalize(env_path)?);
+    }
     let extract_start = Instant::now();
 
     info!(
@@ -403,12 +484,93 @@ pub async fn extract_docker_service(
     // 根据格式选择解压方法
     match format {
         client_core::utils::archive::ArchiveFormat::Zip => {
-            extract_zip_archive(archive_path, upgrade_strategy, extract_start).await
+            extract_zip_archive(archive_path, upgrade_strategy, extract_start, &protected).await
         }
         client_core::utils::archive::ArchiveFormat::TarGz => {
-            extract_tar_gz_archive(archive_path, upgrade_strategy, extract_start).await
+            extract_tar_gz_archive(archive_path, upgrade_strategy, extract_start, protected).await
         }
     }
+}
+
+/// Resolve the same optional docker/ prefix supported by candidate inspection.
+fn zip_entry_name(archive: &zip::ZipArchive<std::fs::File>, relative: &str) -> Result<String> {
+    if contains_unsafe_component(Path::new(relative)) {
+        anyhow::bail!("Unsafe critical package path: {relative}");
+    }
+    let prefixed = format!("docker/{relative}");
+    let with_prefix = archive.file_names().any(|name| name == prefixed);
+    let without_prefix = archive.file_names().any(|name| name == relative);
+    match (with_prefix, without_prefix) {
+        (true, false) => Ok(prefixed),
+        (false, true) => Ok(relative.to_string()),
+        (true, true) => anyhow::bail!("Duplicate critical package path: {relative}"),
+        (false, false) => anyhow::bail!("Patch archive is missing critical file {relative}"),
+    }
+}
+
+fn optional_zip_text(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    relative: &str,
+) -> Result<Option<String>> {
+    let prefixed = format!("docker/{relative}");
+    if !archive
+        .file_names()
+        .any(|name| name == prefixed || name == relative)
+    {
+        return Ok(None);
+    }
+    let name = zip_entry_name(archive, relative)?;
+    let mut entry = archive.by_name(&name)?;
+    let mut text = String::new();
+    entry
+        .read_to_string(&mut text)
+        .with_context(|| format!("Failed to read package {relative}"))?;
+    Ok(Some(text))
+}
+
+/// Validate all forced release files before patch operations can mutate disk.
+fn patch_critical_files(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<Vec<String>> {
+    let mut files = match optional_zip_text(archive, "config/mysql-schema-manifest.json")? {
+        Some(text) => {
+            let manifest = client_core::mysql_manifest::parse_schema_manifest(&text)
+                .context("Invalid patch mysql-schema-manifest.json; refusing legacy fallback")?;
+            let mut files = vec![
+                "config/mysql-schema-manifest.json".to_string(),
+                "docker-compose.yml".to_string(),
+                "DELIVERY_MANIFEST.json".to_string(),
+            ];
+            files.extend(manifest.referenced_paths());
+            files
+        }
+        None => client_core::constants::sql::CRITICAL_UPGRADE_FILES
+            .iter()
+            .map(|path| path.to_string())
+            .collect(),
+    };
+    if let Some(text) = optional_zip_text(archive, "DELIVERY_MANIFEST.json")? {
+        let delivery = client_core::container::preflight::parse_delivery_manifest(&text)?;
+        files.push("DELIVERY_MANIFEST.json".to_string());
+        files.push(delivery.compose.path);
+        files.extend(delivery.mysql.files.into_keys());
+        files.extend(
+            delivery
+                .components
+                .into_values()
+                .flat_map(|component| component.artifacts.into_keys()),
+        );
+    } else if optional_zip_text(archive, "docker-compose.yml")?.is_some() {
+        files.push("docker-compose.yml".to_string());
+    }
+    files.sort();
+    files.dedup();
+    for relative in &files {
+        let name = zip_entry_name(archive, relative)?;
+        let entry = archive.by_name(&name)?;
+        if entry.is_dir() || entry.size() == 0 {
+            anyhow::bail!("Patch critical file {relative} must be a non-empty regular file");
+        }
+    }
+    Ok(files)
 }
 
 /// 解压 ZIP 格式归档
@@ -416,6 +578,7 @@ async fn extract_zip_archive(
     zip_path: &std::path::Path,
     upgrade_strategy: &UpgradeStrategy,
     extract_start: Instant,
+    protected: &[std::path::PathBuf],
 ) -> Result<()> {
     // 打开ZIP文件
     let file = std::fs::File::open(zip_path)?;
@@ -432,7 +595,7 @@ async fn extract_zip_archive(
             let output_dir = std::path::Path::new("docker");
             // 如果目标目录已存在，安全清理它（保留upload目录）
             if output_dir.exists() {
-                safe_remove_docker_directory(output_dir)?;
+                safe_remove_docker_directory(output_dir, protected)?;
             } else {
                 // 创建输出目录
                 std::fs::create_dir_all(output_dir)?;
@@ -469,6 +632,25 @@ async fn extract_zip_archive(
                 };
 
                 let target_path = output_dir.join(clean_path);
+
+                if is_protected_env_path(&target_path, protected) && target_path.exists() {
+                    continue;
+                }
+
+                // Another configured deployment may still use the package's
+                // default .env. Keep its values while adding incoming defaults.
+                if !file.is_dir()
+                    && target_path.file_name().is_some_and(|name| name == ".env")
+                    && target_path.is_file()
+                {
+                    handle_extraction(
+                        &mut file,
+                        &target_path,
+                        &mut extracted_files,
+                        &mut extracted_size,
+                    )?;
+                    continue;
+                }
 
                 // 检查是否为 upload 目录路径
                 if is_upload_directory_path(&target_path) {
@@ -522,6 +704,7 @@ async fn extract_zip_archive(
             info!("   ⏱️  Elapsed: {:.2} seconds", elapsed.as_secs_f64());
         }
         UpgradeStrategy::PatchUpgrade { patch_info, .. } => {
+            let critical_files = patch_critical_files(&mut archive)?;
             // 增量升级：根据操作的文件和目录进行操作
             let change_files = patch_info.get_changed_files();
             let work_dir = get_docker_work_dir();
@@ -532,7 +715,9 @@ async fn extract_zip_archive(
 
             // 清理即将被替换或删除的文件/目录（跳过upload目录）
             for file_or_dir in upgrade_change_file_or_dir {
-                if is_upload_directory_path(&file_or_dir) {
+                if is_upload_directory_path(&file_or_dir)
+                    || contains_protected_env_path(&file_or_dir, protected)
+                {
                     info!(
                         "🛡️ Keeping upload directory, skipping deletion: {}",
                         file_or_dir.display()
@@ -583,6 +768,12 @@ async fn extract_zip_archive(
 
                     let dst = work_dir.join(&file);
 
+                    if is_protected_env_path(&dst, protected)
+                        && dst.file_name().is_none_or(|name| name != ".env")
+                    {
+                        continue;
+                    }
+
                     // 检查是否为保护目录路径
                     if is_upload_directory_path(&dst) {
                         // 如果保护目录已存在，跳过解压以保护用户数据；
@@ -624,7 +815,7 @@ async fn extract_zip_archive(
                         continue;
                     }
 
-                    if target_dir.exists() {
+                    if target_dir.exists() && !contains_protected_env_path(&target_dir, protected) {
                         info!("🗑️  Force removing directory: {}", target_dir.display());
                         std::fs::remove_dir_all(&target_dir)?;
                     }
@@ -647,6 +838,14 @@ async fn extract_zip_archive(
                             let dst = target_dir.join(relative_path);
                             ensure_parent_dir(&dst)?;
 
+                            if is_protected_env_path(&dst, protected) {
+                                continue;
+                            }
+                            if entry.is_dir() && contains_protected_env_path(&dst, protected) {
+                                std::fs::create_dir_all(&dst)?;
+                                continue;
+                            }
+
                             handle_extraction(
                                 &mut entry,
                                 &dst,
@@ -661,7 +860,9 @@ async fn extract_zip_archive(
                 // 处理删除操作（跳过upload目录）
                 for file in delete.files {
                     let path = work_dir.join(file);
-                    if is_upload_directory_path(&path) {
+                    if is_upload_directory_path(&path)
+                        || contains_protected_env_path(&path, protected)
+                    {
                         info!(
                             "🛡️ Keeping upload directory, skipping file deletion: {}",
                             path.display()
@@ -680,7 +881,9 @@ async fn extract_zip_archive(
                 // 删除目录（跳过upload目录）
                 for dir in delete.directories {
                     let path = work_dir.join(dir);
-                    if is_upload_directory_path(&path) {
+                    if is_upload_directory_path(&path)
+                        || contains_protected_env_path(&path, protected)
+                    {
                         info!(
                             "🛡️ Keeping upload directory, skipping directory deletion: {}",
                             path.display()
@@ -698,36 +901,10 @@ async fn extract_zip_archive(
                 }
             }
 
-            // 🔧 强制更新关键 schema/清单文件（无论是否出现在 patch operations 中）。
-            // F07：按包内 mysql-schema-manifest.json 驱动——bootstrap、permissions、
-            // manifest 本身与各库 schema 即使未进 ops 也必须落盘为目标版本；
-            // 无 manifest 的 legacy 包退回固定关键文件名单。
-            let critical_files: Vec<String> = {
-                let manifest_bytes = archive
-                    .by_name("docker/config/mysql-schema-manifest.json")
-                    .ok()
-                    .and_then(|mut entry| {
-                        let mut bytes = Vec::new();
-                        std::io::Read::read_to_end(&mut entry, &mut bytes).ok()?;
-                        Some(bytes)
-                    });
-                match manifest_bytes
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-                    .and_then(|text| client_core::mysql_manifest::parse_schema_manifest(&text).ok())
-                {
-                    Some(manifest) => {
-                        let mut files = vec!["config/mysql-schema-manifest.json".to_string()];
-                        files.extend(manifest.referenced_paths());
-                        files
-                    }
-                    None => client_core::constants::sql::CRITICAL_UPGRADE_FILES
-                        .iter()
-                        .map(|file| file.to_string())
-                        .collect(),
-                }
-            };
+            // Apply the same complete release that passed candidate validation,
+            // even when the patch operation list omits its metadata or artifacts.
             for critical_file in &critical_files {
-                let zip_path = format!("docker/{}", critical_file);
+                let zip_path = zip_entry_name(&archive, critical_file)?;
                 let dst_path = work_dir.join(critical_file);
 
                 match archive.by_name(&zip_path) {
@@ -765,12 +942,13 @@ async fn extract_tar_gz_archive(
     tar_gz_path: &std::path::Path,
     upgrade_strategy: &UpgradeStrategy,
     extract_start: Instant,
+    protected: Vec<std::path::PathBuf>,
 ) -> Result<()> {
     let tar_gz_path = tar_gz_path.to_path_buf();
     let strategy = upgrade_strategy.clone();
 
     tokio::task::spawn_blocking(move || {
-        extract_tar_gz_blocking(&tar_gz_path, &strategy, extract_start)
+        extract_tar_gz_blocking(&tar_gz_path, &strategy, extract_start, &protected)
     })
     .await
     .map_err(|e| anyhow::anyhow!("{}", t!("utils.extract_task_failed", error = e.to_string())))?
@@ -781,6 +959,7 @@ fn extract_tar_gz_blocking(
     tar_gz_path: &std::path::Path,
     upgrade_strategy: &UpgradeStrategy,
     extract_start: Instant,
+    protected: &[std::path::PathBuf],
 ) -> Result<()> {
     use flate2::read::GzDecoder;
     use tar::Archive;
@@ -797,7 +976,7 @@ fn extract_tar_gz_blocking(
         UpgradeStrategy::FullUpgrade { .. } => {
             // 全量升级：清空 docker 目录（保留 upload 目录）
             if output_dir.exists() {
-                safe_remove_docker_directory(output_dir)?;
+                safe_remove_docker_directory(output_dir, protected)?;
             } else {
                 std::fs::create_dir_all(output_dir)?;
             }
@@ -829,6 +1008,22 @@ fn extract_tar_gz_blocking(
                 // 移除 docker/ 前缀（如果存在）
                 let clean_path = path.strip_prefix("docker").unwrap_or(&path);
                 let target_path = output_dir.join(clean_path);
+
+                if is_protected_env_path(&target_path, protected) && target_path.exists() {
+                    continue;
+                }
+
+                if entry_type.is_file()
+                    && target_path.file_name().is_some_and(|name| name == ".env")
+                    && target_path.is_file()
+                {
+                    let mut defaults = String::new();
+                    entry.read_to_string(&mut defaults)?;
+                    env_merge::merge_env_file_defaults(&target_path, &defaults)?;
+                    extracted_files += 1;
+                    extracted_size += entry.size();
+                    continue;
+                }
 
                 // 保护 upload 目录
                 if is_upload_directory_path(&target_path) && target_path.exists() {
@@ -1053,4 +1248,48 @@ pub fn read_archive_entries(
         }
     }
     Ok(found)
+}
+
+#[cfg(test)]
+mod env_path_tests {
+    use super::*;
+
+    #[test]
+    fn missing_env_parents_use_the_existing_physical_ancestor() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let expected = std::fs::canonicalize(root.path())?.join("not-created/nested/operator.env");
+        assert_eq!(
+            absolute_clean_path(&root.path().join("not-created/nested/operator.env"))?,
+            expected
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_aliases_match_protected_env_and_leaf_symlink_is_preserved() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir()?;
+        let physical = root.path().join("physical");
+        std::fs::create_dir(&physical)?;
+        let alias = root.path().join("alias");
+        symlink(&physical, &alias)?;
+        let actual = physical.join("operator.env");
+        std::fs::write(&actual, "EXISTING=operator\n")?;
+        let selected = alias.join("operator.env");
+        let protected = vec![
+            absolute_clean_path(&selected)?,
+            std::fs::canonicalize(&selected)?,
+        ];
+        assert!(is_protected_env_path(&actual, &protected));
+        assert!(contains_protected_env_path(&physical, &protected));
+        let leaf = alias.join(".env");
+        symlink("operator.env", &leaf)?;
+        assert_eq!(
+            absolute_clean_path(&leaf)?,
+            std::fs::canonicalize(&physical)?.join(".env")
+        );
+        assert_ne!(absolute_clean_path(&leaf)?, std::fs::canonicalize(&leaf)?);
+        Ok(())
+    }
 }

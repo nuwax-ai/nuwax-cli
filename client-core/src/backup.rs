@@ -69,7 +69,29 @@ impl BackupManager {
     /// 创建备份
     pub async fn create_backup(&self, options: BackupOptions) -> Result<BackupRecord> {
         // 检查所有源路径是否存在
-        let need_backup_paths = options.source_paths;
+        let selected_root = crate::backup_release::deployment_root(&self.docker_manager)?;
+        if options.work_dir.canonicalize()? != selected_root {
+            anyhow::bail!("Backup work directory does not match the selected deployment context");
+        }
+        let release = crate::backup_release::capture_release_snapshot(
+            &self.docker_manager,
+            &options.service_version,
+        )
+        .await?;
+        let need_backup_paths = if let Some(release) = &release {
+            let mut paths = release.source_paths();
+            // Release files are frozen in the snapshot; cold data still comes
+            // from the explicitly selected deployment root.
+            for source in options.source_paths {
+                let name = source.file_name().and_then(|value| value.to_str());
+                if !name.is_some_and(|name| release.context.roots.iter().any(|root| root == name)) {
+                    paths.push(source);
+                }
+            }
+            paths
+        } else {
+            options.source_paths
+        };
 
         // 生成备份文件名（人类易读格式）
         let timestamp = Utc::now().format("%Y-%m-%d_%H-%M-%S");
@@ -88,9 +110,13 @@ impl BackupManager {
         info!("Starting to create backup: {}", backup_path.display());
 
         // 执行备份
-        match self
-            .perform_backup(&need_backup_paths, &backup_path, options.compression_level)
-            .await
+        match Self::perform_backup(
+            &need_backup_paths,
+            &backup_path,
+            options.compression_level,
+            release.as_ref().map(|snapshot| snapshot.root()),
+        )
+        .await
         {
             Ok(_) => {
                 info!("Backup created successfully: {}", backup_path.display());
@@ -136,10 +162,10 @@ impl BackupManager {
     /// - 当传入目录路径时，将递归备份该目录下的所有文件
     /// - 当传入文件路径时，将直接备份该文件
     async fn perform_backup(
-        &self,
         source_paths: &[PathBuf],
         backup_path: &Path,
         compression_level: u32,
+        release_root: Option<&Path>,
     ) -> Result<()> {
         // 确保备份目录存在
         if let Some(parent) = backup_path.parent() {
@@ -149,6 +175,7 @@ impl BackupManager {
         // 在后台线程中执行压缩操作，避免阻塞异步运行时
         let source_paths = source_paths.to_vec();
         let backup_path = backup_path.to_path_buf();
+        let release_root = release_root.map(Path::to_path_buf);
 
         tokio::task::spawn_blocking(move || {
             let file = File::create(&backup_path)?;
@@ -160,7 +187,11 @@ impl BackupManager {
             for source_path in &source_paths {
                 if source_path.is_file() {
                     // 直接处理单个文件
-                    add_file_to_archive(&mut archive, source_path, None)?;
+                    let mapping = release_root
+                        .as_deref()
+                        .filter(|root| source_path.starts_with(root))
+                        .map(|root| (root, ""));
+                    add_file_to_archive(&mut archive, source_path, mapping)?;
                 } else if source_path.is_dir() {
                     let dir_name = source_path
                         .file_name()
@@ -231,11 +262,32 @@ impl BackupManager {
         );
         info!("Target directory: {}", target_dir.display());
 
+        let selected_root = crate::backup_release::deployment_root(&self.docker_manager)?;
+        if target_dir.canonicalize()? != selected_root {
+            anyhow::bail!("Restore directory does not match the selected deployment context");
+        }
+        let rollback_data = !dirs_to_exculde.contains(&"data");
+        let release =
+            crate::backup_release::stage_release_restore(&backup_path, target_dir, rollback_data)?;
+        if let Some(release) = &release {
+            if dirs_to_exculde.iter().any(|name| *name != "data") {
+                anyhow::bail!(
+                    "Release-aware rollback only supports excluding data; partial configuration/artifact rollback is not supported"
+                );
+            }
+            if release.context.service_version != backup_record.service_version {
+                anyhow::bail!("Backup release version does not match its backup record");
+            }
+            crate::backup_release::validate_restore_runtime(&self.docker_manager, release).await?;
+        }
+
         // P1#5/F05: 停服前核对组件兼容：当前 Compose 引用的组件文件/目录
         // 必须以非空普通条目存在于该备份——拒绝在停服/清理之后才发现半包
         crate::container::preflight::verify_backup_component_compatibility(
             &backup_path,
-            target_dir,
+            release
+                .as_ref()
+                .map_or(target_dir, |release| release.root()),
         )
         .context("Backup is incompatible with the current deployment components")?;
 
@@ -243,13 +295,22 @@ impl BackupManager {
         info!("Stopping services...");
         self.docker_manager.stop_services().await?;
 
-        // 清理现有数据目录，但保留配置文件
-        self.clear_data_directories(target_dir, dirs_to_exculde)
-            .await?;
-
-        // 执行恢复
-        self.perform_restore(&backup_path, target_dir, dirs_to_exculde)
-            .await?;
+        if let Some(release) = &release {
+            if rollback_data {
+                self.clear_data_directory_only(target_dir).await?;
+                self.perform_selective_restore(&backup_path, target_dir, &["data"])
+                    .await?;
+            }
+            crate::backup_release::apply_release_snapshot(release, target_dir)?;
+            crate::backup_release::restore_runtime_tags(&self.docker_manager, release).await?;
+            self.docker_manager.invalidate_compose_config_cache();
+        } else {
+            // Explicit legacy mode: no delivery receipt on either side.
+            self.clear_data_directories(target_dir, dirs_to_exculde)
+                .await?;
+            self.perform_restore(&backup_path, target_dir, dirs_to_exculde)
+                .await?;
+        }
 
         // 根据参数决定是否启动服务
         if auto_start_service {
@@ -292,6 +353,24 @@ impl BackupManager {
 
         info!("Starting data directory restore: {}", backup_path.display());
         info!("Target directory: {}", target_dir.display());
+
+        let selected_root = crate::backup_release::deployment_root(&self.docker_manager)?;
+        if target_dir.canonicalize()? != selected_root {
+            anyhow::bail!(
+                "Data-only restore directory does not match the selected deployment context"
+            );
+        }
+        if dirs_to_restore != ["data"] {
+            anyhow::bail!(
+                "Data-only restore requires the data root; partial or unrelated roots are not supported"
+            );
+        }
+        crate::backup_release::validate_data_only_restore(
+            &self.docker_manager,
+            &backup_path,
+            target_dir,
+        )
+        .await?;
 
         // 停止服务，准备恢复
         info!("Stopping services...");
@@ -696,7 +775,9 @@ fn add_file_to_archive(
             .map_err(|e| DuckError::Backup(format!("Failed to calculate relative path: {e}")))?;
 
         // 格式：{dir_name}/{relative_path}
-        if cfg!(windows) {
+        if dir_name.is_empty() {
+            relative_path.to_string_lossy().replace('\\', "/")
+        } else if cfg!(windows) {
             format!(
                 "{}/{}",
                 dir_name,
@@ -706,22 +787,15 @@ fn add_file_to_archive(
             format!("{}/{}", dir_name, relative_path.display())
         }
     } else {
-        // 直接处理单个文件，保持原有路径结构
+        // Preserve the existing explicit source-file contract. Release context
+        // files use the dedicated frozen-root mapping above instead.
         let path_str = file_path.to_string_lossy().to_string();
-
-        // 标准化路径分隔符为Unix风格
         let path_str = if cfg!(windows) {
             path_str.replace('\\', "/")
         } else {
             path_str
         };
-
-        // 移除路径开头可能的 "./" 前缀
-        if let Some(stripped) = path_str.strip_prefix("./") {
-            stripped.to_string()
-        } else {
-            path_str
-        }
+        path_str.strip_prefix("./").unwrap_or(&path_str).to_string()
     };
 
     debug!(
@@ -735,4 +809,42 @@ fn add_file_to_archive(
         .map_err(|e| DuckError::Backup(format!("Failed to add file to archive: {e}")))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod release_snapshot_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn real_backup_archive_roundtrips_frozen_absolute_paths_and_empty_app() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("custom-deployment");
+        let images =
+            crate::backup_release::release_snapshot_tests::write_release(&root, "A", "schema")?;
+        let snapshot = crate::backup_release::capture_release_files(&root, "A", images)?;
+        let archive_path = temp.path().join("release.tar.gz");
+        BackupManager::perform_backup(
+            &snapshot.source_paths(),
+            &archive_path,
+            1,
+            Some(snapshot.root()),
+        )
+        .await?;
+        let mut archive = Archive::new(GzDecoder::new(File::open(&archive_path)?));
+        let names = archive
+            .entries()?
+            .map(|entry| Ok(entry?.path()?.to_string_lossy().into_owned()))
+            .collect::<Result<Vec<String>>>()?;
+        assert!(names.iter().any(|name| name == "docker-compose.yml"));
+        assert!(
+            names
+                .iter()
+                .any(|name| name == crate::backup_release::RELEASE_CONTEXT_FILE)
+        );
+        assert!(names.iter().all(|name| !Path::new(name).is_absolute()));
+        let staged = crate::backup_release::stage_release_restore(&archive_path, &root, false)?
+            .ok_or_else(|| anyhow::anyhow!("Missing staged release"))?;
+        assert!(staged.root().join("app").is_dir());
+        Ok(())
+    }
 }
