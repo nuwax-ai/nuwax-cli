@@ -8,7 +8,6 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use url::Url;
 
-const TEST_DB: &str = "executor_integration_test";
 const TEST_COMPOSE_PROJECT: &str = "nuwax_mysql_integration";
 const TEST_MYSQL_SERVICE: &str = "mysql";
 const TEST_MYSQL_TIMEOUT: Duration = Duration::from_secs(90);
@@ -93,14 +92,9 @@ async fn multi_database_live_diff_scenarios() -> Result<()> {
 
     let outcome = multi_database_scenario_body(&executor, &config, &platform_db, &im_db).await;
 
-    // 无论成败都清理隔离库
-    for database in [&platform_db, &im_db] {
-        executor
-            .execute_single(&format!("DROP DATABASE IF EXISTS `{database}`"))
-            .await
-            .ok();
-    }
-    outcome
+    // 无论成败都清理隔离库，清理失败也必须暴露。
+    let cleanup = cleanup_test_databases(&executor, &[&platform_db, &im_db]).await;
+    finish_mysql_test(outcome, cleanup)
 }
 
 async fn multi_database_scenario_body(
@@ -285,11 +279,13 @@ async fn test_mysql_executor_integration() -> Result<()> {
         }
         Err(err) => return Err(err),
     };
-    let config = test_env.config.clone();
+    let mut config = test_env.config.clone();
 
     // 2.1. 使用 root 用户确保测试用户拥有所需权限
     println!("🔧 2.1. 使用 root 用户确保测试用户拥有权限...");
     let mut root_config = config.clone();
+    // 管理连接不能绑定即将创建/删除的测试库，否则连接池重置会报 1049。
+    root_config.database = None;
     if root_config.user != "root" {
         root_config.user = "root".to_string();
         root_config.password = if std::env::var_os("TEST_MYSQL_URL").is_some() {
@@ -316,23 +312,36 @@ async fn test_mysql_executor_integration() -> Result<()> {
 
     println!("✅ 权限已自动授予。");
 
+    // 只创建和清理本用例拥有的唯一库，保留 TEST_MYSQL_URL 的共享基准库。
+    let database = format!("nuwax_executor_{}", uuid::Uuid::now_v7().simple());
+    println!("🧹 3. 创建隔离测试数据库 '{database}'...");
+    root_executor
+        .execute_single(&format!("CREATE DATABASE `{database}`"))
+        .await
+        .context("创建隔离测试数据库失败")?;
+    config.database = Some(database.clone());
+
+    let outcome = mysql_executor_scenario_body(&config, &database).await;
+    let cleanup = cleanup_test_databases(&root_executor, &[&database]).await;
+    let outcome = finish_mysql_test(outcome, cleanup);
+    let stop = if test_env.started_by_test && should_cleanup_mysql() {
+        stop_mysql(&test_env.compose)
+    } else {
+        Ok(())
+    };
+    finish_mysql_test(outcome, stop)?;
+
+    println!("✅ 集成测试成功!");
+    Ok(())
+}
+
+async fn mysql_executor_scenario_body(config: &MySqlConfig, database: &str) -> Result<()> {
     let executor = MySqlExecutor::new(config.clone());
 
-    // 3. 清理并创建测试数据库
-    println!("🧹 3. 清理并创建测试数据库 '{TEST_DB}'...");
-    let drop_db_sql = format!("DROP DATABASE IF EXISTS `{TEST_DB}`");
-    executor.execute_single(&drop_db_sql).await.ok();
-
-    let create_db_sql = format!("CREATE DATABASE `{TEST_DB}`");
-    executor
-        .execute_single(&create_db_sql)
-        .await
-        .context("创建测试数据库失败")?;
-
     // 4. 执行 SQL 脚本
-    println!("🔧 4. 在 '{TEST_DB}' 数据库中执行 SQL 脚本...");
+    println!("🔧 4. 在 '{database}' 数据库中执行 SQL 脚本...");
     let sql_script = format!(
-        "USE `{TEST_DB}`;
+        "USE `{database}`;
         {SQL_CREATE_TABLE}\n{SQL_ADD_COLUMN_AND_INDEX}\n{SQL_INSERT_DATA}\n{SQL_DROP_INDEX_AND_COLUMN}"
     );
     executor
@@ -347,7 +356,7 @@ async fn test_mysql_executor_integration() -> Result<()> {
         .port(config.port)
         .username(&config.user)
         .password(&config.password)
-        .database(TEST_DB);
+        .database(database);
 
     let pool = MySqlPoolOptions::new()
         .max_connections(1)
@@ -360,30 +369,51 @@ async fn test_mysql_executor_integration() -> Result<()> {
         .fetch_all(&pool)
         .await
         .context("查询表结构失败")?;
-    assert!(columns.is_empty(), "'status' 列未被成功删除");
+    anyhow::ensure!(columns.is_empty(), "'status' 列未被成功删除");
 
     let indexes: Vec<(String,)> =
         sqlx::query_as("SHOW INDEX FROM users WHERE Key_name = 'idx_email'")
             .fetch_all(&pool)
             .await
             .context("查询索引失败")?;
-    assert!(indexes.is_empty(), "'idx_email' 索引未被成功删除");
+    anyhow::ensure!(indexes.is_empty(), "'idx_email' 索引未被成功删除");
 
     // 验证数据
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
         .fetch_one(&pool)
         .await
         .context("查询数据失败")?;
-    assert_eq!(count.0, 1, "数据插入验证失败");
-
-    drop(pool);
-
-    if test_env.started_by_test && should_cleanup_mysql() {
-        stop_mysql(&test_env.compose)?;
-    }
-
-    println!("✅ 集成测试成功!");
+    anyhow::ensure!(count.0 == 1, "数据插入验证失败");
+    pool.close().await;
     Ok(())
+}
+
+async fn cleanup_test_databases(executor: &MySqlExecutor, databases: &[&str]) -> Result<()> {
+    let mut errors = Vec::new();
+    for database in databases {
+        if let Err(error) = executor
+            .execute_single(&format!("DROP DATABASE IF EXISTS `{database}`"))
+            .await
+        {
+            errors.push(format!("{database}: {error}"));
+        }
+    }
+    anyhow::ensure!(
+        errors.is_empty(),
+        "清理隔离测试库失败: {}",
+        errors.join("; ")
+    );
+    Ok(())
+}
+
+fn finish_mysql_test(outcome: Result<()>, cleanup: Result<()>) -> Result<()> {
+    match (outcome, cleanup) {
+        (Err(error), Err(cleanup_error)) => {
+            Err(error.context(format!("清理测试资源也失败: {cleanup_error:#}")))
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), cleanup) => cleanup,
+    }
 }
 
 #[derive(Debug)]
@@ -692,17 +722,13 @@ async fn manifest_migration_scenarios() -> Result<()> {
     )
     .await;
 
-    for database in [&platform_db, &im_db, &custom_db] {
-        executor
-            .execute_single(&format!("DROP DATABASE IF EXISTS `{database}`"))
-            .await
-            .ok();
-    }
-    executor
+    let cleanup = cleanup_test_databases(&executor, &[&platform_db, &im_db, &custom_db]).await;
+    let cleanup_user = executor
         .execute_single(&format!("DROP USER IF EXISTS '{app_user}'@'%'"))
         .await
-        .ok();
-    outcome
+        .map(|_| ())
+        .context("清理隔离应用账号失败");
+    finish_mysql_test(finish_mysql_test(outcome, cleanup), cleanup_user)
 }
 
 async fn manifest_scenario_body(
