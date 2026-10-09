@@ -1733,12 +1733,11 @@ pub fn verify_backup_component_compatibility(
         let name = backup_member_path(&entry.path()?)?;
         let kind = entry.header().entry_type();
         let metadata = BackupArchiveEntry {
-            regular: kind.is_file(),
+            regular: crate::backup_release::is_archive_regular_file(kind),
             directory: kind.is_dir(),
-            size: entry
-                .header()
-                .size()
-                .context("invalid backup member size")?,
+            // `Entry::size` includes GNU sparse holes; stored extent bytes can
+            // be zero even for a non-empty logical file.
+            size: entry.size(),
         };
         if let Some(previous) = entries.insert(name.clone(), metadata)
             && (previous.regular || metadata.regular)
@@ -1746,7 +1745,7 @@ pub fn verify_backup_component_compatibility(
             bail!("backup contains duplicate file entry {name}");
         }
         if name == "DELIVERY_MANIFEST.json" {
-            if !metadata.regular || metadata.size == 0 || metadata.size > 4 * 1024 * 1024 {
+            if !kind.is_file() || metadata.size == 0 || metadata.size > 4 * 1024 * 1024 {
                 bail!("backup DELIVERY_MANIFEST.json must be a non-empty regular file below 4 MiB");
             }
             let mut bytes = Vec::new();

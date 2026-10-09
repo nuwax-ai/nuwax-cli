@@ -814,6 +814,111 @@ fn add_file_to_archive(
 #[cfg(test)]
 mod release_snapshot_tests {
     use super::*;
+    use std::io::{Seek, SeekFrom, Write};
+
+    #[tokio::test]
+    async fn real_sparse_cold_backup_restores_legacy_and_release_logical_files() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        for release_aware in [false, true] {
+            let root = temp
+                .path()
+                .join(if release_aware { "release" } else { "legacy" });
+            let snapshot = if release_aware {
+                let images = crate::backup_release::release_snapshot_tests::write_release(
+                    &root, "A", "schema",
+                )?;
+                Some(crate::backup_release::capture_release_files(
+                    &root, "A", images,
+                )?)
+            } else {
+                std::fs::create_dir_all(&root)?;
+                std::fs::write(root.join("docker-compose.yml"), "services: {}\n")?;
+                std::fs::write(root.join(".env"), "USER_KEY=legacy\n")?;
+                None
+            };
+            std::fs::create_dir_all(root.join("data/mysql"))?;
+            let holes = File::create(root.join("data/mysql/holes-only"))?;
+            holes.set_len(8192)?;
+            let mut sparse = File::create(root.join("data/mysql/redo-file"))?;
+            sparse.write_all(&[1; 512])?;
+            sparse.seek(SeekFrom::Start(64 * 1024))?;
+            sparse.write_all(&[2; 512])?;
+            drop(sparse);
+            let mut expected = vec![0; 64 * 1024 + 512];
+            expected[..512].fill(1);
+            expected[64 * 1024..].fill(2);
+            let mut paths = snapshot
+                .as_ref()
+                .map_or_else(Vec::new, |snapshot| snapshot.source_paths());
+            paths.push(root.join("data"));
+            let archive_path = root.with_extension("tar.gz");
+            BackupManager::perform_backup(
+                &paths,
+                &archive_path,
+                1,
+                snapshot.as_ref().map(|snapshot| snapshot.root()),
+            )
+            .await?;
+            let mut archive = Archive::new(GzDecoder::new(File::open(&archive_path)?));
+            let mut holes_type = None;
+            for entry in archive.entries()? {
+                let entry = entry?;
+                if entry.path()?.to_string_lossy() == "data/mysql/holes-only" {
+                    assert_eq!(entry.size(), 8192);
+                    holes_type = Some(entry.header().entry_type());
+                }
+            }
+            // Linux's Builder emits S for a fully sparse real file. Other OSes
+            // currently emit regular entries; fixed GNU fixtures cover them.
+            if cfg!(target_os = "linux") {
+                assert!(holes_type.expect("holes-only member").is_gnu_sparse());
+            }
+            let staged = crate::backup_release::stage_release_restore(&archive_path, &root, true)?;
+            assert_eq!(staged.is_some(), release_aware);
+            crate::container::preflight::verify_backup_component_compatibility(
+                &archive_path,
+                &root,
+            )?;
+            let manager = BackupManager::new(
+                temp.path().join("backups"),
+                Arc::new(Database::connect_memory().await?),
+                Arc::new(DockerManager::with_project(
+                    root.join("docker-compose.yml"),
+                    root.join(".env"),
+                    None,
+                )?),
+            )?;
+            for selective in [false, true] {
+                let restored = root.join(if selective {
+                    "selective-restored"
+                } else {
+                    "full-restored"
+                });
+                if selective {
+                    manager
+                        .perform_selective_restore(&archive_path, &restored, &["data"])
+                        .await?;
+                } else {
+                    manager
+                        .perform_restore(&archive_path, &restored, &[])
+                        .await?;
+                }
+                assert_eq!(
+                    std::fs::read(restored.join("data/mysql/redo-file"))?,
+                    expected
+                );
+                assert_eq!(
+                    std::fs::metadata(restored.join("data/mysql/holes-only"))?.len(),
+                    8192
+                );
+                assert_eq!(
+                    std::fs::read(restored.join("data/mysql/holes-only"))?,
+                    vec![0; 8192]
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn real_backup_archive_roundtrips_frozen_absolute_paths_and_empty_app() -> Result<()> {

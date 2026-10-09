@@ -18,6 +18,13 @@ const COMPOSE_FILE: &str = "docker-compose.yml";
 const RELEASE_ROOTS: &[&str] = &["app", "im-app", "repo-collab-app", "config", "script"];
 const MAX_CONTEXT_SIZE: u64 = 4 * 1024 * 1024;
 
+/// GNU sparse members are regular filesystem files. `tar` validates their
+/// extent map while reading entries and reconstructs their logical zero holes.
+/// Links and other special types must never acquire regular-file semantics.
+pub(crate) fn is_archive_regular_file(kind: tar::EntryType) -> bool {
+    kind.is_file() || kind.is_gnu_sparse()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeImage {
@@ -498,10 +505,16 @@ pub fn stage_release_restore(
         let name = entry.path()?.to_string_lossy().into_owned();
         let relative = checked_relative(name.trim_end_matches('/'))?;
         let kind = entry.header().entry_type();
-        if !(kind.is_file() || kind.is_dir()) || (kind.is_file() && name.ends_with('/')) {
+        let regular = is_archive_regular_file(kind);
+        if !(regular || kind.is_dir()) || (regular && name.ends_with('/')) {
             bail!(
                 "Cold backup contains a link or special archive entry; refusing unsafe restore before stopping services"
             );
+        }
+        // tar reconstructs sparse holes with signed SeekFrom::Current offsets.
+        // Reject an otherwise valid u64 extent map that cannot be unpacked.
+        if kind.is_gnu_sparse() && entry.size() > i64::MAX as u64 {
+            bail!("Cold backup sparse file exceeds supported filesystem offsets");
         }
         if !archive_paths.insert(relative.to_string()) {
             bail!(
@@ -509,9 +522,12 @@ pub fn stage_release_restore(
             );
         }
         if name == DELIVERY_FILE {
+            if !kind.is_file() {
+                bail!("Backup delivery manifest must use a regular archive header");
+            }
             carries_delivery = true;
         }
-        if name.starts_with("data/") && entry.header().entry_type().is_file() && entry.size() > 0 {
+        if name.starts_with("data/") && regular && entry.size() > 0 {
             carries_data = true;
             cold_data_paths.insert(name.clone());
         }
@@ -556,7 +572,7 @@ pub fn stage_release_restore(
         let Some(expected) = context.files.get(&name) else {
             continue;
         };
-        if !entry.header().entry_type().is_file() || !seen.insert(name.clone()) {
+        if !is_archive_regular_file(entry.header().entry_type()) || !seen.insert(name.clone()) {
             bail!("Release backup contains a non-regular or duplicate declared file");
         }
         let path = directory.path().join(&name);
@@ -565,7 +581,10 @@ pub fn stage_release_restore(
                 .ok_or_else(|| anyhow!("Missing release file parent"))?,
         )?;
         let mut destination = fs::File::create(&path)?;
-        std::io::copy(&mut entry, &mut destination)?;
+        let expected_size = entry.size();
+        if std::io::copy(&mut entry, &mut destination)? != expected_size {
+            bail!("Release backup file {name} is truncated");
+        }
         destination.flush()?;
         #[cfg(unix)]
         {
@@ -815,6 +834,47 @@ pub(crate) mod release_snapshot_tests {
     use super::*;
     use flate2::write::GzEncoder;
 
+    /// Fixed old-GNU sparse format, independent of host filesystem support and
+    /// of Builder's automatic sparse detection (including Windows/macOS).
+    pub(crate) fn append_sparse_member<W: Write>(
+        archive: &mut tar::Builder<W>,
+        name: &str,
+        logical_size: u64,
+        extents: &[(u64, u64)],
+        stored: &[u8],
+    ) -> Result<()> {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::GNUSparse);
+        header.set_mode(0o600);
+        header.set_size(stored.len() as u64);
+        let gnu = header
+            .as_gnu_mut()
+            .ok_or_else(|| anyhow!("Missing GNU fixture header"))?;
+        gnu.set_real_size(logical_size);
+        for (block, &(offset, length)) in gnu.sparse.iter_mut().zip(extents) {
+            block.set_offset(offset);
+            block.set_length(length);
+        }
+        header.set_cksum();
+        archive.append_data(&mut header, name, stored)?;
+        Ok(())
+    }
+
+    fn append_snapshot<W: Write>(
+        archive: &mut tar::Builder<W>,
+        snapshot: &ReleaseSnapshot,
+    ) -> Result<()> {
+        for name in snapshot
+            .context
+            .files
+            .keys()
+            .chain(std::iter::once(&RELEASE_CONTEXT_FILE.to_string()))
+        {
+            archive.append_path_with_name(snapshot.root().join(name), name)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn write_release(
         root: &Path,
         version: &str,
@@ -951,14 +1011,7 @@ pub(crate) mod release_snapshot_tests {
     fn write_archive(snapshot: &ReleaseSnapshot, path: &Path, with_data: bool) -> Result<()> {
         let encoder = GzEncoder::new(fs::File::create(path)?, flate2::Compression::fast());
         let mut archive = tar::Builder::new(encoder);
-        for name in snapshot
-            .context
-            .files
-            .keys()
-            .chain(std::iter::once(&RELEASE_CONTEXT_FILE.to_string()))
-        {
-            archive.append_path_with_name(snapshot.root().join(name), name)?;
-        }
+        append_snapshot(&mut archive, snapshot)?;
         if with_data {
             let mut header = tar::Header::new_gnu();
             header.set_size(4);
@@ -967,6 +1020,180 @@ pub(crate) mod release_snapshot_tests {
             archive.append_data(&mut header, "data/mysql/cold-test", &b"cold"[..])?;
         }
         archive.into_inner()?.finish()?;
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_cold_data_with_only_holes_is_nonempty_and_keeps_metadata_strict() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("deployment");
+        let snapshot = capture_release_files(&root, "A", write_release(&root, "A", "schema")?)?;
+        let path = temp.path().join("sparse.tar.gz");
+        let encoder = GzEncoder::new(fs::File::create(&path)?, flate2::Compression::fast());
+        let mut archive = tar::Builder::new(encoder);
+        append_snapshot(&mut archive, &snapshot)?;
+        append_sparse_member(
+            &mut archive,
+            "data/mysql/cold-test",
+            8192,
+            &[(8192, 0)],
+            &[],
+        )?;
+        archive.into_inner()?.finish()?;
+        let staged = stage_release_restore(&path, &root, true)?.expect("sparse cold release");
+        require_mysql_data_files(&staged, "data/mysql")?;
+        preflight::verify_backup_component_compatibility(&path, &root)?;
+
+        // An S header carrying JSON still fails: only cold/artifact files gain
+        // sparse semantics, not the bounded release metadata format.
+        for name in [RELEASE_CONTEXT_FILE, DELIVERY_FILE] {
+            let bytes = fs::read(snapshot.root().join(name))?;
+            let encoder = GzEncoder::new(fs::File::create(&path)?, flate2::Compression::fast());
+            let mut archive = tar::Builder::new(encoder);
+            append_sparse_member(
+                &mut archive,
+                name,
+                bytes.len() as u64,
+                &[(0, bytes.len() as u64)],
+                &bytes,
+            )?;
+            archive.into_inner()?.finish()?;
+            assert!(stage_release_restore(&path, &root, true).is_err());
+            if name == DELIVERY_FILE {
+                assert!(preflight::verify_backup_component_compatibility(&path, &root).is_err());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_sparse_maps_and_unsafe_sparse_paths_fail_before_restore() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("legacy");
+        fs::create_dir(&root)?;
+        let path = temp.path().join("invalid.tar.gz");
+        for (logical_size, extents, stored) in [
+            (1024, vec![(0, 512), (256, 512)], vec![1; 1024]), // overlapping extents
+            (512, vec![(1024, 512)], vec![1; 512]),            // beyond declared logical size
+            (512, vec![(0, 1024)], vec![1; 512]),              // more stored bytes than payload
+            (513, vec![(0, 1), (512, 1)], vec![1; 2]),         // unaligned stored extent
+            (u64::MAX, vec![(u64::MAX, 0)], vec![]), // unsupported signed filesystem offset
+        ] {
+            let encoder = GzEncoder::new(fs::File::create(&path)?, flate2::Compression::fast());
+            let mut archive = tar::Builder::new(encoder);
+            append_sparse_member(
+                &mut archive,
+                "data/mysql/cold-test",
+                logical_size,
+                &extents,
+                &stored,
+            )?;
+            archive.into_inner()?.finish()?;
+            assert!(stage_release_restore(&path, &root, true).is_err());
+        }
+        for name in [
+            "../outside",
+            "data/mysql/cold-test/",
+            "data/mysql/cold-test",
+        ] {
+            let encoder = GzEncoder::new(fs::File::create(&path)?, flate2::Compression::fast());
+            let mut archive = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::GNUSparse);
+            header.set_mode(0o600);
+            header.set_size(0);
+            let gnu = header.as_gnu_mut().expect("GNU fixture");
+            gnu.set_real_size(8192);
+            gnu.sparse[0].set_offset(8192);
+            gnu.sparse[0].set_length(0);
+            // Raw path bytes allow the unsafe names that Builder rejects.
+            header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_cksum();
+            archive.append(&header, std::io::empty())?;
+            if name == "data/mysql/cold-test" {
+                append_sparse_member(&mut archive, name, 8192, &[(8192, 0)], &[])?;
+            }
+            archive.into_inner()?.finish()?;
+            assert!(stage_release_restore(&path, &root, true).is_err());
+        }
+        let mut complete = tar::Builder::new(Vec::new());
+        append_sparse_member(
+            &mut complete,
+            "data/mysql/cold-test",
+            512,
+            &[(0, 512)],
+            &[1; 512],
+        )?;
+        let bytes = complete.into_inner()?;
+        let mut truncated = GzEncoder::new(fs::File::create(&path)?, flate2::Compression::fast());
+        truncated.write_all(&bytes[..512 + 100])?;
+        truncated.finish()?;
+        assert!(stage_release_restore(&path, &root, true).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_release_artifact_hashes_cover_zero_holes_and_reject_tampering() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("deployment");
+        let images = write_release(&root, "A", "schema")?;
+        let name = "repo-collab-app/dist/index.js";
+        let mut logical = vec![0; 16 * 1024 + 512];
+        logical[..512].fill(1);
+        logical[16 * 1024..].fill(2);
+        fs::write(root.join(name), &logical)?;
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join(DELIVERY_FILE))?)?;
+        receipt["components"]["repo-collab"]["artifacts"][name] =
+            serde_json::Value::String(file_hash(&root.join(name))?);
+        receipt
+            .as_object_mut()
+            .expect("fixture receipt")
+            .remove("release_sha256");
+        let hash: String = Sha256::digest(serde_json::to_vec(&receipt)?)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        receipt["release_sha256"] = serde_json::Value::String(hash);
+        fs::write(root.join(DELIVERY_FILE), serde_json::to_vec(&receipt)?)?;
+        let snapshot = capture_release_files(&root, "A", images)?;
+        let path = temp.path().join("sparse-artifact.tar.gz");
+        for tampered in [false, true] {
+            let encoder = GzEncoder::new(fs::File::create(&path)?, flate2::Compression::fast());
+            let mut archive = tar::Builder::new(encoder);
+            for file in snapshot
+                .context
+                .files
+                .keys()
+                .filter(|file| *file != name)
+                .chain(std::iter::once(&RELEASE_CONTEXT_FILE.to_string()))
+            {
+                archive.append_path_with_name(snapshot.root().join(file), file)?;
+            }
+            let mut stored = logical[..512].to_vec();
+            stored.extend_from_slice(&logical[16 * 1024..]);
+            if tampered {
+                stored[0] ^= 1;
+            }
+            append_sparse_member(
+                &mut archive,
+                name,
+                logical.len() as u64,
+                &[(0, 512), (16 * 1024, 512)],
+                &stored,
+            )?;
+            archive.into_inner()?.finish()?;
+            let staged = stage_release_restore(&path, &root, false);
+            let compatible = preflight::verify_backup_component_compatibility(&path, &root);
+            if tampered {
+                assert!(staged.is_err());
+                assert!(compatible.is_err());
+            } else {
+                let staged = staged?.expect("sparse artifact release");
+                assert_eq!(fs::read(staged.root().join(name))?, logical);
+                compatible?;
+            }
+        }
         Ok(())
     }
 
@@ -1194,6 +1421,9 @@ pub(crate) mod release_snapshot_tests {
         for kind in [
             tar::EntryType::Symlink,
             tar::EntryType::Link,
+            tar::EntryType::Char,
+            tar::EntryType::Block,
+            tar::EntryType::Fifo,
             tar::EntryType::Regular,
         ] {
             let path = temp.path().join("unsafe-data.tar.gz");
