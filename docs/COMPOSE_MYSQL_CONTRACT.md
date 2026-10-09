@@ -14,9 +14,13 @@
 
 ## 完整包和增量包
 
+没有 manifest 的历史单库包仍要求 `config/init_mysql.sql`，不因 CLI 支持多库而要求包内不存在的 IM 模板。IM 模板存在或 Compose 挂载了其他 `init_mysql*.sql` 结构文件时，这些模板也必须完整且有效；`init_mysql_data.sql` 仍只用于首次安装。新的多库包应使用 manifest 明确声明库和文件。
+
+历史 ZIP 增量包可以不携带未变化的 Compose，CLI 使用当前选定的 Compose 校验候选配置。所需结构模板仍必须随包更新；被 patch 删除或替换的 Compose、必要组件入口必须有可应用的替代文件。无版本更新时也在停止服务前验证当前结构模板，坏配置不会等到停服后才报错。
+
 存在 schema manifest 时，离线入口也按 `schemas` 声明的路径与数据库身份验证，不依赖固定两个 SQL 文件名。非法或不支持的 manifest 立即失败，不回退 legacy。
 
-ZIP 增量包必须携带完整的关键交付上下文：Compose、DELIVERY、schema manifest 及其引用文件，以及 DELIVERY 声明的组件产物。即使 patch operation 清单遗漏这些文件，解压器也会应用已预检的完整关键文件集合。TAR.GZ 目前用于完整包；TAR.GZ 增量包在候选预检时拒绝。
+采用 manifest/DELIVERY 契约的 ZIP 增量包必须携带完整的关键交付上下文：Compose、DELIVERY、schema manifest 及其引用文件，以及 DELIVERY 声明的组件产物。即使 patch operation 清单遗漏这些文件，解压器也会应用已预检的完整关键文件集合。TAR.GZ 目前用于完整包；TAR.GZ 增量包在候选预检时拒绝。
 
 资料库的必要入口是非空普通文件 `repo-collab-app/dist/index.js`；IM 需要两个非空 bootstrap jar。空目录、只有 README、重复普通条目、符号链接入口和与 receipt 不一致的产物不能作为完整交付或完整备份。
 

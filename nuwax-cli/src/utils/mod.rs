@@ -12,6 +12,7 @@ use zip::read::ZipFile;
 pub mod device_env;
 pub mod env_manager;
 pub mod env_merge;
+pub(crate) mod legacy_schema;
 
 // 重新导出匹配器模块
 // pub use matcher::*;
@@ -542,10 +543,42 @@ fn patch_critical_files(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<
             files.extend(manifest.referenced_paths());
             files
         }
-        None => client_core::constants::sql::CRITICAL_UPGRADE_FILES
-            .iter()
-            .map(|path| path.to_string())
-            .collect(),
+        None => {
+            let compose = match optional_zip_text(archive, "docker-compose.yml")? {
+                Some(compose) => Some(compose),
+                None => {
+                    match std::fs::read_to_string(get_docker_work_dir().join("docker-compose.yml"))
+                    {
+                        Ok(compose) => Some(compose),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => {
+                            return Err(error).context("Failed to read retained legacy Compose");
+                        }
+                    }
+                }
+            };
+            let mut paths = legacy_schema::schema_paths(compose.as_deref(), |path| {
+                archive
+                    .file_names()
+                    .any(|name| name == path || name == format!("docker/{path}"))
+                    || get_docker_work_dir().join(path).exists()
+            })?;
+            legacy_schema::parse_templates(&paths, |path| {
+                optional_zip_text(archive, path)?
+                    .ok_or_else(|| anyhow::anyhow!("Patch archive is missing critical file {path}"))
+            })?;
+            if let Some(compose) = compose {
+                for path in legacy_schema::component_entrypoints(&compose)? {
+                    if archive
+                        .file_names()
+                        .any(|name| name == path || name == format!("docker/{path}"))
+                    {
+                        paths.push(path.to_string());
+                    }
+                }
+            }
+            paths
+        }
     };
     if let Some(text) = optional_zip_text(archive, "DELIVERY_MANIFEST.json")? {
         let delivery = client_core::container::preflight::parse_delivery_manifest(&text)?;
@@ -704,6 +737,12 @@ async fn extract_zip_archive(
             info!("   ⏱️  Elapsed: {:.2} seconds", elapsed.as_secs_f64());
         }
         UpgradeStrategy::PatchUpgrade { patch_info, .. } => {
+            legacy_schema::validate_changed_paths(&patch_info.get_changed_files())?;
+            if optional_zip_text(&mut archive, "docker-compose.yml")?.is_none()
+                && !legacy_schema::can_retain("docker-compose.yml", &patch_info.get_changed_files())
+            {
+                anyhow::bail!("Patch changes Compose but does not include its replacement");
+            }
             let critical_files = patch_critical_files(&mut archive)?;
             // 增量升级：根据操作的文件和目录进行操作
             let change_files = patch_info.get_changed_files();
@@ -1221,7 +1260,9 @@ pub fn read_archive_entries(
                 {
                     let mut bytes = Vec::with_capacity(entry.size() as usize);
                     std::io::Read::read_to_end(&mut entry, &mut bytes)?;
-                    found.insert(wanted_name.to_string(), bytes);
+                    if found.insert(wanted_name.to_string(), bytes).is_some() {
+                        anyhow::bail!("Duplicate package entry: {wanted_name}");
+                    }
                 }
             }
         }
@@ -1242,7 +1283,9 @@ pub fn read_archive_entries(
                 {
                     let mut bytes = Vec::new();
                     std::io::Read::read_to_end(&mut entry, &mut bytes)?;
-                    found.insert(wanted_name.to_string(), bytes);
+                    if found.insert(wanted_name.to_string(), bytes).is_some() {
+                        anyhow::bail!("Duplicate package entry: {wanted_name}");
+                    }
                 }
             }
         }

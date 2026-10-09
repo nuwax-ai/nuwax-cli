@@ -169,15 +169,20 @@ fn validate_offline_archive_sql(archive_path: &Path) -> Result<()> {
             .iter()
             .map(|schema| PathBuf::from(&schema.path))
             .collect(),
-        None => sql::SCHEMA_SQL_FILES
-            .iter()
-            .map(|file| {
-                Path::new(file)
-                    .strip_prefix("docker")
-                    .unwrap_or(Path::new(file))
-                    .to_path_buf()
-            })
-            .collect(),
+        None => {
+            let mut names = vec!["docker-compose.yml"];
+            names.extend(sql::OPTIONAL_SCHEMA_SQL_FILES.iter().copied());
+            let entries = crate::utils::read_archive_entries(archive_path, &names)?;
+            let compose = entries
+                .get("docker-compose.yml")
+                .map(|bytes| std::str::from_utf8(bytes))
+                .transpose()
+                .context("Offline Compose file is not valid UTF-8")?;
+            crate::utils::legacy_schema::schema_paths(compose, |path| entries.contains_key(path))?
+                .into_iter()
+                .map(PathBuf::from)
+                .collect()
+        }
     };
     let is_target = |path: &Path| -> Option<usize> { expected.iter().position(|e| e == path) };
 
@@ -335,27 +340,16 @@ async fn run_staged_deployment(
     let migration_plan = resolve_migration_plan(&context.package_root)?;
     let (manifest, template_databases) = match &migration_plan {
         MigrationPlan::Manifest(manifest) => (Some(manifest), manifest.database_names()),
-        MigrationPlan::Legacy => {
-            let mut template_databases = Vec::with_capacity(sql::SCHEMA_SQL_FILES.len());
-            for template_path in sql::SCHEMA_SQL_FILES {
-                let path = context
-                    .package_root
-                    .join(template_path.trim_start_matches("docker/"));
-                let content = fs::read_to_string(&path).with_context(|| {
-                    format!(
-                        "{}",
-                        t!(
-                            "auto_upgrade_deploy.schema_template_missing",
-                            path = path.display().to_string()
-                        )
-                    )
-                })?;
-                let template = parse_schema_template(&content)
-                    .with_context(|| format!("Invalid schema template {template_path}"))?;
-                template_databases.push(template.database);
-            }
-            (None, template_databases)
-        }
+        MigrationPlan::Legacy => (
+            None,
+            crate::utils::legacy_schema::disk_templates(
+                &context.package_root,
+                context.manager.get_compose_file(),
+            )?
+            .into_iter()
+            .map(|template| template.database)
+            .collect(),
+        ),
     };
 
     let docker_manager = &context.manager;
@@ -579,6 +573,17 @@ fn preflight_candidate_package_at(
     is_patch: bool,
     user_env_path: &Path,
 ) -> Result<()> {
+    preflight_candidate_package_with_compose_at(archive_path, is_patch, user_env_path, None, &[])
+}
+
+fn preflight_candidate_package_with_compose_at(
+    archive_path: &Path,
+    is_patch: bool,
+    user_env_path: &Path,
+    current_compose: Option<&Path>,
+    changed_paths: &[String],
+) -> Result<()> {
+    crate::utils::legacy_schema::validate_changed_paths(changed_paths)?;
     if is_patch && archive::detect_format_by_magic(archive_path)? != ArchiveFormat::Zip {
         anyhow::bail!(
             "Incremental package application requires ZIP; use a full package for TAR.GZ archives"
@@ -598,11 +603,24 @@ fn preflight_candidate_package_at(
             )
         })?;
 
-    let compose_bytes = entries
-        .get("docker-compose.yml")
-        .ok_or_else(|| anyhow::anyhow!("candidate package has no docker-compose.yml"))?;
-    let compose_text = String::from_utf8(compose_bytes.clone())
-        .context("candidate package docker-compose.yml is not valid UTF-8")?;
+    let legacy_patch = is_patch
+        && !entries.contains_key("config/mysql-schema-manifest.json")
+        && !entries.contains_key("DELIVERY_MANIFEST.json");
+    let compose_text = match entries.get("docker-compose.yml") {
+        Some(bytes) => String::from_utf8(bytes.clone())
+            .context("candidate package docker-compose.yml is not valid UTF-8")?,
+        None if legacy_patch => {
+            if !crate::utils::legacy_schema::can_retain("docker-compose.yml", changed_paths) {
+                anyhow::bail!("Legacy patch changes Compose but does not include its replacement");
+            }
+            let path = current_compose.context(
+                "Legacy patch without Compose requires the selected current Compose file",
+            )?;
+            fs::read_to_string(path)
+                .with_context(|| format!("Failed to read current Compose {}", path.display()))?
+        }
+        None => anyhow::bail!("candidate package has no docker-compose.yml"),
+    };
 
     // 合并 env：用户现值完全保留 + 包内默认补键；解析走与运行时相同的
     // Compose env-file 解析器（引号/行内注释/插值-未定义为空/优先级，F03）
@@ -673,19 +691,29 @@ fn preflight_candidate_package_at(
             Some(manifest)
         }
         None => {
-            // legacy 包：patch 必须携带全部关键 schema（不能沿用磁盘旧文件）
-            if is_patch {
-                for critical in client_core::constants::sql::CRITICAL_UPGRADE_FILES {
-                    let present = crate::utils::read_archive_entries(archive_path, &[critical])?
-                        .contains_key(*critical);
-                    if !present {
-                        return Err(anyhow::anyhow!(
-                            "patch package is missing critical schema file {critical}; \
-                             refusing to keep a stale schema (use a full package)"
-                        ));
-                    }
-                }
-            }
+            let optional =
+                crate::utils::read_archive_entries(archive_path, sql::OPTIONAL_SCHEMA_SQL_FILES)?;
+            let paths = crate::utils::legacy_schema::schema_paths(Some(&compose_text), |path| {
+                optional.contains_key(path)
+                    || (legacy_patch
+                        && current_compose
+                            .and_then(Path::parent)
+                            .is_some_and(|root| root.join(path).exists()))
+            })?;
+            let names: Vec<&str> = paths.iter().map(String::as_str).collect();
+            let schemas = crate::utils::read_archive_entries(archive_path, &names)?;
+            // A legacy patch may retain Compose, but never retain a stale schema.
+            let templates = crate::utils::legacy_schema::parse_templates(&paths, |path| {
+                let bytes = schemas.get(path).ok_or_else(|| {
+                    anyhow::anyhow!("candidate package is missing required schema file {path}")
+                })?;
+                String::from_utf8(bytes.clone()).map_err(Into::into)
+            })?;
+            let databases = templates
+                .into_iter()
+                .map(|template| template.database)
+                .collect::<Vec<_>>();
+            client_core::container::preflight::validate_local_db_targets(&values, &databases)?;
             None
         }
     };
@@ -757,10 +785,36 @@ fn preflight_candidate_package_at(
                 .is_some_and(|leaf| leaf.contains('.'));
             let present = mount_entries.contains_key(source.as_str())
                 || (!looks_like_file && crate::utils::archive_contains(archive_path, source)?);
-            if !present {
+            let retained = legacy_patch
+                && crate::utils::legacy_schema::can_retain(source, changed_paths)
+                && current_compose
+                    .and_then(Path::parent)
+                    .is_some_and(|root| root.join(source).exists());
+            if !present && !retained {
                 return Err(anyhow::anyhow!(
-                    "candidate compose mounts '{source}' but the package does not contain it"
+                    "candidate compose mounts '{source}' but the candidate deployment does not contain it"
                 ));
+            }
+        }
+    }
+
+    if legacy_patch {
+        // Directory presence alone is insufficient: operations may remove a
+        // required child while leaving siblings available in the patch.
+        let required = crate::utils::legacy_schema::component_entrypoints(&compose_text)?;
+        let entries = crate::utils::read_archive_entries(archive_path, &required)?;
+        for path in required {
+            if entries.get(path).is_some_and(Vec::is_empty) {
+                anyhow::bail!("Legacy patch supplies an empty component file {path}");
+            }
+            let supplied = entries.contains_key(path);
+            let retained = crate::utils::legacy_schema::can_retain(path, changed_paths)
+                && current_compose.and_then(Path::parent).is_some_and(|root| {
+                    fs::metadata(root.join(path))
+                        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+                });
+            if !supplied && !retained {
+                anyhow::bail!("Legacy patch candidate is missing required component file {path}");
             }
         }
     }
@@ -777,6 +831,7 @@ fn preflight_candidate_package(
     app: &CliApp,
     strategy: &UpgradeStrategy,
     user_env_path: &Path,
+    current_compose: &Path,
 ) -> Result<()> {
     let Some(path) = docker_service::package_path_for_strategy(app, strategy)? else {
         return Ok(());
@@ -787,8 +842,18 @@ fn preflight_candidate_package(
             path.display()
         ));
     }
+    let changed_paths = match strategy {
+        UpgradeStrategy::PatchUpgrade { patch_info, .. } => patch_info.get_changed_files(),
+        _ => Vec::new(),
+    };
     let is_patch = matches!(strategy, UpgradeStrategy::PatchUpgrade { .. });
-    preflight_candidate_package_at(&path, is_patch, user_env_path)
+    preflight_candidate_package_with_compose_at(
+        &path,
+        is_patch,
+        user_env_path,
+        Some(current_compose),
+        &changed_paths,
+    )
 }
 
 /// 停止旧服务前的当前配置预检（C01）：必填键、库目标/连接映射、宿主产物完整性。
@@ -805,7 +870,13 @@ fn preflight_current_config(
     let plan = resolve_migration_plan(docker_root)?;
     let (manifest, template_databases) = match &plan {
         MigrationPlan::Manifest(manifest) => (Some(manifest), manifest.database_names()),
-        MigrationPlan::Legacy => (None, collect_existing_template_databases(docker_root)),
+        MigrationPlan::Legacy => (
+            None,
+            crate::utils::legacy_schema::disk_templates(docker_root, compose_path)?
+                .into_iter()
+                .map(|template| template.database)
+                .collect(),
+        ),
     };
     let delivery = load_delivery_manifest(docker_root)?;
     client_core::container::preflight::preflight_deploy_config_at(
@@ -817,20 +888,6 @@ fn preflight_current_config(
         delivery.as_ref(),
     )
     .context("Configuration preflight failed before stopping services")
-}
-
-/// 收集磁盘上现存且可解析的 schema 模板库名（宽容处理：旧部署可能尚无
-/// 新增模板文件；完整校验在解压后的预检中执行，这里只为库目标校验提供输入）
-fn collect_existing_template_databases(docker_root: &Path) -> Vec<String> {
-    client_core::constants::sql::SCHEMA_SQL_FILES
-        .iter()
-        .filter_map(|relative| {
-            fs::read_to_string(docker_root.join(relative.trim_start_matches("docker/")))
-                .ok()
-                .and_then(|content| parse_schema_template(&content).ok())
-                .map(|template| template.database)
-        })
-        .collect()
 }
 
 /// Immutable in-memory snapshot of the selected operator environment.
@@ -988,8 +1045,13 @@ pub async fn run_auto_upgrade_deploy(
         &context.package_root,
     )?;
     // Initial installations also validate the candidate before extraction.
-    preflight_candidate_package(app, &upgrade_strategy, docker_manager.get_env_file())
-        .context("Candidate package preflight failed before stopping services")?;
+    preflight_candidate_package(
+        app,
+        &upgrade_strategy,
+        docker_manager.get_env_file(),
+        docker_manager.get_compose_file(),
+    )
+    .context("Candidate package preflight failed before stopping services")?;
     let package_path = docker_service::package_path_for_strategy(app, &upgrade_strategy)?;
     let package_defaults = package_path
         .as_deref()
@@ -1329,34 +1391,16 @@ async fn legacy_live_diff(
     executor: &MySqlExecutor,
     package_root: &Path,
 ) -> Result<client_core::sql_diff::MultiDbDiffResult> {
-    let mut templates = Vec::with_capacity(sql::SCHEMA_SQL_FILES.len());
-    for template_path in sql::SCHEMA_SQL_FILES {
-        let source_path = package_root.join(template_path.trim_start_matches("docker/"));
-        let content = fs::read_to_string(&source_path).with_context(|| {
-            format!(
-                "{}",
-                t!(
-                    "auto_upgrade_deploy.schema_template_missing",
-                    path = source_path.display().to_string()
-                )
-            )
-        })?;
-        let template = parse_schema_template(&content)
-            .with_context(|| format!("Invalid schema template {template_path}"))?;
-
-        // 同一库出现在多个模板文件属于配置错误（diff 会重复建表）
-        if templates
-            .iter()
-            .any(|existing: &client_core::sql_diff::SchemaTemplate| {
-                existing.database == template.database
-            })
-        {
-            return Err(anyhow::anyhow!(
-                "Duplicate schema template for database `{}` in SCHEMA_SQL_FILES",
-                template.database
-            ));
-        }
-
+    let compose = fs::read_to_string(package_root.join("docker-compose.yml"))
+        .context("Failed to read legacy Compose for schema selection")?;
+    let paths = crate::utils::legacy_schema::schema_paths(Some(&compose), |path| {
+        package_root.join(path).exists()
+    })?;
+    let templates = crate::utils::legacy_schema::parse_templates(&paths, |path| {
+        fs::read_to_string(package_root.join(path)).map_err(Into::into)
+    })?;
+    for (template_path, template) in paths.iter().zip(&templates) {
+        let source_path = package_root.join(template_path);
         let new_sql_path = temp_sql_dir.join(format!("{}_new.sql", template.database));
         if new_sql_path.exists() {
             fs::remove_file(&new_sql_path)?;
@@ -1366,14 +1410,8 @@ async fn legacy_live_diff(
             src = source_path.display(),
             dst = new_sql_path.display()
         ))?;
-        info!(
-            database = %template.database,
-            tables = template.tables.len(),
-            path = %new_sql_path.display(),
-            "📄 Copied schema template for database"
-        );
-
-        templates.push(template);
+        info!(database = %template.database, tables = template.tables.len(),
+            path = %new_sql_path.display(), "📄 Copied schema template for database");
     }
 
     info!("📊 Generating SQL differences based on online schema (legacy fixed list)...");
@@ -2628,7 +2666,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_archive_requires_all_schema_templates() -> Result<()> {
+    fn offline_legacy_archive_requires_platform_and_validates_present_im() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let archive = directory.path().join("bundle.tar.gz");
 
@@ -2636,8 +2674,16 @@ mod tests {
         write_archive(&archive, None, None)?;
         assert!(validate_offline_archive_sql(&archive).is_err());
 
-        // 缺 im 模板（对应"新 CLI + 旧包"组合，Fail Fast）
+        // Legacy single-database releases remain supported by the new CLI.
         write_archive(&archive, Some(valid_platform_sql()), None)?;
+        validate_offline_archive_sql(&archive)?;
+
+        // Optional templates, when present, must still be valid.
+        write_archive(
+            &archive,
+            Some(valid_platform_sql()),
+            Some("CREATE TABLE im_users (id INT);"),
+        )?;
         assert!(validate_offline_archive_sql(&archive).is_err());
 
         // 模板缺 USE（无法归属库）
@@ -2651,6 +2697,434 @@ mod tests {
         // 两模板齐全且合法
         write_archive(&archive, Some(valid_platform_sql()), Some(valid_im_sql()))?;
         validate_offline_archive_sql(&archive)?;
+        Ok(())
+    }
+
+    fn write_legacy_zip(path: &Path, entries: &[(&str, &str)]) -> Result<()> {
+        let mut archive = zip::ZipWriter::new(File::create(path)?);
+        for (name, content) in entries {
+            archive.start_file(*name, zip::write::SimpleFileOptions::default())?;
+            archive.write_all(content.as_bytes())?;
+        }
+        archive.finish()?;
+        Ok(())
+    }
+
+    fn legacy_compose() -> &'static str {
+        "services:\n  mysql:\n    image: mysql:8.0\n    volumes:\n      - ./config/init_mysql.sql:/docker-entrypoint-initdb.d/10_init_mysql.sql:ro\n      - ./config/init_mysql_data.sql:/docker-entrypoint-initdb.d/30_data.sql:ro\n"
+    }
+
+    #[test]
+    fn legacy_full_zip_accepts_single_database_and_checks_mounted_extra_schema() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = directory.path().join("full.zip");
+        let env = directory.path().join("operator.env");
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/docker-compose.yml", legacy_compose()),
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+                (
+                    "docker/config/init_mysql_data.sql",
+                    "INSERT INTO users VALUES (1);",
+                ),
+            ],
+        )?;
+        validate_offline_archive_sql(&archive)?;
+        super::preflight_candidate_package_at(&archive, false, &env)?;
+        let aliased =
+            legacy_compose().replace("./config/init_mysql.sql", "./config/./init_mysql.sql");
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/docker-compose.yml", &aliased),
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+            ],
+        )?;
+        super::preflight_candidate_package_at(&archive, false, &env)?;
+
+        let im_compose = format!(
+            "{}      - ./config/init_mysql_im.sql:/docker-entrypoint-initdb.d/20_im.sql:ro\n",
+            legacy_compose()
+        );
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/docker-compose.yml", &im_compose),
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+            ],
+        )?;
+        assert!(validate_offline_archive_sql(&archive).is_err());
+        assert!(super::preflight_candidate_package_at(&archive, false, &env).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_no_upgrade_preflight_accepts_single_database_and_rejects_bad_or_missing_im()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        std::fs::create_dir_all(root.join("config"))?;
+        let compose = root.join("docker-compose.yml");
+        let env = root.join(".env");
+        std::fs::write(&compose, legacy_compose())?;
+        std::fs::write(&env, "MYSQL_DATABASE=agent_platform\n")?;
+        std::fs::write(root.join("config/init_mysql.sql"), valid_platform_sql())?;
+        super::preflight_current_config(&compose, &env, &root)?;
+        std::fs::write(
+            root.join("config/init_mysql_im.sql"),
+            "CREATE TABLE im_users (id INT);",
+        )?;
+        assert!(super::preflight_current_config(&compose, &env, &root).is_err());
+        std::fs::remove_file(root.join("config/init_mysql_im.sql"))?;
+        std::fs::write(
+            &compose,
+            format!(
+                "{}      - ./config/init_mysql_im.sql:/docker-entrypoint-initdb.d/20_im.sql:ro\n",
+                legacy_compose()
+            ),
+        )?;
+        assert!(super::preflight_current_config(&compose, &env, &root).is_err());
+        std::fs::write(root.join("config/init_mysql_im.sql"), valid_im_sql())?;
+        super::preflight_current_config(&compose, &env, &root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_patch_reuses_current_compose_and_force_updates_single_schema() -> Result<()> {
+        use client_core::api_types::{PatchOperations, PatchPackageInfo};
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        std::fs::create_dir_all(root.join("config"))?;
+        let compose = root.join("docker-compose.yml");
+        let env = directory.path().join("secrets/operator.env");
+        std::fs::create_dir_all(env.parent().context("env parent")?)?;
+        std::fs::write(&env, "MYSQL_DATABASE=agent_platform\n")?;
+        std::fs::write(&compose, legacy_compose())?;
+        std::fs::write(root.join("config/init_mysql.sql"), "old schema")?;
+        let archive = directory.path().join("patch.zip");
+        write_legacy_zip(
+            &archive,
+            &[("docker/config/init_mysql.sql", valid_platform_sql())],
+        )?;
+        super::preflight_candidate_package_with_compose_at(
+            &archive,
+            true,
+            &env,
+            Some(&compose),
+            &[],
+        )?;
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: None,
+                    delete: None,
+                },
+            },
+            target_version: "0.0.90.1".parse()?,
+            download_type: DownloadType::Patch,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extracted =
+            crate::utils::extract_docker_service_with_env(&archive, &strategy, &env).await;
+        std::env::set_current_dir(cwd)?;
+        extracted?;
+        assert_eq!(std::fs::read_to_string(&compose)?, legacy_compose());
+        assert_eq!(
+            std::fs::read_to_string(root.join("config/init_mysql.sql"))?,
+            valid_platform_sql()
+        );
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &["docker-compose.yml".to_string()],
+            )
+            .is_err(),
+            "a patch deleting/replacing Compose cannot retain its old contents"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_patch_rejects_operations_removing_retained_component_entrypoints() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        std::fs::create_dir_all(root.join("im-app"))?;
+        let compose = root.join("docker-compose.yml");
+        let env = directory.path().join("operator.env");
+        let im_compose = format!(
+            "{}  im:\n    image: im\n    volumes:\n      - ./im-app:/app:ro\n",
+            legacy_compose()
+        );
+        std::fs::write(&compose, im_compose)?;
+        for name in [
+            "nuwax-im-web-bootstrap.jar",
+            "nuwax-im-gateway-bootstrap.jar",
+        ] {
+            std::fs::write(root.join("im-app").join(name), "jar bytes")?;
+        }
+        let archive = directory.path().join("patch.zip");
+        write_legacy_zip(
+            &archive,
+            &[("docker/config/init_mysql.sql", valid_platform_sql())],
+        )?;
+        super::preflight_candidate_package_with_compose_at(
+            &archive,
+            true,
+            &env,
+            Some(&compose),
+            &[],
+        )?;
+        for changed in ["im-app", "im-app/nuwax-im-web-bootstrap.jar"] {
+            assert!(
+                super::preflight_candidate_package_with_compose_at(
+                    &archive,
+                    true,
+                    &env,
+                    Some(&compose),
+                    &[changed.to_string()],
+                )
+                .is_err()
+            );
+        }
+        // A sibling entry cannot hide removal of a required jar in a directory mount.
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+                ("docker/im-app/readme.txt", "patched readme"),
+            ],
+        )?;
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &["im-app/nuwax-im-web-bootstrap.jar".to_string()],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("im-app/nuwax-im-web-bootstrap.jar"))?,
+            "jar bytes"
+        );
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+                ("docker/im-app/nuwax-im-web-bootstrap.jar", ""),
+            ],
+        )?;
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &[],
+            )
+            .is_err(),
+            "an explicitly empty replacement cannot fall back to the old jar"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_patch_force_restores_supplied_binary_jar_deleted_without_replace() -> Result<()>
+    {
+        use client_core::api_types::{PatchOperations, PatchPackageInfo, ReplaceOperations};
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        std::fs::create_dir_all(root.join("config"))?;
+        std::fs::create_dir_all(root.join("im-app"))?;
+        let compose = root.join("docker-compose.yml");
+        let env = root.join(".env");
+        std::fs::write(
+            &compose,
+            format!(
+                "{}  im:\n    image: im\n    volumes:\n      - ./im-app:/app:ro\n",
+                legacy_compose()
+            ),
+        )?;
+        std::fs::write(&env, "MYSQL_DATABASE=agent_platform\n")?;
+        std::fs::write(root.join("config/init_mysql.sql"), valid_platform_sql())?;
+        let web = "im-app/nuwax-im-web-bootstrap.jar";
+        std::fs::write(root.join(web), "old jar")?;
+        std::fs::write(
+            root.join("im-app/nuwax-im-gateway-bootstrap.jar"),
+            "unchanged jar",
+        )?;
+        let archive = directory.path().join("patch.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive)?);
+        zip.start_file(
+            "docker/config/init_mysql.sql",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(valid_platform_sql().as_bytes())?;
+        zip.start_file(
+            format!("docker/{web}"),
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        let jar = [0x50, 0x4b, 0xff, 0xfe];
+        zip.write_all(&jar)?;
+        zip.finish()?;
+        super::preflight_candidate_package_with_compose_at(
+            &archive,
+            true,
+            &env,
+            Some(&compose),
+            &[web.to_string()],
+        )?;
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: None,
+                    delete: Some(ReplaceOperations {
+                        files: vec![web.to_string()],
+                        directories: Vec::new(),
+                    }),
+                },
+            },
+            target_version: "0.0.90.1".parse()?,
+            download_type: DownloadType::Patch,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extracted =
+            crate::utils::extract_docker_service_with_env(&archive, &strategy, &env).await;
+        std::env::set_current_dir(cwd)?;
+        extracted?;
+        assert_eq!(std::fs::read(root.join(web))?, jar);
+        assert_eq!(
+            std::fs::read_to_string(root.join("im-app/nuwax-im-gateway-bootstrap.jar"))?,
+            "unchanged jar"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_patch_rejects_unsafe_operation_paths_before_retaining_compose() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("docker-compose.yml");
+        std::fs::write(&compose, legacy_compose())?;
+        let archive = directory.path().join("patch.zip");
+        write_legacy_zip(
+            &archive,
+            &[("docker/config/init_mysql.sql", valid_platform_sql())],
+        )?;
+        let env = directory.path().join("operator.env");
+        for changed in [
+            "config/../docker-compose.yml",
+            ".//docker-compose.yml",
+            "/docker-compose.yml",
+            "C:\\docker-compose.yml",
+            ".",
+        ] {
+            assert!(
+                super::preflight_candidate_package_with_compose_at(
+                    &archive,
+                    true,
+                    &env,
+                    Some(&compose),
+                    &[changed.to_string()],
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(std::fs::read_to_string(compose)?, legacy_compose());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_patch_requires_referenced_or_preexisting_im_from_candidate_archive() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        std::fs::create_dir_all(root.join("config"))?;
+        let compose = root.join("docker-compose.yml");
+        let env = directory.path().join("operator.env");
+        let archive = directory.path().join("patch.zip");
+        write_legacy_zip(
+            &archive,
+            &[("docker/config/init_mysql.sql", valid_platform_sql())],
+        )?;
+        std::fs::write(
+            &compose,
+            format!(
+                "{}      - ./config/init_mysql_im.sql:/docker-entrypoint-initdb.d/20_im.sql:ro\n",
+                legacy_compose()
+            ),
+        )?;
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &[],
+            )
+            .is_err()
+        );
+        std::fs::write(&compose, legacy_compose())?;
+        std::fs::write(root.join("config/init_mysql_im.sql"), valid_im_sql())?;
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &[],
+            )
+            .is_err()
+        );
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+                (
+                    "docker/config/init_mysql_im.sql",
+                    "CREATE TABLE im_users (id INT);",
+                ),
+            ],
+        )?;
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &[],
+            )
+            .is_err()
+        );
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+                ("docker/config/init_mysql_im.sql", valid_im_sql()),
+            ],
+        )?;
+        super::preflight_candidate_package_with_compose_at(
+            &archive,
+            true,
+            &env,
+            Some(&compose),
+            &[],
+        )?;
         Ok(())
     }
 
