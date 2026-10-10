@@ -83,6 +83,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Test atomic file replacement
         run: cargo test --locked -p client-core atomic_file::tests
+      - name: Test download error sources and checkpoint failures
+        run: cargo test --locked -p client-core --lib downloader::tests::source_error_tests
       - name: Test fingerprints and platform collectors
         run: 'cargo test --locked -p client-core device_info::'
       - name: Test lossless env editing

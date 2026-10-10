@@ -33,7 +33,7 @@
 //! - 支持大文件下载恢复
 
 use crate::error::DuckError;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono;
 use futures::stream::StreamExt;
 use reqwest::Client;
@@ -398,7 +398,7 @@ impl FileDownloader {
             .head(url)
             .send()
             .await
-            .map_err(|e| DuckError::custom(format!("Failed to check Range support: {e}")))?;
+            .context("Failed to check Range support")?;
 
         info!("HTTP response status: {}", response.status());
 
@@ -828,7 +828,7 @@ impl FileDownloader {
         let response = request
             .send()
             .await
-            .map_err(|e| DuckError::custom(format!("Failed to start download request: {e}")))?;
+            .context("Failed to start download request")?;
 
         // 检查响应状态
         let expected_status = if is_resume { 206 } else { 200 };
@@ -855,7 +855,7 @@ impl FileDownloader {
                     .get(params.url)
                     .send()
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to start re-download request: {e}"))?;
+                    .context("Failed to start re-download request")?;
 
                 if new_response.status().as_u16() != 200 {
                     return Err(anyhow::anyhow!(
@@ -881,16 +881,21 @@ impl FileDownloader {
                     info!("Deleting partially downloaded file, preparing to re-download");
                     tokio::fs::remove_file(params.download_path)
                         .await
-                        .map_err(|e| anyhow::anyhow!("Failed to delete partial file: {e}"))?;
+                        .with_context(|| {
+                            format!(
+                                "Failed to delete partial file {}",
+                                params.download_path.display()
+                            )
+                        })?;
                 }
 
                 // 清理元数据
                 let _ = self.cleanup_metadata(params.download_path).await;
 
                 // 创建新文件并从头开始下载
-                let mut file = File::create(params.download_path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to create file: {e}"))?;
+                let mut file = File::create(params.download_path).await.with_context(|| {
+                    format!("Failed to create file {}", params.download_path.display())
+                })?;
 
                 // 重置元数据
                 params.metadata.downloaded_bytes = 0;
@@ -968,12 +973,14 @@ impl FileDownloader {
                 .append(true)
                 .open(params.download_path)
                 .await
-                .map_err(|e| DuckError::custom(format!("Failed to open file: {e}")))?
+                .with_context(|| {
+                    format!("Failed to open file {}", params.download_path.display())
+                })?
         } else {
             info!("Creating new file");
-            File::create(params.download_path)
-                .await
-                .map_err(|e| DuckError::custom(format!("Failed to create file: {e}")))?
+            File::create(params.download_path).await.with_context(|| {
+                format!("Failed to create file {}", params.download_path.display())
+            })?
         };
 
         // 执行下载
@@ -1057,29 +1064,35 @@ impl FileDownloader {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(error) => {
-                    self.save_checkpoint(
+                    let checkpoint = self
+                        .save_checkpoint(
+                            params.file,
+                            params.download_path,
+                            params.metadata,
+                            downloaded,
+                            &hasher,
+                        )
+                        .await;
+                    return Err(with_checkpoint_error(
+                        anyhow::Error::new(error).context("Failed to download data"),
+                        checkpoint,
+                    ));
+                }
+            };
+            if let Err(error) = params.file.write_all(&chunk).await {
+                let checkpoint = self
+                    .save_checkpoint(
                         params.file,
                         params.download_path,
                         params.metadata,
                         downloaded,
                         &hasher,
                     )
-                    .await?;
-                    return Err(
-                        DuckError::custom(format!("Failed to download data: {error}")).into(),
-                    );
-                }
-            };
-            if let Err(error) = params.file.write_all(&chunk).await {
-                self.save_checkpoint(
-                    params.file,
-                    params.download_path,
-                    params.metadata,
-                    downloaded,
-                    &hasher,
-                )
-                .await?;
-                return Err(DuckError::custom(format!("Failed to write file: {error}")).into());
+                    .await;
+                return Err(with_checkpoint_error(
+                    anyhow::Error::new(error).context("Failed to write file"),
+                    checkpoint,
+                ));
             }
             hasher.update(&chunk);
             downloaded += chunk.len() as u64;
@@ -1251,6 +1264,15 @@ impl FileDownloader {
     }
 }
 
+/// Preserve the typed primary failure even when recording the resumable prefix
+/// also fails. The secondary diagnostic is context, never a replacement source.
+fn with_checkpoint_error(primary: anyhow::Error, checkpoint: Result<()>) -> anyhow::Error {
+    match checkpoint {
+        Ok(()) => primary,
+        Err(secondary) => primary.context(format!("Resume checkpoint also failed: {secondary:#}")),
+    }
+}
+
 /// 简化的下载功能，用于向后兼容
 pub async fn download_file_simple(url: &str, download_path: &Path) -> Result<()> {
     let downloader = FileDownloader::with_default_config();
@@ -1282,6 +1304,276 @@ pub fn create_downloader(config: DownloaderConfig) -> FileDownloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod source_error_tests {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        #[derive(Clone, Copy)]
+        enum Failure {
+            BodyTimeout,
+            Disconnect,
+            HeaderTimeout,
+            FallbackHeaderTimeout,
+            WriteChunks,
+        }
+
+        struct Server {
+            url: String,
+            task: tokio::task::JoinHandle<()>,
+        }
+
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.task.abort();
+            }
+        }
+
+        impl Server {
+            async fn start(failure: Failure) -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("http://{}/body", listener.local_addr().unwrap());
+                let task = tokio::spawn(async move {
+                    loop {
+                        let (mut socket, _) = listener.accept().await.unwrap();
+                        tokio::spawn(async move {
+                            let mut request = Vec::new();
+                            let mut buffer = [0_u8; 2048];
+                            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                                let length = socket.read(&mut buffer).await.unwrap();
+                                if length == 0 {
+                                    return;
+                                }
+                                request.extend_from_slice(&buffer[..length]);
+                            }
+                            let head = request.starts_with(b"HEAD ");
+                            let range = String::from_utf8_lossy(&request)
+                                .to_ascii_lowercase()
+                                .contains("\r\nrange:");
+                            if matches!(failure, Failure::HeaderTimeout)
+                                || matches!(failure, Failure::FallbackHeaderTimeout) && !range
+                            {
+                                tokio::time::sleep(Duration::from_secs(4)).await;
+                                return;
+                            }
+                            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 65536\r\nAccept-Ranges: bytes\r\nETag: \"source-error-fixture\"\r\nConnection: close\r\n\r\n";
+                            if socket.write_all(response).await.is_err() || head {
+                                return;
+                            }
+                            if socket.write_all(b"data").await.is_err() {
+                                return;
+                            }
+                            match failure {
+                                Failure::BodyTimeout => {
+                                    tokio::time::sleep(Duration::from_secs(4)).await
+                                }
+                                Failure::Disconnect => {}
+                                Failure::WriteChunks | Failure::FallbackHeaderTimeout => {
+                                    tokio::time::sleep(Duration::from_millis(50)).await;
+                                    let _ = socket.write_all(&vec![0_u8; 65532]).await;
+                                }
+                                Failure::HeaderTimeout => {
+                                    unreachable!("header timeout returns before body")
+                                }
+                            }
+                        });
+                    }
+                });
+                Self { url, task }
+            }
+        }
+
+        fn downloader() -> FileDownloader {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let config = DownloaderConfig {
+                timeout_seconds: 1,
+                enable_progress_logging: false,
+                resume_threshold: 1,
+                ..DownloaderConfig::default()
+            };
+            let client = Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap();
+            FileDownloader::new_with_custom_client(config, client)
+        }
+
+        fn assert_timeout_source(error: &anyhow::Error) {
+            let request = error
+                .downcast_ref::<reqwest::Error>()
+                .expect("typed HTTP source must remain available");
+            assert!(
+                request.is_timeout(),
+                "HTTP source must retain timeout classification: {error:#}"
+            );
+            let rendered = format!("{error:#}").to_ascii_lowercase();
+            assert!(
+                rendered.contains("timed out"),
+                "full causal rendering must expose the root timeout: {rendered}"
+            );
+        }
+
+        async fn stream_failure(
+            failure: Failure,
+            checkpoint_failure: bool,
+            readonly: bool,
+        ) -> anyhow::Error {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("partial.data");
+            let mut file = if readonly {
+                tokio::fs::write(&path, b"previous").await.unwrap();
+                File::open(&path).await.unwrap()
+            } else {
+                File::create(&path).await.unwrap()
+            };
+            if checkpoint_failure {
+                std::fs::create_dir(path.with_extension("download")).unwrap();
+            }
+            let downloader = downloader();
+            let server = Server::start(failure).await;
+            let response = downloader
+                .get_http_client()
+                .get(&server.url)
+                .send()
+                .await
+                .unwrap();
+            let mut metadata =
+                DownloadMetadata::new(server.url.clone(), 65536, None, "test-version".into());
+            let result = downloader
+                .download_stream_with_resume::<fn(DownloadProgress)>(StreamDownloadParams {
+                    response,
+                    file: &mut file,
+                    download_path: &path,
+                    progress_callback: None,
+                    task_id: "source-error-test",
+                    start_byte: 0,
+                    prefix_hasher: None,
+                    total_size: 65536,
+                    is_resume: false,
+                    metadata: &mut metadata,
+                })
+                .await;
+            let error = result.expect_err("real HTTP fixture must fail in the requested boundary");
+            if !readonly && !checkpoint_failure {
+                assert_eq!(tokio::fs::read(&path).await.unwrap(), b"data");
+                let saved: DownloadMetadata = serde_json::from_slice(
+                    &tokio::fs::read(path.with_extension("download"))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(saved.downloaded_bytes, 4);
+                assert!(saved.partial_sha256.is_some());
+            }
+            error
+        }
+
+        #[tokio::test]
+        async fn real_body_timeout_keeps_typed_http_source_and_root_cause() {
+            let error = stream_failure(Failure::BodyTimeout, false, false).await;
+            assert_timeout_source(&error);
+            assert!(format!("{error:#}").contains("Failed to download data"));
+        }
+
+        #[tokio::test]
+        async fn real_body_disconnect_keeps_http_source_and_checkpoint() {
+            let error = stream_failure(Failure::Disconnect, false, false).await;
+            let request = error
+                .downcast_ref::<reqwest::Error>()
+                .expect("typed disconnect source");
+            assert!(!request.is_timeout());
+            assert!(
+                error.chain().count() > 2,
+                "nested transport cause must survive: {error:#}"
+            );
+        }
+
+        #[tokio::test]
+        async fn real_body_timeout_checkpoint_failure_keeps_the_primary_timeout() {
+            let error = stream_failure(Failure::BodyTimeout, true, false).await;
+            assert_timeout_source(&error);
+            assert!(format!("{error:#}").contains("Resume checkpoint also failed"));
+        }
+
+        #[tokio::test]
+        async fn real_write_failure_checkpoint_failure_keeps_the_primary_io_error() {
+            let error = stream_failure(Failure::WriteChunks, true, true).await;
+            assert!(
+                error.downcast_ref::<std::io::Error>().is_some(),
+                "typed write source must survive: {error:#}"
+            );
+            let rendered = format!("{error:#}");
+            assert!(
+                rendered.contains("Failed to write file"),
+                "primary write boundary lost: {rendered}"
+            );
+            assert!(rendered.contains("Resume checkpoint also failed"));
+        }
+
+        #[tokio::test]
+        async fn real_head_timeout_keeps_http_source() {
+            let downloader = downloader();
+            let server = Server::start(Failure::HeaderTimeout).await;
+            let error = downloader
+                .check_range_support(&server.url)
+                .await
+                .unwrap_err();
+            assert_timeout_source(&error);
+            assert!(format!("{error:#}").contains("Failed to check Range support"));
+        }
+
+        #[tokio::test]
+        async fn real_initial_get_timeout_keeps_http_source() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("partial.data");
+            let downloader = downloader();
+            let server = Server::start(Failure::HeaderTimeout).await;
+            let mut metadata =
+                DownloadMetadata::new(server.url.clone(), 65536, None, "test-version".into());
+            let error = downloader
+                .download_with_resume_internal::<fn(DownloadProgress)>(ResumeDownloadParams {
+                    url: &server.url,
+                    download_path: &path,
+                    progress_callback: None,
+                    existing_size: None,
+                    prefix_hasher: None,
+                    total_size: 65536,
+                    task_id: "source-error-test",
+                    metadata: &mut metadata,
+                })
+                .await
+                .unwrap_err();
+            assert_timeout_source(&error);
+            assert!(format!("{error:#}").contains("Failed to start download request"));
+        }
+
+        #[tokio::test]
+        async fn real_fallback_get_timeout_keeps_http_source() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("partial.data");
+            let downloader = downloader();
+            let server = Server::start(Failure::FallbackHeaderTimeout).await;
+            let mut metadata =
+                DownloadMetadata::new(server.url.clone(), 65536, None, "test-version".into());
+            let error = downloader
+                .download_with_resume_internal::<fn(DownloadProgress)>(ResumeDownloadParams {
+                    url: &server.url,
+                    download_path: &path,
+                    progress_callback: None,
+                    existing_size: Some(4),
+                    prefix_hasher: None,
+                    total_size: 65536,
+                    task_id: "source-error-test",
+                    metadata: &mut metadata,
+                })
+                .await
+                .unwrap_err();
+            assert_timeout_source(&error);
+            assert!(format!("{error:#}").contains("Failed to start re-download request"));
+        }
+    }
 
     #[test]
     fn test_aliyun_oss_url_detection() {
