@@ -194,7 +194,14 @@ impl UpgradeStrategyManager {
             );
             Ok(UpgradeStrategy::FullUpgrade {
                 url: platform_info.url.clone(),
-                hash: "external".to_string(), // 平台包通常没有预设哈希
+                hash: platform_info
+                    .published_sha256(
+                        self.manifest
+                            .packages
+                            .as_ref()
+                            .map(|packages| &packages.full),
+                    )?
+                    .unwrap_or_else(|| "external".to_string()),
                 signature: platform_info.signature.clone(),
                 target_version: self.manifest.version.clone(),
                 download_type: DownloadType::Full,
@@ -312,10 +319,12 @@ mod tests {
             }),
             platforms: Some(PlatformPackages {
                 x86_64: Some(PlatformPackageInfo {
+                    hash: None,
                     signature: "x86_64_signature".to_string(),
                     url: "https://example.com/x86_64/docker.zip".to_string(),
                 }),
                 aarch64: Some(PlatformPackageInfo {
+                    hash: None,
                     signature: "aarch64_signature".to_string(),
                     url: "https://example.com/aarch64/docker.zip".to_string(),
                 }),
@@ -474,5 +483,108 @@ mod tests {
         let strategy = manager.determine_strategy().unwrap();
 
         assert!(matches!(strategy, UpgradeStrategy::FullUpgrade { .. }));
+    }
+
+    #[test]
+    fn cache_identity_uses_selected_platform_sha_and_url_matched_legacy_fallback() {
+        let mut manifest = create_test_manifest();
+        let platform = match Architecture::detect() {
+            Architecture::X86_64 => manifest
+                .platforms
+                .as_mut()
+                .unwrap()
+                .x86_64
+                .as_mut()
+                .unwrap(),
+            Architecture::Aarch64 => manifest
+                .platforms
+                .as_mut()
+                .unwrap()
+                .aarch64
+                .as_mut()
+                .unwrap(),
+            _ => panic!("test host architecture unsupported"),
+        };
+        platform.hash = Some("a".repeat(64));
+        let manager = UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest);
+        let UpgradeStrategy::FullUpgrade { hash, .. } =
+            manager.select_full_upgrade_strategy().unwrap()
+        else {
+            panic!("expected full upgrade");
+        };
+        assert_eq!(hash, "a".repeat(64));
+
+        let mut manifest = create_test_manifest();
+        manifest.packages.as_mut().unwrap().full.hash = "b".repeat(64);
+        let platform = match Architecture::detect() {
+            Architecture::X86_64 => manifest
+                .platforms
+                .as_mut()
+                .unwrap()
+                .x86_64
+                .as_mut()
+                .unwrap(),
+            Architecture::Aarch64 => manifest
+                .platforms
+                .as_mut()
+                .unwrap()
+                .aarch64
+                .as_mut()
+                .unwrap(),
+            _ => panic!("test host architecture unsupported"),
+        };
+        platform.url = manifest.packages.as_ref().unwrap().full.url.clone();
+        let manager = UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest);
+        let UpgradeStrategy::FullUpgrade { hash, .. } =
+            manager.select_full_upgrade_strategy().unwrap()
+        else {
+            panic!("expected full upgrade");
+        };
+        assert_eq!(hash, "b".repeat(64));
+
+        let manifest = create_test_manifest();
+        let manager = UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest);
+        let UpgradeStrategy::FullUpgrade { hash, .. } =
+            manager.select_full_upgrade_strategy().unwrap()
+        else {
+            panic!("expected full upgrade");
+        };
+        // Generic full.url differs from both platform URLs: no cross-arch digest.
+        assert_eq!(hash, "external");
+    }
+
+    #[test]
+    fn platform_digest_sentinels_do_not_hide_a_valid_same_url_generic_digest() {
+        for placeholder in [None, Some(String::new()), Some("external".to_owned())] {
+            let mut manifest = create_test_manifest();
+            manifest.packages.as_mut().unwrap().full.hash = "b".repeat(64);
+            let url = manifest.packages.as_ref().unwrap().full.url.clone();
+            let platform = match Architecture::detect() {
+                Architecture::X86_64 => manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .x86_64
+                    .as_mut()
+                    .unwrap(),
+                Architecture::Aarch64 => manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .aarch64
+                    .as_mut()
+                    .unwrap(),
+                _ => panic!("test host architecture unsupported"),
+            };
+            platform.hash = placeholder;
+            platform.url = url;
+            let manager = UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest);
+            let UpgradeStrategy::FullUpgrade { hash, .. } =
+                manager.select_full_upgrade_strategy().unwrap()
+            else {
+                panic!("expected full upgrade");
+            };
+            assert_eq!(hash, "b".repeat(64));
+        }
     }
 }

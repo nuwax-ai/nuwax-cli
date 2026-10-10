@@ -15,7 +15,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
@@ -95,52 +95,31 @@ fn absolute_deployment_path(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-/// A directory move invalidates aliases whose link or resolved target is inside
-/// the package root. System aliases above that root (such as /var) remain valid.
-fn validate_offline_env_aliases(env_path: &Path, package_root: &Path) -> Result<()> {
-    let root = absolute_deployment_path(package_root)?;
-    let canonical_root = if root.exists() {
-        fs::canonicalize(&root).context("Failed to resolve the offline package root")?
-    } else {
-        let parent = root
-            .parent()
-            .context("Offline package root has no parent")?;
-        let name = root
-            .file_name()
-            .context("Offline package root has no name")?;
-        fs::canonicalize(parent)
-            .context("Failed to resolve the offline package parent")?
-            .join(name)
-    };
+/// All selected environment aliases must resolve before stopping services.
+/// The shared transaction protects both the alias and its target in place.
+fn validate_offline_env_aliases(env_path: &Path, _package_root: &Path) -> Result<()> {
     let selected = absolute_deployment_path(env_path)?;
     for ancestor in selected.ancestors() {
-        let metadata = match fs::symlink_metadata(ancestor) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                fs::canonicalize(ancestor).with_context(|| {
+                    format!(
+                        "Offline environment alias must resolve before stopping services: {}",
+                        ancestor.display(),
+                    )
+                })?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(error).context("Failed to inspect the selected environment path");
             }
-        };
-        if !metadata.file_type().is_symlink() {
-            continue;
-        }
-        let target = fs::canonicalize(ancestor)
-            .context("Offline environment aliases must resolve before replacing the package")?;
-        let location = match (ancestor.parent(), ancestor.file_name()) {
-            (Some(parent), Some(name)) => fs::canonicalize(parent)
-                .context("Failed to resolve an environment alias parent")?
-                .join(name),
-            _ => ancestor.to_path_buf(),
-        };
-        if location.starts_with(&canonical_root) || target.starts_with(&canonical_root) {
-            anyhow::bail!(
-                "Offline package replacement cannot preserve an environment alias stored in or targeting the package root; use a regular environment file inside docker/ or an external alias whose real target is outside docker/"
-            );
         }
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn read_package_env_defaults(path: &Path) -> Result<String> {
     crate::utils::read_archive_entries(path, &[".env"])?
         .remove(".env")
@@ -317,7 +296,9 @@ async fn wait_for_mysql_connection(compose_path: &Path, env_path: &Path) -> Resu
         let attempt_timeout = remaining.min(Duration::from_secs(10));
         match tokio::time::timeout(attempt_timeout, executor.test_connection()).await {
             Ok(Ok(())) => return Ok(executor),
-            Ok(Err(error)) => last_error = error.to_string(),
+            Ok(Err(error)) => {
+                last_error = crate::format_error_with_env(&anyhow::Error::new(error), env_path)
+            }
             Err(_) => last_error = "connection attempt timed out".to_string(),
         }
         debug!(error = %last_error, "Waiting for MySQL to accept SQL connections");
@@ -326,14 +307,20 @@ async fn wait_for_mysql_connection(compose_path: &Path, env_path: &Path) -> Resu
     }
 }
 
+struct StagedDeployment<'a> {
+    had_existing_compose: bool,
+    target_version: &'a str,
+    database_starting: bool,
+    replacement: Option<&'a mut crate::utils::package_replace::PackageReplacement>,
+}
+
 async fn run_staged_deployment(
     app: &mut CliApp,
     frontend_port: Option<u16>,
     config_file: Option<PathBuf>,
     project_name: Option<String>,
     context: &DeploymentContext,
-    had_existing_compose: bool,
-    target_version: &str,
+    staged: &mut StagedDeployment<'_>,
 ) -> Result<()> {
     // 部署前校验迁移计划：manifest v1（解析+结构+文件校验）或 legacy 固定清单
     // （缺文件/解析失败即 Fail Fast）；顺带收集库名供配置预检校验应用连接目标
@@ -377,7 +364,7 @@ async fn run_staged_deployment(
         .context("Candidate compose violates the initdb mount contract")?;
     }
 
-    if had_existing_compose {
+    if staged.had_existing_compose {
         // stop_docker_services_and_wait 在没有运行容器时可能跳过 down；这里清理旧的已停止容器。
         docker_manager
             .stop_services()
@@ -392,6 +379,12 @@ async fn run_staged_deployment(
     let mysql_stage = docker_manager.get_service_dependency_closure("mysql")?;
     let all_services = docker_manager.get_compose_service_names().await?;
     info!("▶️ Starting MySQL and its Compose dependencies...");
+    // MySQL initdb can alter data before Live Diff; from this boundary onward
+    // retain package recovery files instead of automatically rolling files back.
+    if let Some(replacement) = staged.replacement.as_deref_mut() {
+        replacement.mark_database_starting()?;
+    }
+    staged.database_starting = true;
     docker_manager
         .up_services(&["mysql".to_string()], false)
         .await?;
@@ -446,71 +439,8 @@ async fn run_staged_deployment(
         .context("Docker services did not become healthy after MySQL migration")?;
 
     let app_config_path = app.config_path.clone();
-    update_config_version(&mut app.config, &app_config_path, target_version)?;
+    update_config_version(&mut app.config, &app_config_path, staged.target_version)?;
     info!("✅ Deployment completed after MySQL migration and service health checks");
-    Ok(())
-}
-
-fn create_docker_backup_path() -> PathBuf {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    PathBuf::from(format!(
-        ".docker.offline-backup-{}-{timestamp}",
-        std::process::id()
-    ))
-}
-
-fn restore_docker_backup(backup_dir: &Path, docker_dir: &Path) -> Result<()> {
-    if docker_dir.exists() {
-        fs::remove_dir_all(docker_dir).context("Failed to remove partial docker directory")?;
-    }
-
-    if backup_dir.exists() {
-        fs::rename(backup_dir, docker_dir)
-            .context("Failed to restore previous docker directory")?;
-    }
-
-    Ok(())
-}
-
-fn restore_preserved_docker_dirs(backup_dir: &Path, docker_dir: &Path) -> Result<()> {
-    if !backup_dir.exists() {
-        return Ok(());
-    }
-
-    fs::create_dir_all(docker_dir).context("Failed to create docker directory")?;
-
-    for dir_name in client_core::constants::docker::EXCLUDE_DIRS {
-        let old_path = backup_dir.join(dir_name);
-        if !old_path.exists() {
-            continue;
-        }
-
-        let new_path = docker_dir.join(dir_name);
-        if dir_name == ".env" && old_path.is_file() && new_path.is_file() {
-            crate::utils::env_merge::merge_preserved_env_file(&old_path, &new_path)?;
-            info!("🛡️ Preserved existing .env values and added missing package defaults");
-            continue;
-        }
-
-        if new_path.exists() {
-            if new_path.is_dir() {
-                fs::remove_dir_all(&new_path).with_context(|| {
-                    format!("Failed to replace preserved directory: {dir_name}")
-                })?;
-            } else {
-                fs::remove_file(&new_path)
-                    .with_context(|| format!("Failed to replace preserved file: {dir_name}"))?;
-            }
-        }
-
-        fs::rename(&old_path, &new_path)
-            .with_context(|| format!("Failed to restore preserved directory: {dir_name}"))?;
-        info!("🛡️ Restored preserved docker directory: {dir_name}");
-    }
-
     Ok(())
 }
 
@@ -893,12 +823,14 @@ fn preflight_current_config(
 /// Immutable in-memory snapshot of the selected operator environment.
 /// Capture before stopping services; apply package defaults or restore the
 /// original contents atomically to the same file, without secrets backup files.
+#[cfg(test)]
 struct OnlineEnvPreserve {
     env_path: PathBuf,
     preserved: Option<String>,
     permissions: Option<fs::Permissions>,
 }
 
+#[cfg(test)]
 impl OnlineEnvPreserve {
     fn capture(env_path: &Path) -> Result<Self> {
         let preserved = match fs::read_to_string(env_path) {
@@ -954,6 +886,7 @@ impl OnlineEnvPreserve {
     }
 }
 
+#[cfg(test)]
 fn env_snapshot_for_strategy(
     strategy: &UpgradeStrategy,
     env_path: &Path,
@@ -1060,12 +993,22 @@ pub async fn run_auto_upgrade_deploy(
     )
     .context("Candidate package preflight failed before stopping services")?;
     let package_path = docker_service::package_path_for_strategy(app, &upgrade_strategy)?;
-    let package_defaults = package_path
-        .as_deref()
-        .map(read_package_env_defaults)
-        .transpose()?
-        .unwrap_or_default();
-    let env_preserve = env_snapshot_for_strategy(&upgrade_strategy, docker_manager.get_env_file())?;
+    // Stage and probe affected managed directories before stopping services.
+    // Neither the docker root nor any existing persistent tree is moved.
+    let mut replacement = match package_path.as_deref() {
+        Some(path) => Some(
+            crate::utils::package_replace::PackageReplacement::prepare_async(
+                path,
+                &upgrade_strategy,
+                &context.package_root,
+                docker_manager.get_env_file(),
+                true,
+            )
+            .await
+            .context("Package replacement preflight failed before stopping services")?,
+        ),
+        None => None,
+    };
     if had_existing_compose {
         // 3. 🛑 停止服务并等待（使用统一的公共方法）
         let stopped = docker_service::stop_docker_services_and_wait(
@@ -1096,7 +1039,7 @@ pub async fn run_auto_upgrade_deploy(
         if let Err(e) = docker_manager.ensure_host_volumes_exist().await {
             warn!(
                 "⚠️ Mount directory check/creation failed: {error}",
-                error = e.to_string()
+                error = crate::format_error_with_env(&e, docker_manager.get_env_file())
             );
             warn!("Continuing execution, but container startup may fail");
         } else {
@@ -1109,63 +1052,58 @@ pub async fn run_auto_upgrade_deploy(
         );
     }
 
-    // 6. 📦 解压新的Docker服务包（在服务停止后）
-    info!("📦 Extracting Docker service package...");
-
-    // Extraction is the sole owner of cleanup and protects the selected env.
-    let extraction = match package_path.as_deref() {
-        Some(path) => {
-            crate::utils::extract_docker_service_with_env(
-                path,
-                &upgrade_strategy,
-                docker_manager.get_env_file(),
-            )
-            .await
-        }
-        None => Ok(()),
-    };
-    match extraction {
-        Ok(_) => {
-            info!("✅ Docker service package extracted");
-
-            // C01: 与包内 .env 合并（保留用户值、仅补新包新增键；NoUpgrade 无守卫）
-            if let Some(env_preserve) = env_preserve.as_ref() {
-                env_preserve.merge_defaults(&package_defaults)?;
-            }
-
-            // 🔧 自动修复关键脚本文件权限
-            fix_script_permissions().await?;
-
-            // 版本号在 MySQL 迁移及全部服务健康后提交。
-        }
-        Err(e) => {
-            error!(
-                "❌ Failed to extract Docker service package: {error}",
-                error = e.to_string()
-            );
-            // C01: 解压失败原样还原用户 .env，保证失败不污染
-            if let Some(env_preserve) = env_preserve.as_ref()
-                && let Err(restore_error) = env_preserve.restore()
-            {
-                warn!(
-                    "⚠️ Failed to restore preserved .env after extraction failure: {error}",
-                    error = restore_error.to_string()
-                );
-            }
-            return Err(e);
+    if let Some(replacement) = replacement.as_mut() {
+        replacement.apply()?;
+        if let Err(error) = fix_script_permissions().await {
+            return replacement.recover_error(error);
         }
     }
-
-    run_staged_deployment(
+    let mut staged = StagedDeployment {
+        had_existing_compose,
+        target_version: &target_version,
+        database_starting: false,
+        replacement: replacement.as_mut(),
+    };
+    let deployment = run_staged_deployment(
         app,
         frontend_port,
         config_file,
         project_name,
         &context,
-        had_existing_compose,
-        &target_version,
+        &mut staged,
     )
-    .await
+    .await;
+    let database_starting = staged.database_starting;
+    finish_package_deployment(replacement, deployment, database_starting)
+}
+
+/// Recover only managed release files before MySQL starts. From MySQL startup
+/// (which includes initdb) onward, never restore database files or switch release
+/// files underneath a running database automatically.
+fn finish_package_deployment(
+    mut replacement: Option<crate::utils::package_replace::PackageReplacement>,
+    deployment: Result<()>,
+    database_starting: bool,
+) -> Result<()> {
+    match deployment {
+        Ok(()) => match replacement {
+            Some(replacement) => replacement.finish(),
+            None => Ok(()),
+        },
+        Err(error) => {
+            if let Some(replacement) = replacement.as_mut() {
+                if !database_starting {
+                    return replacement.recover_error(error);
+                }
+                let recovery = replacement.retain_for_recovery();
+                return Err(error.context(format!(
+                    "Deployment failed after MySQL startup; managed package recovery files retained at {}; persistent data was not rolled back and deployment completion was not confirmed",
+                    recovery.display(),
+                )));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// 预约延迟执行自动升级部署
@@ -1820,8 +1758,22 @@ pub async fn run_offline_deploy(
     )?;
     preflight_candidate_package_at(&archive_path, false, docker_manager.get_env_file())
         .context("Offline package preflight failed before stopping services")?;
-    let package_defaults = read_package_env_defaults(&archive_path)?;
-    let env_preserve = OnlineEnvPreserve::capture(docker_manager.get_env_file())?;
+    let upgrade_strategy = UpgradeStrategy::FullUpgrade {
+        url: String::new(),
+        hash: String::new(),
+        signature: String::new(),
+        target_version: version.clone(),
+        download_type: client_core::upgrade_strategy::DownloadType::Full,
+    };
+    let mut replacement = crate::utils::package_replace::PackageReplacement::prepare_async(
+        &archive_path,
+        &upgrade_strategy,
+        &context.package_root,
+        docker_manager.get_env_file(),
+        true,
+    )
+    .await
+    .context("Offline package replacement preflight failed before stopping services")?;
     if had_existing_compose {
         // 停止服务并等待
         let stopped = docker_service::stop_docker_services_and_wait(
@@ -1846,89 +1798,38 @@ pub async fn run_offline_deploy(
         if let Err(e) = docker_manager.ensure_host_volumes_exist().await {
             warn!(
                 "⚠️ Mount directory check/creation failed: {error}",
-                error = e.to_string()
+                error = crate::format_error_with_env(&e, docker_manager.get_env_file())
             );
         }
     }
 
-    // 6. 解压（全量升级方式）
-    info!("📦 Extracting Docker service package...");
-
-    let upgrade_strategy = UpgradeStrategy::FullUpgrade {
-        url: String::new(),
-        hash: String::new(),
-        signature: String::new(),
-        target_version: version.clone(),
-        download_type: client_core::upgrade_strategy::DownloadType::Full,
-    };
-
-    // 直接解压本地文件。先把旧 docker 目录改名备份，解压失败时恢复。
-    let docker_dir = context.package_root.as_path();
-    let backup_dir = create_docker_backup_path();
-    let had_existing_docker_dir = docker_dir.exists();
-    if had_existing_docker_dir {
-        info!("🧹 Moving existing docker directory to temporary backup...");
-        fs::rename(docker_dir, &backup_dir)
-            .context("Failed to backup existing docker directory")?;
+    replacement.apply()?;
+    if let Err(error) = fix_script_permissions().await {
+        return replacement.recover_error(error);
     }
-
-    if let Err(e) = crate::utils::extract_docker_service_with_env(
-        &archive_path,
-        &upgrade_strategy,
-        docker_manager.get_env_file(),
-    )
-    .await
-    {
-        warn!("⚠️ Extract failed, restoring previous docker directory");
-        restore_docker_backup(&backup_dir, docker_dir)?;
-        env_preserve.restore()?;
-        return Err(e);
-    }
-
-    if had_existing_docker_dir {
-        restore_preserved_docker_dirs(&backup_dir, docker_dir)?;
-    }
-    env_preserve.merge_defaults(&package_defaults)?;
-    info!("✅ Docker service package extracted");
-
     let target_version = version.to_string();
-    let deployment = async {
-        fix_script_permissions().await?;
-        run_staged_deployment(
-            app,
-            frontend_port,
-            config_file,
-            project_name,
-            &context,
-            had_existing_compose,
-            &target_version,
-        )
-        .await
-    }
+    let mut staged = StagedDeployment {
+        had_existing_compose,
+        target_version: &target_version,
+        database_starting: false,
+        replacement: Some(&mut replacement),
+    };
+    let deployment = run_staged_deployment(
+        app,
+        frontend_port,
+        config_file,
+        project_name,
+        &context,
+        &mut staged,
+    )
     .await;
-    if let Err(error) = deployment {
-        if had_existing_docker_dir {
-            error!(backup_path = %backup_dir.display(), "Deployment failed; old package files were retained for inspection. MySQL data was not rolled back");
-        }
-        return Err(error);
-    }
-
-    if had_existing_docker_dir
-        && backup_dir.exists()
-        && let Err(error) = fs::remove_dir_all(&backup_dir)
-    {
-        warn!(backup_path = %backup_dir.display(), %error, "Deployment succeeded, but old package directory could not be removed");
-    }
-
-    Ok(())
+    let database_starting = staged.database_starting;
+    finish_package_deployment(Some(replacement), deployment, database_starting)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        OnlineEnvPreserve, UpgradeStrategy, restore_preserved_docker_dirs,
-        validate_offline_archive_sql,
-    };
+    use super::{OnlineEnvPreserve, UpgradeStrategy, validate_offline_archive_sql};
     use anyhow::{Context, Result};
     use flate2::{Compression, write::GzEncoder};
     use std::{fs::File, io::Write, path::Path};
@@ -2034,7 +1935,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn offline_rejects_external_leaf_and_parent_aliases_into_moving_package() -> Result<()> {
+    fn offline_accepts_external_leaf_and_parent_aliases_into_preserved_package() -> Result<()> {
         use std::os::unix::fs::symlink;
         let directory = tempfile::tempdir()?;
         let package = directory.path().join("docker");
@@ -2043,13 +1944,11 @@ mod tests {
         std::fs::write(&target, "OPERATOR=fixture\n")?;
         let leaf = directory.path().join("external.env");
         symlink(&target, &leaf)?;
-        assert!(super::validate_offline_env_aliases(&leaf, &package).is_err());
+        super::validate_offline_env_aliases(&leaf, &package)?;
 
         let parent = directory.path().join("external-secrets");
         symlink(package.join("secrets"), &parent)?;
-        assert!(
-            super::validate_offline_env_aliases(&parent.join("operator.env"), &package).is_err()
-        );
+        super::validate_offline_env_aliases(&parent.join("operator.env"), &package)?;
         assert_eq!(std::fs::read_to_string(&target)?, "OPERATOR=fixture\n");
         Ok(())
     }
@@ -2073,7 +1972,7 @@ mod tests {
 
         let inside_alias = package.join("inside-alias.env");
         symlink(&external, &inside_alias)?;
-        assert!(super::validate_offline_env_aliases(&inside_alias, &package).is_err());
+        super::validate_offline_env_aliases(&inside_alias, &package)?;
 
         // An alias above the package root is equivalent to macOS /var or /tmp:
         // its target is an ancestor of the root, not something moved with it.
@@ -3276,55 +3175,222 @@ mod tests {
     #[test]
     fn offline_upgrade_preserves_existing_values_and_adds_package_env_defaults() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let backup = directory.path().join("docker.previous");
         let docker = directory.path().join("docker");
-        std::fs::create_dir_all(&backup)?;
-        std::fs::create_dir_all(&docker)?;
-        std::fs::write(
-            backup.join(".env"),
-            "# operator config\nMYSQL_PASSWORD=existing-test-value\nFRONTEND_HOST_PORT=8091",
-        )?;
+        std::fs::create_dir(&docker)?;
         std::fs::write(
             docker.join(".env"),
-            "MYSQL_PASSWORD=package-default\nSURREALDB_USER=package-user\nSURREALDB_PASSWORD=package-password\n",
+            "# operator config\nMYSQL_PASSWORD=existing-test-value\nFRONTEND_HOST_PORT=8091",
         )?;
-
-        restore_preserved_docker_dirs(&backup, &docker)?;
-
+        let archive = directory.path().join("package.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive)?);
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"MYSQL_PASSWORD=package-default\nSURREALDB_USER=package-user\nSURREALDB_PASSWORD=package-password\n")?;
+        zip.finish()?;
+        let strategy = UpgradeStrategy::FullUpgrade {
+            url: String::new(),
+            hash: String::new(),
+            signature: String::new(),
+            target_version: "0.0.108".parse()?,
+            download_type: client_core::upgrade_strategy::DownloadType::Full,
+        };
+        let mut replacement = crate::utils::package_replace::PackageReplacement::prepare(
+            &archive,
+            &strategy,
+            &docker,
+            &docker.join(".env"),
+            true,
+        )?;
+        replacement.apply()?;
+        replacement.finish()?;
         let merged = std::fs::read_to_string(docker.join(".env"))?;
-        assert!(merged.contains("# operator config\n"));
-        assert!(merged.contains("MYSQL_PASSWORD=existing-test-value\n"));
-        assert!(merged.contains("FRONTEND_HOST_PORT=8091\n"));
+        assert!(merged.starts_with(
+            "# operator config\nMYSQL_PASSWORD=existing-test-value\nFRONTEND_HOST_PORT=8091\n"
+        ));
         assert!(merged.contains("SURREALDB_USER=package-user\n"));
         assert!(merged.contains("SURREALDB_PASSWORD=package-password\n"));
         assert!(!merged.contains("MYSQL_PASSWORD=package-default"));
-        assert!(!backup.join(".env").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn real_candidate_rejection_reuses_the_verified_completed_download() -> Result<()> {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        use std::time::Duration;
+        struct Fixture {
+            stop: Arc<AtomicBool>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&source)?);
+        zip.start_file(
+            "docker/docker-compose.yml",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(b"services:\n  backend:\n    image: fixture\n    environment:\n      - SECRET=${CODEX_CACHE_PREFLIGHT_REQUIRED:?required}\n")?;
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"CODEX_CACHE_PREFLIGHT_REQUIRED=\n")?;
+        zip.start_file(
+            "docker/config/init_mysql.sql",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(valid_platform_sql().as_bytes())?;
+        zip.finish()?;
+        let body = std::fs::read(&source)?;
+        let size = body.len();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/package.zip", listener.local_addr()?);
+        listener.set_nonblocking(true)?;
+        let get_count = Arc::new(AtomicUsize::new(0));
+        let transferred = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_count = get_count.clone();
+        let thread_bytes = transferred.clone();
+        let thread_stop = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking fixture connection");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("read timeout");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 2048];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).expect("HTTP request");
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let get = request.starts_with(b"GET ");
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nETag: \"cache-preflight-one\"\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).expect("HTTP header");
+                if get {
+                    thread_count.fetch_add(1, Ordering::SeqCst);
+                    stream.write_all(&body).expect("HTTP body");
+                    thread_bytes.fetch_add(body.len(), Ordering::SeqCst);
+                }
+            }
+        });
+        let fixture = Fixture {
+            stop,
+            thread: Some(thread),
+        };
+        let identity = client_core::package_cache::PackageIdentity::new(
+            "0.0.108.0",
+            client_core::architecture::Architecture::detect().as_str(),
+            "full",
+            &url,
+            None,
+        )?;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let api = client_core::api::ApiClient::new(None, None);
+        let cache = directory.path().join("cache");
+        let selected_env = directory.path().join("operator.env");
+        for _ in 0..2 {
+            let candidate = api.download_service_package(&cache, &identity).await?;
+            let error = super::preflight_candidate_package_at(&candidate, false, &selected_env)
+                .err()
+                .context("The actual candidate preflight must reject the missing key")?;
+            assert!(format!("{error:#}").contains("CODEX_CACHE_PREFLIGHT_REQUIRED"));
+        }
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+        assert_eq!(transferred.load(Ordering::SeqCst), size);
+        drop(fixture);
         Ok(())
     }
 
     #[test]
-    fn offline_upgrade_preserves_existing_service_logs() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let backup = directory.path().join("docker.previous");
-        let docker = directory.path().join("docker");
-        let old_logs = backup.join("logs/rcoder/project_logs/SYSTEM");
-        let package_logs = docker.join("logs/rcoder");
-        std::fs::create_dir_all(&old_logs)?;
-        std::fs::create_dir_all(&package_logs)?;
-        std::fs::write(old_logs.join("api.log"), "existing service log\n")?;
-        std::fs::write(
-            package_logs.join("package-placeholder.log"),
-            "package file\n",
-        )?;
-
-        restore_preserved_docker_dirs(&backup, &docker)?;
-
-        assert_eq!(
-            std::fs::read_to_string(docker.join("logs/rcoder/project_logs/SYSTEM/api.log"))?,
-            "existing service log\n"
-        );
-        assert!(!docker.join("logs/rcoder/package-placeholder.log").exists());
-        assert!(!backup.join("logs").exists());
+    fn deployment_failure_rolls_back_files_only_before_mysql_startup() -> Result<()> {
+        for database_started in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let docker = directory.path().join("docker");
+            std::fs::create_dir_all(docker.join("data/mysql"))?;
+            std::fs::write(docker.join("data/mysql/canary"), "unchanged database")?;
+            std::fs::write(docker.join("docker-compose.yml"), "old compose")?;
+            std::fs::write(docker.join(".env"), "OPERATOR=keep\n")?;
+            let package = directory.path().join("package.zip");
+            let mut zip = zip::ZipWriter::new(File::create(&package)?);
+            zip.start_file(
+                "docker/docker-compose.yml",
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            zip.write_all(b"new compose")?;
+            zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+            zip.write_all(b"NEW_KEY=added\n")?;
+            zip.finish()?;
+            let strategy = UpgradeStrategy::FullUpgrade {
+                url: String::new(),
+                hash: String::new(),
+                signature: String::new(),
+                target_version: "0.0.108".parse()?,
+                download_type: client_core::upgrade_strategy::DownloadType::Full,
+            };
+            let mut replacement = crate::utils::package_replace::PackageReplacement::prepare(
+                &package,
+                &strategy,
+                &docker,
+                &docker.join(".env"),
+                true,
+            )?;
+            replacement.apply()?;
+            let error = super::finish_package_deployment(
+                Some(replacement),
+                Err(anyhow::anyhow!("injected deployment failure")),
+                database_started,
+            )
+            .err()
+            .context("injected deployment failure must propagate")?;
+            assert_eq!(
+                std::fs::read_to_string(docker.join("data/mysql/canary"))?,
+                "unchanged database"
+            );
+            if database_started {
+                assert_eq!(
+                    std::fs::read_to_string(docker.join("docker-compose.yml"))?,
+                    "new compose"
+                );
+                assert!(format!("{error:#}").contains("MySQL startup"));
+                assert_eq!(std::fs::read_dir(directory.path())?.count(), 3);
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(docker.join("docker-compose.yml"))?,
+                    "old compose"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(docker.join(".env"))?,
+                    "OPERATOR=keep\n"
+                );
+                assert!(format!("{error:#}").contains("previous managed files restored"));
+                assert_eq!(std::fs::read_dir(directory.path())?.count(), 2);
+            }
+        }
         Ok(())
     }
 }

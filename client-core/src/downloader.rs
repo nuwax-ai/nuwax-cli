@@ -45,6 +45,72 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
+}
+
+fn validate_response_resource(
+    response: &reqwest::Response,
+    metadata: &DownloadMetadata,
+) -> Result<()> {
+    let Some(expected) = metadata.validator.as_deref() else {
+        return Ok(());
+    };
+    let header = metadata.validator_header.as_deref().unwrap_or_else(|| {
+        if expected.starts_with('"') {
+            "etag"
+        } else {
+            "last-modified"
+        }
+    });
+    let actual = response
+        .headers()
+        .get(header)
+        .and_then(|value| value.to_str().ok());
+    if actual != Some(expected) {
+        return Err(anyhow::anyhow!(
+            "Download response resource validator differs from HEAD"
+        ));
+    }
+    Ok(())
+}
+
+fn hash_digest(hasher: &Sha256) -> String {
+    hasher
+        .clone()
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+async fn hash_file_prefix(path: &Path, length: u64) -> Result<Sha256> {
+    let mut file = File::open(path).await?;
+    let mut remaining = length;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut hasher = Sha256::new();
+    while remaining > 0 {
+        let count = file
+            .read(&mut buffer[..remaining.min(1024 * 1024) as usize])
+            .await?;
+        if count == 0 {
+            return Err(anyhow::anyhow!(
+                "Partial download is shorter than its integrity checkpoint"
+            ));
+        }
+        hasher.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+    Ok(hasher)
+}
+
+struct ResumeCheckpoint {
+    size: u64,
+    hasher: Sha256,
+}
+
 /// 下载进度状态枚举
 #[derive(Debug, Clone)]
 pub enum DownloadStatus {
@@ -75,6 +141,14 @@ pub struct DownloadMetadata {
     pub url: String,
     pub expected_size: u64,
     pub expected_hash: Option<String>,
+    #[serde(default)]
+    pub validator: Option<String>,
+    #[serde(default)]
+    pub validator_header: Option<String>,
+    #[serde(default)]
+    pub partial_sha256: Option<String>,
+    #[serde(default)]
+    pub completed: bool,
     pub downloaded_bytes: u64,
     pub start_time: String,
     pub last_update: String,
@@ -94,6 +168,10 @@ impl DownloadMetadata {
             url,
             expected_size,
             expected_hash,
+            validator: None,
+            validator_header: None,
+            partial_sha256: Some(hash_digest(&Sha256::new())),
+            completed: false,
             downloaded_bytes: 0,
             start_time: now.clone(),
             last_update: now,
@@ -119,6 +197,7 @@ struct ResumeDownloadParams<'a, F> {
     download_path: &'a Path,
     progress_callback: Option<F>,
     existing_size: Option<u64>,
+    prefix_hasher: Option<Sha256>,
     total_size: u64,
     task_id: &'a str,
     metadata: &'a mut DownloadMetadata,
@@ -132,6 +211,7 @@ struct StreamDownloadParams<'a, F> {
     progress_callback: Option<F>,
     task_id: &'a str,
     start_byte: u64,
+    prefix_hasher: Option<Sha256>,
     total_size: u64,
     is_resume: bool,
     metadata: &'a mut DownloadMetadata,
@@ -156,6 +236,8 @@ pub struct DownloaderConfig {
     pub progress_interval_seconds: u64, // 进度显示时间间隔（秒）⭐
     pub progress_bytes_interval: u64,   // 进度显示字节间隔 ⭐
     pub enable_metadata: bool,          // 启用元数据管理 ⭐
+    pub metadata_checkpoint_bytes: u64,
+    pub retain_completed_metadata: bool,
 }
 
 impl Default for DownloaderConfig {
@@ -170,6 +252,8 @@ impl Default for DownloaderConfig {
             progress_interval_seconds: 10,              // 每10秒显示一次进度 ⭐
             progress_bytes_interval: 100 * 1024 * 1024, // 每100MB显示一次进度 ⭐
             enable_metadata: true,                      // 默认启用元数据管理 ⭐
+            metadata_checkpoint_bytes: 64 * 1024 * 1024,
+            retain_completed_metadata: false,
         }
     }
 }
@@ -303,7 +387,10 @@ impl FileDownloader {
     }
 
     /// 检查服务器是否支持Range请求 ⭐
-    async fn check_range_support(&self, url: &str) -> Result<(bool, u64)> {
+    async fn check_range_support(
+        &self,
+        url: &str,
+    ) -> Result<(bool, u64, Option<String>, Option<String>)> {
         info!("Checking Range support: {}", url);
 
         let response = self
@@ -396,7 +483,23 @@ impl FileDownloader {
             info!("   Accept-Ranges header: not provided");
         }
 
-        Ok((supports_range, total_size))
+        let (validator_header, validator) = if let Some(value) = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.starts_with("W/"))
+        {
+            (Some("etag".to_owned()), Some(value.to_owned()))
+        } else if let Some(value) = response
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|value| value.to_str().ok())
+        {
+            (Some("last-modified".to_owned()), Some(value.to_owned()))
+        } else {
+            (None, None)
+        };
+        Ok((supports_range, total_size, validator, validator_header))
     }
 
     /// 获取下载元数据文件路径 ⭐
@@ -425,9 +528,12 @@ impl FileDownloader {
         let json_content = serde_json::to_string_pretty(metadata)
             .map_err(|e| DuckError::custom(format!("Failed to serialize metadata: {e}")))?;
 
-        tokio::fs::write(&metadata_path, json_content)
-            .await
-            .map_err(|e| DuckError::custom(format!("Failed to save metadata: {e}")))?;
+        crate::atomic_file::write_atomic(
+            &metadata_path,
+            json_content.as_bytes(),
+            crate::atomic_file::PermissionsPolicy::Private,
+        )
+        .map_err(|e| DuckError::custom(format!("Failed to save metadata: {e}")))?;
 
         if show_log {
             info!("Saved download metadata: {}", metadata_path.display());
@@ -457,7 +563,10 @@ impl FileDownloader {
         download_path: &Path,
         total_size: u64,
         expected_hash: Option<&str>,
-    ) -> Result<Option<u64>> {
+        url: &str,
+        version: &str,
+        validator: Option<&str>,
+    ) -> Result<Option<ResumeCheckpoint>> {
         info!("Checking resume feasibility...");
 
         // 1. 检查文件是否存在
@@ -478,63 +587,69 @@ impl FileDownloader {
             existing_size as f64 / 1024.0 / 1024.0
         );
 
-        // 3. 【优先】检查hash文件是否存在，如果存在则优先验证hash ⭐
-        if let Some(expected_hash) = expected_hash {
-            info!("Prioritizing hash verification...");
-            match Self::calculate_file_hash(download_path).await {
-                Ok(actual_hash) => {
-                    if actual_hash.to_lowercase() == expected_hash.to_lowercase() {
-                        info!("File hash verification passed, file is complete");
-                        // 清理元数据（下载已完成）
-                        let _ = self.cleanup_metadata(download_path).await;
-                        return Ok(None); // 无需下载
-                    } else {
-                        info!("File hash verification failed, entering resume judgment");
-                        info!("   Expected hash: {}", expected_hash);
-                        info!("   Actual hash: {}", actual_hash);
-                        // 继续下面的断点续传逻辑，不要立即删除文件
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to calculate file hash: {}, entering resume judgment",
-                        e
-                    );
-                    // 继续下面的断点续传逻辑
-                }
-            }
-        }
-
-        // 4. 检查文件是否已完整（大小检查）
-        if existing_size >= total_size {
-            // 如果文件大小已完整但hash不匹配，说明文件损坏，重新下载
-            if expected_hash.is_some() {
-                warn!("File size complete but hash mismatch, file corrupted, will re-download");
-                let _ = tokio::fs::remove_file(download_path).await;
-                let _ = self.cleanup_metadata(download_path).await;
-                return Ok(None); // 重新下载
-            } else {
-                // 没有hash验证，认为文件完整
-                info!(
-                    "File size complete and no hash verification required, file considered complete"
-                );
-                let _ = self.cleanup_metadata(download_path).await;
-                return Ok(None);
-            }
-        }
-
-        // 5. 检查文件大小是否符合续传阈值
-        if existing_size < self.config.resume_threshold {
-            info!(
-                "📁 File too small ({} bytes < {} bytes), re-downloading",
-                existing_size, self.config.resume_threshold
-            );
-            let _ = tokio::fs::remove_file(download_path).await;
-            let _ = self.cleanup_metadata(download_path).await;
+        // A partial file is reusable only for the same HTTP resource and release.
+        // Missing/corrupt metadata must never authorize appending another package.
+        let saved = match tokio::fs::read(self.get_metadata_path(download_path)).await {
+            Ok(bytes) => serde_json::from_slice::<DownloadMetadata>(&bytes).ok(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let same_task = saved.as_ref().is_some_and(|metadata| {
+            metadata.is_same_task(url, total_size, version)
+                && metadata.expected_hash.as_deref() == expected_hash
+                && metadata.validator.as_deref() == validator
+        });
+        if !same_task || (total_size > 0 && existing_size >= total_size) {
+            info!("Partial download identity or size is invalid; restarting download");
+            tokio::fs::remove_file(download_path).await?;
+            self.cleanup_metadata(download_path).await?;
             return Ok(None);
         }
 
-        Ok(Some(existing_size))
+        let saved =
+            saved.ok_or_else(|| anyhow::anyhow!("Partial download identity disappeared"))?;
+        let checkpoint_size = if saved.partial_sha256.is_some() {
+            saved.downloaded_bytes
+        } else if expected_hash.is_some() {
+            // Older partial metadata has no local prefix digest. A published SHA
+            // still authenticates the completed package after legacy resume.
+            existing_size
+        } else {
+            info!("Partial download has no integrity checkpoint; restarting safely");
+            tokio::fs::remove_file(download_path).await?;
+            self.cleanup_metadata(download_path).await?;
+            return Ok(None);
+        };
+        if checkpoint_size > existing_size || checkpoint_size < self.config.resume_threshold {
+            tokio::fs::remove_file(download_path).await?;
+            self.cleanup_metadata(download_path).await?;
+            return Ok(None);
+        }
+        let hasher = hash_file_prefix(download_path, checkpoint_size).await?;
+        if saved
+            .partial_sha256
+            .as_ref()
+            .is_some_and(|expected| expected != &hash_digest(&hasher))
+        {
+            warn!("Partial download prefix integrity failed; restarting download");
+            tokio::fs::remove_file(download_path).await?;
+            self.cleanup_metadata(download_path).await?;
+            return Ok(None);
+        }
+        if checkpoint_size < existing_size {
+            // An uncheckpointed tail may survive process termination. Retain the
+            // verified prefix and redownload only that bounded tail.
+            OpenOptions::new()
+                .write(true)
+                .open(download_path)
+                .await?
+                .set_len(checkpoint_size)
+                .await?;
+        }
+        Ok(Some(ResumeCheckpoint {
+            size: checkpoint_size,
+            hasher,
+        }))
     }
 
     /// 下载文件（支持断点续传）⭐
@@ -584,7 +699,8 @@ impl FileDownloader {
         info!("   Version: {}", version);
 
         // 检查Range支持和文件大小
-        let (supports_range, total_size) = self.check_range_support(url).await?;
+        let (supports_range, total_size, validator, validator_header) =
+            self.check_range_support(url).await?;
 
         if total_size > 0 {
             info!(
@@ -601,11 +717,23 @@ impl FileDownloader {
         }
 
         // 智能检查断点续传可行性
-        let existing_size = if supports_range && self.config.enable_resume {
-            self.check_resume_feasibility(download_path, total_size, expected_hash)
-                .await?
+        let resume = if supports_range && self.config.enable_resume {
+            self.check_resume_feasibility(
+                download_path,
+                total_size,
+                expected_hash,
+                url,
+                version,
+                validator.as_deref(),
+            )
+            .await?
         } else {
             None
+        };
+
+        let (existing_size, prefix_hasher) = match resume {
+            Some(checkpoint) => (Some(checkpoint.size), Some(checkpoint.hasher)),
+            None => (None, None),
         };
 
         // 创建下载元数据
@@ -616,65 +744,52 @@ impl FileDownloader {
             version.to_string(),
         );
 
+        metadata.validator = validator;
+        metadata.validator_header = validator_header;
+
         // 如果是续传，更新进度
         if let Some(resume_size) = existing_size {
             metadata.update_progress(resume_size);
+            metadata.partial_sha256 = prefix_hasher.as_ref().map(hash_digest);
         }
 
         // 保存初始元数据
         self.save_metadata(download_path, &metadata).await?;
 
-        // 执行下载
-        let result = match downloader_type {
-            DownloaderType::Http => {
-                self.download_via_http_with_resume(
-                    url,
-                    download_path,
-                    progress_callback,
-                    existing_size,
-                    total_size,
-                    &mut metadata,
-                )
-                .await
-            }
-            DownloaderType::HttpExtendedTimeout => {
-                self.download_via_http_extended_timeout_with_resume(
-                    url,
-                    download_path,
-                    progress_callback,
-                    existing_size,
-                    total_size,
-                    &mut metadata,
-                )
-                .await
-            }
+        let task_id = match downloader_type {
+            DownloaderType::Http => "http_download",
+            DownloaderType::HttpExtendedTimeout => "extended_http_download",
         };
+        let result = self
+            .download_with_resume_internal(ResumeDownloadParams {
+                url,
+                download_path,
+                progress_callback,
+                existing_size,
+                prefix_hasher,
+                total_size,
+                task_id,
+                metadata: &mut metadata,
+            })
+            .await;
 
         // 处理下载结果
         match result {
             Ok(_) => {
-                // 下载成功，清理元数据
-                info!("Download completed, cleaning metadata");
-                let _ = self.cleanup_metadata(download_path).await;
-
-                // 最终hash验证（如果提供）
+                // Do not publish success or remove resume state before integrity checks.
                 if let Some(hash) = expected_hash {
-                    info!("Performing final hash verification...");
-                    match Self::calculate_file_hash(download_path).await {
-                        Ok(actual_hash) => {
-                            if actual_hash.to_lowercase() == hash.to_lowercase() {
-                                info!("Final hash verification passed");
-                            } else {
-                                warn!("Final hash verification failed");
-                                warn!("   Expected: {}", hash);
-                                warn!("   Actual: {}", actual_hash);
-                                return Err(anyhow::anyhow!("File hash verification failed"));
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to calculate final hash: {}", e);
-                        }
+                    let actual_hash = Self::calculate_file_hash(download_path).await?;
+                    if !actual_hash.eq_ignore_ascii_case(hash) {
+                        tokio::fs::remove_file(download_path).await?;
+                        self.cleanup_metadata(download_path).await?;
+                        return Err(anyhow::anyhow!("File hash verification failed"));
                     }
+                }
+                metadata.completed = true;
+                self.save_metadata_with_logging(download_path, &metadata, false)
+                    .await?;
+                if !self.config.retain_completed_metadata {
+                    self.cleanup_metadata(download_path).await?;
                 }
                 Ok(())
             }
@@ -687,67 +802,6 @@ impl FileDownloader {
         }
     }
 
-    /// 使用普通 HTTP 下载（支持断点续传）⭐
-    async fn download_via_http_with_resume<F>(
-        &self,
-        url: &str,
-        download_path: &Path,
-        progress_callback: Option<F>,
-        existing_size: Option<u64>,
-        total_size: u64,
-        metadata: &mut DownloadMetadata,
-    ) -> Result<()>
-    where
-        F: Fn(DownloadProgress) + Send + Sync + 'static,
-    {
-        info!("Using regular HTTP download");
-        self.download_with_resume_internal(ResumeDownloadParams {
-            url,
-            download_path,
-            progress_callback,
-            existing_size,
-            total_size,
-            task_id: "http_download",
-            metadata,
-        })
-        .await
-    }
-
-    /// 使用扩展超时的 HTTP 下载（支持断点续传）⭐
-    async fn download_via_http_extended_timeout_with_resume<F>(
-        &self,
-        url: &str,
-        download_path: &Path,
-        progress_callback: Option<F>,
-        existing_size: Option<u64>,
-        total_size: u64,
-        metadata: &mut DownloadMetadata,
-    ) -> Result<()>
-    where
-        F: Fn(DownloadProgress) + Send + Sync + 'static,
-    {
-        if self.is_object_storage_or_cdn_url(url) {
-            info!("Using extended timeout HTTP download (object storage/CDN public network file)");
-            info!("   Detected object storage/CDN file for public network access, no key required");
-            if existing_size.is_some() {
-                info!("   Supports resume");
-            }
-        } else {
-            info!("Using extended timeout HTTP download");
-        }
-
-        self.download_with_resume_internal(ResumeDownloadParams {
-            url,
-            download_path,
-            progress_callback,
-            existing_size,
-            total_size,
-            task_id: "extended_http_download",
-            metadata,
-        })
-        .await
-    }
-
     /// 内部断点续传下载实现 ⭐
     async fn download_with_resume_internal<F>(
         &self,
@@ -757,6 +811,7 @@ impl FileDownloader {
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
         let start_byte = params.existing_size.unwrap_or(0);
+        let mut total_size = params.total_size;
         let is_resume = params.existing_size.is_some();
 
         // 构建请求
@@ -765,6 +820,9 @@ impl FileDownloader {
         if is_resume {
             info!("Resume download: starting from byte {}", start_byte);
             request = request.header("Range", format!("bytes={start_byte}-"));
+            if let Some(validator) = params.metadata.validator.as_deref() {
+                request = request.header(reqwest::header::IF_RANGE, validator);
+            }
         }
 
         let response = request
@@ -786,6 +844,38 @@ impl FileDownloader {
             if response.status().as_u16() == 200 || response.status().as_u16() == 416 {
                 warn!("Server may not support Range request, falling back to full download");
 
+                if response.status().as_u16() == 200 {
+                    validate_response_resource(&response, params.metadata)?;
+                }
+
+                // 重新发起不带Range头的请求
+                info!("Restarting full download request");
+                let new_response = self
+                    .get_http_client()
+                    .get(params.url)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to start re-download request: {e}"))?;
+
+                if new_response.status().as_u16() != 200 {
+                    return Err(anyhow::anyhow!(
+                        "Re-download failed: HTTP {}",
+                        new_response.status()
+                    ));
+                }
+
+                validate_response_resource(&new_response, params.metadata)?;
+                if total_size == 0 {
+                    total_size = new_response.content_length().unwrap_or(0);
+                } else if new_response
+                    .content_length()
+                    .is_some_and(|length| length != total_size)
+                {
+                    return Err(anyhow::anyhow!(
+                        "Re-download response length differs from HEAD"
+                    ));
+                }
+
                 // 删除已有文件，重新开始下载
                 if params.download_path.exists() {
                     info!("Deleting partially downloaded file, preparing to re-download");
@@ -797,22 +887,6 @@ impl FileDownloader {
                 // 清理元数据
                 let _ = self.cleanup_metadata(params.download_path).await;
 
-                // 重新发起不带Range头的请求
-                info!("Restarting full download request");
-                let new_response = self
-                    .get_http_client()
-                    .get(params.url)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to start re-download request: {e}"))?;
-
-                if !new_response.status().is_success() {
-                    return Err(anyhow::anyhow!(
-                        "Re-download failed: HTTP {}",
-                        new_response.status()
-                    ));
-                }
-
                 // 创建新文件并从头开始下载
                 let mut file = File::create(params.download_path)
                     .await
@@ -821,6 +895,8 @@ impl FileDownloader {
                 // 重置元数据
                 params.metadata.downloaded_bytes = 0;
                 params.metadata.start_time = chrono::Utc::now().to_rfc3339();
+                self.save_metadata(params.download_path, params.metadata)
+                    .await?;
 
                 return self
                     .download_stream_with_resume(StreamDownloadParams {
@@ -830,7 +906,8 @@ impl FileDownloader {
                         progress_callback: params.progress_callback,
                         task_id: params.task_id,
                         start_byte: 0,
-                        total_size: params.total_size,
+                        prefix_hasher: None,
+                        total_size,
                         is_resume: false,
                         metadata: params.metadata,
                     })
@@ -847,6 +924,39 @@ impl FileDownloader {
                 "Download failed: HTTP {} (expected: {})",
                 response.status(),
                 expected_status,
+            ));
+        }
+
+        validate_response_resource(&response, params.metadata)?;
+        if is_resume {
+            let content_range = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_content_range)
+                .ok_or_else(|| anyhow::anyhow!("Invalid Content-Range on resumed download"))?;
+            if content_range.0 != start_byte
+                || content_range.1 < content_range.0
+                || content_range.1 >= content_range.2
+                || content_range.1 + 1 != content_range.2
+                || (params.total_size > 0 && content_range.2 != params.total_size)
+                || response
+                    .content_length()
+                    .is_some_and(|length| length != content_range.1 - content_range.0 + 1)
+            {
+                return Err(anyhow::anyhow!(
+                    "Content-Range does not match resumed download"
+                ));
+            }
+            total_size = content_range.2;
+        } else if total_size == 0 {
+            total_size = response.content_length().unwrap_or(0);
+        } else if response
+            .content_length()
+            .is_some_and(|length| length != total_size)
+        {
+            return Err(anyhow::anyhow!(
+                "Download response length differs from HEAD"
             ));
         }
 
@@ -874,11 +984,27 @@ impl FileDownloader {
             progress_callback: params.progress_callback,
             task_id: params.task_id,
             start_byte,
-            total_size: params.total_size,
+            prefix_hasher: params.prefix_hasher,
+            total_size,
             is_resume,
             metadata: params.metadata,
         })
         .await
+    }
+
+    async fn save_checkpoint(
+        &self,
+        file: &mut File,
+        path: &Path,
+        metadata: &mut DownloadMetadata,
+        downloaded: u64,
+        hasher: &Sha256,
+    ) -> Result<()> {
+        file.flush().await?;
+        file.sync_all().await?;
+        metadata.update_progress(downloaded);
+        metadata.partial_sha256 = Some(hash_digest(hasher));
+        self.save_metadata_with_logging(path, metadata, false).await
     }
 
     /// 通用的流式下载处理（支持断点续传）⭐
@@ -890,6 +1016,9 @@ impl FileDownloader {
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
         let mut downloaded = params.start_byte;
+        let mut hasher = params.prefix_hasher.unwrap_or_default();
+        let mut checkpoint_bytes = downloaded;
+        let mut checkpoint_time = std::time::Instant::now();
         let mut stream = params.response.bytes_stream();
         let mut last_progress_time = std::time::Instant::now();
         let mut last_progress_bytes = downloaded;
@@ -925,16 +1054,50 @@ impl FileDownloader {
         }
 
         while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|e| DuckError::custom(format!("Failed to download data: {e}")))?;
-
-            params
-                .file
-                .write_all(&chunk)
-                .await
-                .map_err(|e| DuckError::custom(format!("Failed to write file: {e}")))?;
-
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    self.save_checkpoint(
+                        params.file,
+                        params.download_path,
+                        params.metadata,
+                        downloaded,
+                        &hasher,
+                    )
+                    .await?;
+                    return Err(
+                        DuckError::custom(format!("Failed to download data: {error}")).into(),
+                    );
+                }
+            };
+            if let Err(error) = params.file.write_all(&chunk).await {
+                self.save_checkpoint(
+                    params.file,
+                    params.download_path,
+                    params.metadata,
+                    downloaded,
+                    &hasher,
+                )
+                .await?;
+                return Err(DuckError::custom(format!("Failed to write file: {error}")).into());
+            }
+            hasher.update(&chunk);
             downloaded += chunk.len() as u64;
+            if self.config.enable_metadata
+                && (downloaded - checkpoint_bytes >= self.config.metadata_checkpoint_bytes.max(1)
+                    || checkpoint_time.elapsed() >= Duration::from_secs(60))
+            {
+                self.save_checkpoint(
+                    params.file,
+                    params.download_path,
+                    params.metadata,
+                    downloaded,
+                    &hasher,
+                )
+                .await?;
+                checkpoint_bytes = downloaded;
+                checkpoint_time = std::time::Instant::now();
+            }
 
             // 调用进度回调
             if let Some(callback) = params.progress_callback.as_ref() {
@@ -1004,31 +1167,25 @@ impl FileDownloader {
 
                     last_progress_time = now;
                     last_progress_bytes = downloaded;
-
-                    if self.config.enable_metadata {
-                        params.metadata.update_progress(downloaded);
-                        let should_save_metadata = bytes_since_last >= 500 * 1024 * 1024
-                            || time_since_last >= std::time::Duration::from_secs(300);
-
-                        if should_save_metadata {
-                            let _ = self
-                                .save_metadata_with_logging(
-                                    params.download_path,
-                                    params.metadata,
-                                    false,
-                                )
-                                .await;
-                        }
-                    }
                 }
             }
         }
 
-        params
-            .file
-            .flush()
-            .await
-            .map_err(|e| DuckError::custom(format!("Failed to flush file buffer: {e}")))?;
+        self.save_checkpoint(
+            params.file,
+            params.download_path,
+            params.metadata,
+            downloaded,
+            &hasher,
+        )
+        .await?;
+        if params.total_size > 0 && downloaded != params.total_size {
+            return Err(anyhow::anyhow!(
+                "Incomplete download: received {} bytes, expected {}",
+                downloaded,
+                params.total_size
+            ));
+        }
 
         let download_type = if params.is_resume {
             "Resume download"
@@ -1062,27 +1219,8 @@ impl FileDownloader {
             ));
         }
 
-        let mut file = File::open(file_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", file_path.display(), e))?;
-
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0u8; 8192]; // 8KB buffer
-
-        loop {
-            let bytes_read = file.read(&mut buffer).await.map_err(|e| {
-                anyhow::anyhow!("Failed to read file {}: {}", file_path.display(), e)
-            })?;
-
-            if bytes_read == 0 {
-                break;
-            }
-
-            hasher.update(&buffer[..bytes_read]);
-        }
-
-        let hash = hasher.finalize();
-        Ok(hash.to_vec().iter().map(|b| format!("{b:02x}")).collect())
+        let length = tokio::fs::metadata(file_path).await?.len();
+        Ok(hash_digest(&hash_file_prefix(file_path, length).await?))
     }
 
     /// 验证文件完整性
@@ -1313,7 +1451,7 @@ mod tests {
         // 3. 使用原始的check_range_support方法
         println!("\n🔍 使用原始的check_range_support方法");
         match downloader.check_range_support(oss_url).await {
-            Ok((supports_range, total_size)) => {
+            Ok((supports_range, total_size, _validator, _validator_header)) => {
                 println!("   Range支持: {supports_range}");
                 println!(
                     "   文件大小: {} bytes ({:.2} GB)",

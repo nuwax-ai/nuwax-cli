@@ -9,6 +9,7 @@ mod cli;
 mod commands;
 mod docker_service;
 mod docker_utils;
+mod error_report;
 mod init;
 pub mod project_info; // 公开项目信息模块
 pub mod ui_support; // 公开UI支持模块
@@ -25,6 +26,7 @@ pub use docker_service::{
     ContainerStatus, DockerService, DockerServiceManager, get_architecture_suffix,
     get_system_architecture, health_check,
 };
+pub use error_report::{format_error, format_error_with_env};
 pub use init::run_init;
 pub use utils::{extract_docker_service, setup_logging}; // 导出解压函数和匹配器
 

@@ -2,13 +2,14 @@ use crate::app::CliApp;
 use crate::cli::UpgradeArgs;
 use anyhow::Result;
 use client_core::{
-    api::ApiClient, config::AppConfig, upgrade_strategy::UpgradeStrategy, utils::archive,
+    api::ApiClient, config::AppConfig, package_cache::PackageIdentity,
+    upgrade_strategy::UpgradeStrategy,
 };
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tracing::{error, info};
+use tracing::info;
 
 /// 获取指定版本的全量下载目录路径,并创建目录
 pub fn create_version_download_dir(
@@ -25,74 +26,26 @@ pub fn create_version_download_dir(
 /// 处理下载服务包并显示相关信息
 async fn handle_service_download(
     app: &mut CliApp,
-    url: &str,
-    target_version: &client_core::version::Version,
+    identity: &PackageIdentity,
     download_dir: PathBuf,
-    version_str: &str,
-    download_type: &str,
+    version_directory: &str,
+    download_directory: &str,
 ) -> Result<()> {
-    // 确保下载目录存在
-    let version_download_dir =
-        create_version_download_dir(download_dir, version_str, download_type)?;
-
-    // 总是先下载到临时文件
-    let temp_path = version_download_dir.join("temp_download");
-
-    info!(
-        "   Downloading to temp file: {path}",
-        path = temp_path.display()
-    );
-
-    let download_result = app
+    let directory =
+        create_version_download_dir(download_dir, version_directory, download_directory)?;
+    let final_path = app
         .api_client
-        .download_service_update_optimized(&temp_path, Some(version_str), url)
-        .await;
-
-    match download_result {
-        Ok(_) => {
-            // 魔数检测格式
-            let format = archive::detect_format_by_magic(&temp_path)?;
-            info!(
-                "   Detected file format: {format}",
-                format = format!("{:?}", format)
-            );
-
-            // 获取架构
-            let arch = client_core::architecture::Architecture::detect();
-            let arch_str = match arch {
-                client_core::architecture::Architecture::Aarch64 => "aarch64",
-                client_core::architecture::Architecture::X86_64 => "x86_64",
-                _ => "unknown",
-            };
-
-            // 生成正确文件名
-            let filename = archive::generate_docker_filename(arch_str, format);
-            info!("   Renaming to: {filename}", filename = filename);
-
-            let final_path = version_download_dir.join(&filename);
-
-            // 重命名
-            std::fs::rename(&temp_path, &final_path)?;
-
-            info!("✅ Service package ready!");
-            info!("   File location: {path}", path = final_path.display());
-            info!(
-                "   Download version: {version}",
-                version = target_version.to_string()
-            );
-            info!(
-                "   Current deployed version: {version}",
-                version = app.config.get_docker_versions()
-            );
-            info!("📝 Next step: Run 'nuwax-cli docker-service deploy' to deploy services");
-            Ok(())
-        }
-        Err(e) => {
-            error!("❌ Operation failed: {error}", error = e.to_string());
-            info!("💡 Please check network connection or try again later");
-            Err(e)
-        }
-    }
+        .download_service_package(&directory, identity)
+        .await?;
+    info!("✅ Service package ready!");
+    info!("   File location: {}", final_path.display());
+    info!("   Download version: {}", identity.version);
+    info!(
+        "   Current deployed version: {}",
+        app.config.get_docker_versions()
+    );
+    info!("📝 Next step: Run 'nuwax-cli docker-service deploy' to deploy services");
+    Ok(())
 }
 
 /// 下载Docker服务升级文件
@@ -126,7 +79,7 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
     match &upgrade_strategy {
         UpgradeStrategy::FullUpgrade {
             url,
-            hash: _,
+            hash,
             signature: _,
             target_version,
             download_type,
@@ -150,10 +103,16 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
             let version_str = target_version.base_version_string();
             let download_type_str = download_type.to_string();
 
+            let identity = PackageIdentity::new(
+                &target_version.to_string(),
+                client_core::architecture::Architecture::detect().as_str(),
+                "full",
+                url,
+                Some(hash),
+            )?;
             handle_service_download(
                 app,
-                url,
-                target_version,
+                &identity,
                 download_dir,
                 &version_str,
                 &download_type_str,
@@ -181,15 +140,15 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
             let base_version = target_version.base_version_string();
             let version_str = target_version.to_string();
 
-            handle_service_download(
-                app,
+            let identity = PackageIdentity::new(
+                &target_version.to_string(),
+                client_core::architecture::Architecture::detect().as_str(),
+                "patch",
                 &patch_info.url,
-                target_version,
-                download_dir,
-                &base_version,
-                &version_str,
-            )
-            .await?;
+                patch_info.hash.as_deref(),
+            )?;
+            handle_service_download(app, &identity, download_dir, &base_version, &version_str)
+                .await?;
         }
         UpgradeStrategy::NoUpgrade { target_version } => {
             info!(
@@ -202,6 +161,36 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
     }
 
     Ok(upgrade_strategy)
+}
+
+fn select_full_download_package<'a>(
+    manifest: &'a client_core::api_types::EnhancedServiceManifest,
+    architecture: &str,
+) -> Result<(&'a str, Option<String>)> {
+    let platform = manifest
+        .platforms
+        .as_ref()
+        .and_then(|platforms| match architecture {
+            "x86_64" => platforms.x86_64.as_ref(),
+            "aarch64" => platforms.aarch64.as_ref(),
+            _ => None,
+        });
+    let legacy = manifest.packages.as_ref().map(|packages| &packages.full);
+    if let Some(platform) = platform {
+        Ok((platform.url.as_str(), platform.published_sha256(legacy)?))
+    } else if manifest.platforms.is_none() {
+        let package =
+            legacy.ok_or_else(|| anyhow::anyhow!("Manifest does not contain a full package"))?;
+        Ok((
+            package.url.as_str(),
+            client_core::package_cache::normalize_sha256(Some(&package.hash))?,
+        ))
+    } else {
+        Err(anyhow::anyhow!(
+            "No download URL for architecture: {}",
+            architecture
+        ))
+    }
 }
 
 /// 下载最新的 Docker 服务包（全量包）用于离线部署
@@ -261,20 +250,7 @@ pub async fn run_download_with_config(config: &AppConfig) -> Result<()> {
     info!("   Target architecture: {arch}", arch = arch_str);
 
     // 6. 从 manifest 中获取下载 URL
-    let download_url = if let Some(ref platforms) = manifest.platforms {
-        let platform_info = match arch_str {
-            "x86_64" => platforms.x86_64.as_ref(),
-            "aarch64" => platforms.aarch64.as_ref(),
-            _ => None,
-        };
-        platform_info
-            .map(|p| p.url.clone())
-            .ok_or_else(|| anyhow::anyhow!("No download URL for architecture: {}", arch_str))?
-    } else {
-        return Err(anyhow::anyhow!(
-            "Manifest does not contain platform information"
-        ));
-    };
+    let (download_url, expected_hash) = select_full_download_package(&manifest, arch_str)?;
 
     info!("   Download URL: {url}", url = download_url);
 
@@ -285,45 +261,58 @@ pub async fn run_download_with_config(config: &AppConfig) -> Result<()> {
     // 创建下载目录
     let version_download_dir = create_version_download_dir(download_dir, &version_str, "full")?;
 
-    // 下载到临时文件
-    let temp_path = version_download_dir.join("temp_download");
-    info!(
-        "   Downloading to temp file: {path}",
-        path = temp_path.display()
-    );
+    let identity = PackageIdentity::new(
+        &latest_version.to_string(),
+        arch_str,
+        "full",
+        download_url,
+        expected_hash.as_deref(),
+    )?;
+    let final_path = api_client
+        .download_service_package(&version_download_dir, &identity)
+        .await?;
+    info!("✅ Service package downloaded successfully!");
+    info!("   File location: {}", final_path.display());
+    info!("💡 Copy this file to offline server for deployment");
+    Ok(())
+}
 
-    let download_result = api_client
-        .download_service_update_optimized(&temp_path, Some(version_str.as_str()), &download_url)
-        .await;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    match download_result {
-        Ok(_) => {
-            // 魔数检测格式
-            let format = archive::detect_format_by_magic(&temp_path)?;
-            info!(
-                "   Detected file format: {format}",
-                format = format!("{:?}", format)
+    #[test]
+    fn standalone_download_normalizes_sentinels_before_same_url_digest_fallback() {
+        for placeholder in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!("external"),
+        ] {
+            let manifest: client_core::api_types::EnhancedServiceManifest = serde_json::from_value(serde_json::json!({
+                "version": "0.0.108", "release_date": "2026-10-10T00:00:00Z", "release_notes": "fixture",
+                "packages": {"full": {"url": "https://example.com/x86.zip", "hash": "a".repeat(64), "signature": "", "size": 1}},
+                "platforms": {"x86_64": {"url": "https://example.com/x86.zip", "signature": "", "hash": placeholder},
+                    "aarch64": {"url": "https://example.com/arm.zip", "signature": "", "hash": "external"}}
+            })).unwrap();
+            let (url, hash) = select_full_download_package(&manifest, "x86_64").unwrap();
+            assert_eq!(url, "https://example.com/x86.zip");
+            assert_eq!(hash, Some("a".repeat(64)));
+            assert_eq!(
+                select_full_download_package(&manifest, "aarch64")
+                    .unwrap()
+                    .1,
+                None
             );
-
-            // 生成正确文件名
-            let filename = archive::generate_docker_filename(arch_str, format);
-            info!("   Renaming to: {filename}", filename = filename);
-
-            let final_path = version_download_dir.join(&filename);
-
-            // 重命名
-            std::fs::rename(&temp_path, &final_path)?;
-
-            info!("✅ Service package downloaded successfully!");
-            info!("   File location: {path}", path = final_path.display());
-            info!("💡 Copy this file to offline server for deployment");
-        }
-        Err(e) => {
-            error!("❌ Download failed: {error}", error = e.to_string());
-            info!("💡 Please check network connection or try again later");
-            return Err(e);
         }
     }
 
-    Ok(())
+    #[test]
+    fn standalone_download_rejects_malformed_platform_digest_despite_valid_generic_digest() {
+        let manifest: client_core::api_types::EnhancedServiceManifest = serde_json::from_value(serde_json::json!({
+            "version": "0.0.108", "release_date": "2026-10-10T00:00:00Z", "release_notes": "fixture",
+            "packages": {"full": {"url": "https://example.com/x86.zip", "hash": "a".repeat(64), "signature": "", "size": 1}},
+            "platforms": {"x86_64": {"url": "https://example.com/x86.zip", "signature": "", "hash": "broken-published-hash"}}
+        })).unwrap();
+        assert!(select_full_download_package(&manifest, "x86_64").is_err());
+    }
 }

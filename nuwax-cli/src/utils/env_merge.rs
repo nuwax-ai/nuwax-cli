@@ -2,7 +2,7 @@
 //!
 //! 在线 full/patch 解压器与部署命令共用（C01/P1#2）：
 //! - `merge_env_contents`：纯文本合并（用户值优先，包内只补缺失键）；
-//! - `merge_preserved_env_file`：原子落盘（临时文件 + fsync + 保留权限 + 失败不污染）。
+//! - `write_env_contents`：原子落盘（临时文件 + fsync + 保留权限 + 失败不污染）。
 
 use anyhow::{Context, Result};
 use client_core::atomic_file::{PermissionsPolicy, write_atomic};
@@ -89,40 +89,6 @@ pub fn env_assignment_key(line: &str) -> Option<&str> {
     Some(key)
 }
 
-/// 把 `preserved`（用户现值）合并进 `package_path`（包内 .env，将被替换为合并结果）。
-/// 原子写入：同目录临时文件 → fsync → 保留原权限 → rename；失败不污染目标。
-pub fn merge_preserved_env_file(preserved_path: &Path, package_path: &Path) -> Result<()> {
-    let preserved = fs::read_to_string(preserved_path).with_context(|| {
-        format!(
-            "Failed to read existing environment file: {}",
-            preserved_path.display()
-        )
-    })?;
-    let package = fs::read_to_string(package_path).with_context(|| {
-        format!(
-            "Failed to read package environment file: {}",
-            package_path.display()
-        )
-    })?;
-    let merged = merge_env_contents(&preserved, &package)?;
-    let permissions = fs::metadata(preserved_path)
-        .with_context(|| {
-            format!(
-                "Failed to inspect existing environment file: {}",
-                preserved_path.display()
-            )
-        })?
-        .permissions();
-    write_env_contents(package_path, &merged, Some(permissions))?;
-    fs::remove_file(preserved_path).with_context(|| {
-        format!(
-            "Failed to remove backed-up environment file: {}",
-            preserved_path.display()
-        )
-    })?;
-    Ok(())
-}
-
 /// Write complete environment contents without unlinking the live file or its alias.
 /// The shared writer performs replace-existing on Unix and Windows and retains
 /// symlinks. A failed replacement never triggers a destructive delete/retry.
@@ -151,6 +117,7 @@ pub fn write_env_contents(
 }
 
 /// Merge package defaults directly into the live file in a single atomic write.
+#[cfg(test)]
 pub fn merge_env_file_defaults(destination: &Path, defaults: &str) -> Result<()> {
     let preserved = fs::read_to_string(destination)
         .with_context(|| format!("Failed to read environment file: {}", destination.display()))?;

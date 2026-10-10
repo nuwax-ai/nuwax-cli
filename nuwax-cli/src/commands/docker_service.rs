@@ -577,31 +577,48 @@ pub fn package_path_for_strategy(
     app: &CliApp,
     upgrade_strategy: &UpgradeStrategy,
 ) -> Result<Option<PathBuf>> {
-    let file_zip: PathBuf = match upgrade_strategy {
+    use client_core::package_cache::{PackageIdentity, resolve_cached_package};
+    let architecture = client_core::architecture::Architecture::detect();
+    let (directory, identity) = match upgrade_strategy {
         UpgradeStrategy::FullUpgrade {
             target_version,
             download_type,
+            url,
+            hash,
             ..
-        } => {
-            let base_version = target_version.base_version_string();
-            app.config.get_version_download_file_path(
-                &base_version,
+        } => (
+            app.config.get_version_download_dir(
+                &target_version.base_version_string(),
                 &download_type.to_string(),
-                None,
-            )?
-        }
-        UpgradeStrategy::PatchUpgrade { target_version, .. } => {
-            let base_version = target_version.base_version_string();
-            let full_version = target_version.to_string();
-            app.config.get_version_download_file_path(
-                &base_version,
-                &full_version.to_string(),
-                None,
-            )?
-        }
+            ),
+            PackageIdentity::new(
+                &target_version.to_string(),
+                architecture.as_str(),
+                "full",
+                url,
+                Some(hash),
+            )?,
+        ),
+        UpgradeStrategy::PatchUpgrade {
+            target_version,
+            patch_info,
+            ..
+        } => (
+            app.config.get_version_download_dir(
+                &target_version.base_version_string(),
+                &target_version.to_string(),
+            ),
+            PackageIdentity::new(
+                &target_version.to_string(),
+                architecture.as_str(),
+                "patch",
+                &patch_info.url,
+                patch_info.hash.as_deref(),
+            )?,
+        ),
         UpgradeStrategy::NoUpgrade { .. } => return Ok(None),
     };
-    Ok(Some(file_zip))
+    Ok(Some(resolve_cached_package(&directory, &identity)?))
 }
 
 /// 获取系统架构信息

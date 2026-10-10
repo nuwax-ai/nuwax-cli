@@ -777,127 +777,21 @@ impl ApiClient {
         }
     }
 
-    /// 下载服务更新包（带哈希验证和优化及进度回调）
-    pub async fn download_service_update_optimized_with_progress<F>(
+    /// Download a release-bound package into its final, atomically promoted cache.
+    pub async fn download_service_package(
         &self,
-        download_path: &Path,
-        version: Option<&str>,
-        download_url: &str,
-        progress_callback: Option<F>,
-    ) -> Result<()>
-    where
-        F: Fn(DownloadProgress) + Send + Sync + 'static,
-    {
-        // 3. 获取哈希文件路径
-        let hash_file_path = download_path.with_extension("zip.hash");
-
-        info!("Determining download method:");
-        info!("   Download URL: {}", download_url);
-
-        // 5. 检查文件是否已存在且完整
-        let mut should_download = true;
-        if download_path.exists() && hash_file_path.exists() {
-            info!("Found existing file: {}", download_path.display());
-            info!("Found hash file: {}", hash_file_path.display());
-            // 读取保存的哈希和版本信息
-            if let Ok(hash_content) = std::fs::read_to_string(&hash_file_path) {
-                let hash_info: DownloadHashInfo = hash_content.parse().map_err(|e| {
-                    DuckError::custom(format!("Invalid hash info format for downloaded file: {e}"))
-                })?;
-
-                info!("Hash file info:");
-                info!("   Saved hash: {}", hash_info.hash);
-                info!("   Saved version: {}", hash_info.version);
-                info!("   Saved timestamp: {}", hash_info.timestamp);
-
-                // 验证本地文件哈希
-                info!("Verifying local file hash...");
-                if let Ok(actual_hash) = Self::calculate_file_hash(download_path).await {
-                    if actual_hash.to_lowercase() == hash_info.hash.to_lowercase() {
-                        info!("File hash verification passed, skipping download");
-                        info!("   Local hash: {}", actual_hash);
-                        info!("   Server hash: {}", hash_info.hash);
-                        should_download = false;
-                    } else {
-                        warn!("File hash mismatch, need to re-download");
-                        warn!("   Local hash: {}", actual_hash);
-                        warn!("   Expected hash: {}", hash_info.hash);
-                    }
-                } else {
-                    warn!("Unable to calculate local file hash, re-downloading");
-                }
-            } else {
-                warn!("Unable to read hash file, re-downloading");
-            }
-        } else {
-            info!("File does not exist, re-downloading");
-        }
-
-        if !should_download {
-            info!("Skipping download, using existing file");
-            return Ok(());
-        }
-
-        // 6. 确保下载目录存在
-        if let Some(parent) = download_path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            return Err(anyhow::anyhow!("Failed to create download directory: {e}"));
-        }
-
-        info!("Starting to download service update package...");
-        info!("   Final download URL: {}", download_url);
-        info!("   Target path: {}", download_path.display());
-
-        // 7. 执行下载
-        // 使用新的下载器模块
-        let config = DownloaderConfig::default();
-
-        let downloader = FileDownloader::new(config);
-
-        // 使用新的智能下载器（支持 OSS、扩展超时、断点续传和hash验证）
-        downloader
-            .download_file_with_options(
-                download_url,
-                download_path,
-                progress_callback,
-                None,
-                version,
-            )
-            .await
-            .map_err(|e| DuckError::custom(format!("Download failed: {e}")))?;
-
-        info!("File download completed");
-        info!("   File path: {}", download_path.display());
-
-        // 10. 保存哈希文件
-        info!("Calculating local hash of external file...");
-        match Self::calculate_file_hash(download_path).await {
-            Ok(local_hash) => {
-                info!("External file local hash: {}", local_hash);
-                Self::save_hash_file(&hash_file_path, &local_hash, version).await?;
-            }
-            Err(e) => {
-                warn!("Failed to calculate external file hash: {}", e);
-            }
-        }
-        info!("Service update package download completed!");
-        info!("   File location: {}", download_path.display());
-
-        Ok(())
-    }
-
-    /// 下载服务更新包（带哈希验证和优化）- 保持向后兼容
-    pub async fn download_service_update_optimized(
-        &self,
-        download_path: &Path,
-        version: Option<&str>,
-        download_url: &str,
-    ) -> Result<()> {
-        self.download_service_update_optimized_with_progress::<fn(DownloadProgress)>(
-            download_path,
-            version,
-            download_url,
+        download_directory: &Path,
+        identity: &crate::package_cache::PackageIdentity,
+    ) -> Result<std::path::PathBuf> {
+        let downloader = FileDownloader::new(DownloaderConfig {
+            retain_completed_metadata: true,
+            ..DownloaderConfig::default()
+        });
+        crate::package_cache::download_package::<fn(DownloadProgress)>(
+            &self.client,
+            &downloader,
+            download_directory,
+            identity,
             None,
         )
         .await
