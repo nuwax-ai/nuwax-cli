@@ -118,4 +118,5 @@ jobs:
       - name: Test package application and environment preservation
         run: |
           cargo test --locked -p nuwax-cli --lib utils::env_merge::tests
+          cargo test --locked -p nuwax-cli --lib utils::package_replace::tests -- --test-threads=1
           cargo test --locked -p nuwax-cli --lib commands::auto_upgrade_deploy::tests -- --test-threads=1

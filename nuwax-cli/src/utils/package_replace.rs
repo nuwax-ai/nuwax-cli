@@ -205,6 +205,8 @@ impl PackageReplacement {
                 }
                 for index in 0..zip.len() {
                     let mut entry = zip.by_index(index)?;
+                    validate_archive_entry_name(entry.name_raw())?;
+                    validate_archive_entry_name(entry.name().as_bytes())?;
                     let raw = entry.enclosed_name().context("Unsafe package path")?;
                     let relative = normalize_entry(&raw)?;
                     let mode = entry.unix_mode().unwrap_or(0o644);
@@ -235,6 +237,7 @@ impl PackageReplacement {
                 let mut tar = tar::Archive::new(decoder);
                 for entry in tar.entries()? {
                     let mut entry = entry?;
+                    validate_archive_entry_name(&entry.path_bytes())?;
                     let relative = normalize_entry(&entry.path()?)?;
                     let kind = entry.header().entry_type();
                     if !kind.is_file() && !kind.is_dir() {
@@ -1155,8 +1158,22 @@ impl Selection {
     }
 }
 
+/// Archive names use forward slashes, before conversion to a native PathBuf.
+/// Windows PathBuf displays legitimate separators as backslashes, so checking
+/// its complete display string would reject every nested package entry.
+fn validate_archive_entry_name(raw: &[u8]) -> Result<()> {
+    if raw.iter().any(|byte| matches!(byte, b'\\' | b':' | b'\0')) {
+        anyhow::bail!("Unsafe package archive entry name");
+    }
+    Ok(())
+}
+
 fn normalize_entry(path: &Path) -> Result<PathBuf> {
-    if super::contains_unsafe_component(path) || path.to_string_lossy().contains(['\\', ':']) {
+    let unsafe_name = path.components().any(|component| {
+        matches!(component, std::path::Component::Normal(name)
+            if name.to_string_lossy().contains(['\\', ':', '\0']))
+    });
+    if super::contains_unsafe_component(path) || unsafe_name {
         anyhow::bail!("Unsafe package path: {}", path.display());
     }
     Ok(path
@@ -1320,6 +1337,42 @@ mod tests {
     use super::*;
     use client_core::upgrade_strategy::DownloadType;
     use std::io::Write;
+
+    #[test]
+    fn archive_names_remain_valid_after_native_path_conversion() -> Result<()> {
+        for raw in ["docker/.env", "docker/config/init_mysql.sql"] {
+            validate_archive_entry_name(raw.as_bytes())?;
+            let native: PathBuf = raw.split('/').collect();
+            #[cfg(windows)]
+            assert!(native.to_string_lossy().contains('\\'));
+            assert_eq!(normalize_entry(&native)?, native.strip_prefix("docker")?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn raw_archive_names_reject_platform_dependent_separators_and_special_bytes() {
+        for raw in [
+            b"docker\\config\\init_mysql.sql".as_slice(),
+            b"C:/docker/config/init_mysql.sql",
+            b"docker/config/file:stream",
+            b"docker/config/file\0suffix",
+        ] {
+            assert!(validate_archive_entry_name(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn native_entry_components_still_reject_traversal_absolute_paths_and_bad_names() {
+        for path in [
+            "../outside",
+            "/outside",
+            "docker/config/file:stream",
+            "docker/file\0suffix",
+        ] {
+            assert!(normalize_entry(Path::new(path)).is_err());
+        }
+    }
 
     fn full() -> Result<UpgradeStrategy> {
         Ok(UpgradeStrategy::FullUpgrade {
