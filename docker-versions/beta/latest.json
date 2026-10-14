@@ -1,7 +1,7 @@
 {
-  "version": "0.0.112",
+  "version": "0.0.113",
   "release_notes": "nuwax智能体-beta",
-  "release_date": "2026-10-11T07:51:53Z",
+  "release_date": "2026-10-14T07:51:53Z",
   "packages": {
     "full": {
       "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20261012153227/docker-x86_64.zip",
