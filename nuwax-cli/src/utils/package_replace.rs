@@ -1518,6 +1518,185 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    fn runtime_state_fixture(root: &Path) -> Result<()> {
+        use std::os::unix::fs::symlink;
+        for (relative, contents) in [
+            (
+                "computer-cache/pnpm/dlx/hash/node_modules/.pnpm/vite/node_modules/vite/package.json",
+                "cached package",
+            ),
+            ("userapp-workspace/dev/1/1/src/main.ts", "user source"),
+            ("userapp-workspace/data/1/app.sqlite", "user database"),
+            ("backups/mysql/backup.sql", "database backup"),
+            ("backups/redis/dump.rdb", "redis backup"),
+        ] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().context("runtime fixture parent")?)?;
+            fs::write(path, contents)?;
+        }
+        symlink(
+            ".pnpm/vite/node_modules/vite",
+            root.join("computer-cache/pnpm/dlx/hash/node_modules/vite"),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug, PartialEq, Eq)]
+    struct RuntimeState {
+        identity: FsIdentity,
+        contents: Option<Vec<u8>>,
+        link_target: Option<PathBuf>,
+    }
+
+    #[cfg(unix)]
+    fn runtime_state_snapshot(root: &Path) -> Result<BTreeMap<PathBuf, RuntimeState>> {
+        use std::os::unix::fs::MetadataExt;
+        let mut snapshot = BTreeMap::new();
+        for name in ["computer-cache", "userapp-workspace", "backups"] {
+            for entry in walkdir::WalkDir::new(root.join(name)).follow_links(false) {
+                let entry = entry?;
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(path)?;
+                let identity = FsIdentity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                    uid: metadata.uid(),
+                    gid: metadata.gid(),
+                    mode: metadata.mode(),
+                };
+                let contents = if metadata.is_file() {
+                    Some(fs::read(path)?)
+                } else {
+                    None
+                };
+                let target = if metadata.file_type().is_symlink() {
+                    Some(fs::read_link(path)?)
+                } else {
+                    None
+                };
+                snapshot.insert(
+                    path.strip_prefix(root)?.to_path_buf(),
+                    RuntimeState {
+                        identity,
+                        contents,
+                        link_target: target,
+                    },
+                );
+            }
+        }
+        Ok(snapshot)
+    }
+
+    #[cfg(unix)]
+    fn replace_package_with_runtime_state(created_after_prepare: bool) -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("docker");
+        fixture(&root)?;
+        if !created_after_prepare {
+            runtime_state_fixture(&root)?;
+        }
+        let package = temporary.path().join("package.zip");
+        zip(
+            &package,
+            &[
+                ("docker/docker-compose.yml", "new compose"),
+                ("docker/config/start.sh", "new managed script"),
+                ("docker/computer-cache/from-package", "must not add"),
+                (
+                    "docker/userapp-workspace/dev/1/1/src/main.ts",
+                    "must not overwrite",
+                ),
+                ("docker/userapp-workspace/from-package", "must not add"),
+                ("docker/backups/mysql/backup.sql", "must not overwrite"),
+                ("docker/backups/from-package", "must not add"),
+            ],
+        )?;
+        let mut plan =
+            PackageReplacement::prepare(&package, &full()?, &root, &root.join(".env"), true)?;
+        if created_after_prepare {
+            runtime_state_fixture(&root)?;
+        }
+        let before = runtime_state_snapshot(&root)?;
+        plan.apply()?;
+        plan.finish()?;
+        assert_eq!(runtime_state_snapshot(&root)?, before);
+        assert_eq!(
+            fs::read_to_string(root.join("docker-compose.yml"))?,
+            "new compose"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("config/start.sh"))?,
+            "new managed script"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                root.join("computer-cache/pnpm/dlx/hash/node_modules/vite/package.json")
+            )?,
+            "cached package"
+        );
+        for name in ["computer-cache", "userapp-workspace", "backups"] {
+            assert!(!root.join(name).join("from-package").exists());
+        }
+
+        // Persistent package-manager links do not exempt managed release paths.
+        let external = temporary.path().join("outside-canary");
+        fs::write(&external, "outside data")?;
+        symlink(&external, root.join("config/unsafe-link"))?;
+        let error =
+            PackageReplacement::prepare(&package, &full()?, &root, &root.join(".env"), true)
+                .err()
+                .context("managed symlink must still be rejected before replacement")?;
+        assert!(format!("{error:#}").contains("refuses live symlink"));
+        assert_eq!(fs::read_to_string(external)?, "outside data");
+        assert_eq!(runtime_state_snapshot(&root)?, before);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_runtime_data_and_pnpm_links_survive_package_replacement() -> Result<()> {
+        replace_package_with_runtime_state(false)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_runtime_data_created_after_prepare_survives_package_replacement() -> Result<()> {
+        replace_package_with_runtime_state(true)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_runtime_data_survives_failed_replacement_and_rollback() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("docker");
+        fixture(&root)?;
+        runtime_state_fixture(&root)?;
+        let before = runtime_state_snapshot(&root)?;
+        let package = temporary.path().join("package.zip");
+        archive(&package)?;
+        let mut plan =
+            PackageReplacement::prepare(&package, &full()?, &root, &root.join(".env"), true)?;
+        let mut step = 0;
+        let result = plan.apply_inner(&mut || {
+            step += 1;
+            if step == 2 {
+                anyhow::bail!("injected failure after journaling managed files");
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        plan.rollback()?;
+        assert_eq!(runtime_state_snapshot(&root)?, before);
+        assert_eq!(
+            fs::read_to_string(root.join("docker-compose.yml"))?,
+            "old compose"
+        );
+        Ok(())
+    }
+
     #[test]
     fn failure_after_each_replacement_and_env_merge_restores_managed_files() -> Result<()> {
         for failure_step in 1..=5 {

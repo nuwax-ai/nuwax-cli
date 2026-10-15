@@ -257,24 +257,30 @@ pub mod docker {
     /// - `upload`: 用户上传的文件
     /// - `project_workspace`: 项目工作空间
     /// - `computer-project-workspace`: 计算机项目工作空间
+    /// - `computer-cache`: npm/pnpm/bun/uv 等运行时缓存（包含正常的包管理器链接）
     /// - `project_zips`: 项目压缩包
     /// - `project_nginx`: Nginx配置
     /// - `project_init`: 项目初始化文件
     /// - `uv_cache`: UV缓存目录
     /// - `data`: 数据库和持久化数据
     /// - `app-workspace`: 应用工作空间
+    /// - `userapp-workspace`: 用户应用的开发、数据、日志及 Agent 持久化工作空间
+    /// - `backups`: 定时生成的数据库及 Redis 备份
     /// - `.env`: 用户数据库凭据、服务端口及其他部署配置
     /// - `logs`: 容器挂载的持久化服务日志
-    pub const EXCLUDE_DIRS: [&str; 11] = [
+    pub const EXCLUDE_DIRS: [&str; 14] = [
         "upload",
         "project_workspace",
         "computer-project-workspace",
+        "computer-cache",
         "project_zips",
         "project_nginx",
         "project_init",
         "uv_cache",
         "data",
         "app-workspace",
+        "userapp-workspace",
+        BACKUPS_DIR_NAME,
         ".env",
         "logs",
     ];
