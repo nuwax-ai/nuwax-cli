@@ -1,10 +1,10 @@
 {
-  "version": "0.0.115",
+  "version": "0.0.116",
   "release_notes": "nuwax智能体-beta",
-  "release_date": "2026-10-15T10:10:30Z",
+  "release_date": "2026-10-15T13:49:50Z",
   "packages": {
     "full": {
-      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20261015100909/docker-x86_64.zip",
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20261015132817/docker-x86_64.zip",
       "hash": "external",
       "signature": "",
       "size": 0
@@ -13,13 +13,13 @@
   "platforms": {
     "x86_64": {
       "signature": "",
-      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20261015100909/docker-x86_64.zip",
-      "hash": "f7c5b8f71a382817e4cf07dff3bbf1016b561e5acafd09cccdf9a5c4a7993708"
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20261015132817/docker-x86_64.zip",
+      "hash": "5fee57c7e202a1a0dc7fc0c15af236073d415d557be662c7716024a416834b25"
     },
     "aarch64": {
       "signature": "",
-      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20261015100909/docker-aarch64.zip",
-      "hash": "756a3b04fd86ce92288f1dd6257cdeed3b4a26a9a115c0f105eca22b8aedf132"
+      "url": "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker/20261015132817/docker-aarch64.zip",
+      "hash": "ed6b610e3ce0ca2967c3b1f1b2db1a567062b17240a349c88cd79ae970c5ef35"
     }
   },
   "patch": null
