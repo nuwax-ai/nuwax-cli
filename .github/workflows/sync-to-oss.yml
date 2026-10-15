@@ -27,6 +27,15 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ inputs.tag }}
+      # latest/ 别名目录里的固定文件名，与 latest.json 的 platforms 键一一对应
+      ALIAS_FILES: >-
+        nuwax-cli-macos-arm64.tar.gz
+        nuwax-cli-macos-amd64.tar.gz
+        nuwax-cli-macos-universal.tar.gz
+        nuwax-cli-linux-amd64.tar.gz
+        nuwax-cli-linux-arm64.tar.gz
+        nuwax-cli-windows-amd64.zip
+        nuwax-cli-windows-arm64.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -152,6 +161,39 @@ jobs:
             echo "✅ Uploaded latest.json to dev/ (dev pointer)"
           fi
 
+      - name: Publish latest alias objects
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          # 为 stable 通道生成固定文件名的别名对象（服务端复制，不重新上传），
+          # 让安装脚本可以用不变化的 URL 拿到最新版，无需再手工维护版本号。
+          # 必须先完成上面两步（产物 + latest.json 指针），别名才有资格落地。
+          # 带预发布后缀的标签（v1.0.140-beta.1）也不落地，避免 beta 覆盖生产最新版。
+          if [[ "$RELEASE_TAG" != v* || "$RELEASE_TAG" == *-* ]]; then
+            echo "==> Skipped: alias objects are only published for stable (v*, no prerelease) tags"
+            exit 0
+          fi
+
+          cd release_assets
+          # 只别名 latest.json 引用的安装用压缩包；*.npm.tar.gz 由 npm 按版本目录消费，不需要别名
+          for file in $ALIAS_FILES; do
+            # 该平台本次没有产出对应资产时跳过，交给 Verify 步骤判断是否成问题
+            if [ ! -f "$file" ]; then
+              echo "==> Skipped (not in this release): $file"
+              continue
+            fi
+            echo "Aliasing: $file"
+            ossutil cp --force \
+              "${OSS_BUCKET}/nuwax-cli/${RELEASE_TAG}/${file}" \
+              "${OSS_BUCKET}/nuwax-cli/latest/${file}" \
+              --endpoint "$OSS_ENDPOINT" \
+              --region "$OSS_REGION" \
+              --access-key-id "$OSS_ACCESS_KEY_ID" \
+              --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+            echo "✅ Alias: nuwax-cli/latest/${file}"
+          done
+
       - name: Verify OSS upload
         run: |
           # 根据版本类型验证不同的 URL
@@ -170,4 +212,22 @@ jobs:
           else
             echo "❌ latest.json not found on OSS (HTTP ${HTTP_STATUS})"
             exit 1
+          fi
+
+          # 别名对象逐个确认：指针已发布却缺别名，安装脚本会 404
+          if [[ "$RELEASE_TAG" == v* && "$RELEASE_TAG" != *-* ]]; then
+            cd release_assets
+            for file in $ALIAS_FILES; do
+              if [ ! -f "$file" ]; then
+                continue
+              fi
+              ALIAS_URL="${OSS_CDN_BASE}/nuwax-cli/latest/${file}"
+              ALIAS_STATUS=$(curl -sS -o /dev/null -I -w "%{http_code}" "$ALIAS_URL")
+              if [ "$ALIAS_STATUS" = "200" ]; then
+                echo "✅ alias verified: ${file}"
+              else
+                echo "❌ alias missing (HTTP ${ALIAS_STATUS}): ${ALIAS_URL}"
+                exit 1
+              fi
+            done
           fi
