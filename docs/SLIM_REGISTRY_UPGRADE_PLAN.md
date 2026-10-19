@@ -50,9 +50,11 @@ auto-upgrade-deploy run                 auto-upgrade-deploy <新子命令>
 
 ### 2.2 registry manifest
 
-复用现有 `EnhancedServiceManifest` schema（`version` / `packages.full` / `platforms.{x86_64,aarch64}` / `patch`），
-只换 URL 与 zip 文件名，**不引入新结构**。这样 `UpgradeStrategyManager::select_full_upgrade_strategy`
-原样可用，无需新解析代码。瘦通道的 `patch` 字段恒为 `null`（不做差分增量，镜像层增量由 registry 负责）。
+**落地位置**：`docker-version/{prod,beta}/registry.json` —— 与 `latest.json` 同目录的兄弟文件，
+CI 只是多传一个 key，目录权限/生命周期都不用改。复用现有 `EnhancedServiceManifest` schema
+（`version` / `packages.full` / `platforms.{x86_64,aarch64}` / `patch`），**不引入新结构**。
+瘦通道的 `patch` 必须为 `null`；PR-2 已加断言式拒绝：清单里出现 patch 块直接报错，
+因为补丁包走的是离线通道的缓存目录，误发布会让两条通道共用同一个包收据。
 
 镜像身份不进 manifest —— 它是 `DELIVERY_MANIFEST.json` 的事（见 §3.3）。
 
@@ -66,14 +68,21 @@ auto-upgrade-deploy run                 auto-upgrade-deploy <新子命令>
 
 ## 3. 数据契约
 
-### 3.1 manifest URL 解析
+### 3.1 manifest URL 解析（PR-2 已实现）
 
-现有优先级（[api.rs:662](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/api.rs#L662)）：
-`NUWAX_API_DOCKER_VERSION_URL` env > `NUWAX_API_DOCKER_ENV=test` → beta OSS > prod OSS（[constants.rs:392/395](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/constants.rs#L392)）。
+优先级按通道各有一套，规则集中在纯函数 `manifest_url_for`
+（[api.rs:850](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/api.rs#L850)）：
 
-新增并列一套：常量 `NUWAX_API_DOCKER_REGISTRY_VERSION_URL_*` + env override
-`NUWAX_API_DOCKER_REGISTRY_VERSION_URL`。`get_enhanced_service_manifest` 加一个"取哪个通道"的入参，
-不复制函数体。
+| 通道 | env 覆盖 | beta | prod | OSS 失败 |
+|---|---|---|---|---|
+| images（离线，默认） | `NUWAX_API_DOCKER_VERSION_URL` | `docker-version/beta/latest.json` | `docker-version/prod/latest.json` | 降级到 API |
+| registry（瘦） | `NUWAX_API_DOCKER_REGISTRY_VERSION_URL` | `docker-version/beta/registry.json` | `docker-version/prod/registry.json` | **直接失败** |
+
+beta 判定沿用现有的 `NUWAX_CLI_ENV=test|testing`（注意不是 `NUWAX_API_DOCKER_ENV`）。
+registry 不降级到 API：API 端点只提供离线全量清单，降级过去等于让瘦部署静默拿到带 tar 的包。
+
+`ApiClient::get_service_manifest(channel)` 是新入口，`get_enhanced_service_manifest()`
+保留为"离线通道"的薄封装，调用点零改动。
 
 ### 3.2 slim zip 的 SHA
 
@@ -81,6 +90,10 @@ auto-upgrade-deploy run                 auto-upgrade-deploy <新子命令>
 [package_cache.rs:56 normalize_sha256](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/package_cache.rs#L56)
 归一成 `"external"`，等于**下载完整性完全不校验**（beta 有真 SHA）。瘦通道包虽小，但没有 SHA 就 pull
 十几个 GB 的镜像是拿客户环境赌。所以 PR-1 要顺手把 prod manifest 的 `hash` 补上（CI 侧一行）。
+
+PR-2 已在客户端加了不对称的门槛（[upgrade_strategy.rs required_full_hash](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/upgrade_strategy.rs)）：
+registry 通道下清单里缺 `hash`/`hash == "external"` 直接报错，不做静默降级；images 通道维持原样
+（否则今天所有离线升级都会被新校验打断）。**即：瘦通道发布侧必须先补 SHA，否则子命令拉不到包 —— 这是有意的。**
 
 ### 3.3 镜像身份：`DELIVERY_MANIFEST.json` v1 直接复用，不用升 contract
 
@@ -135,6 +148,21 @@ CLI 要不要改写 `.env`"整块逻辑**删除**。
 - `@sha256:<digest>`（最严但 compose 不可读，且 CI 必须先 push 再取 digest 再渲染 compose，是硬顺序依赖）
 
 CLI 侧不猜：pull 完用 `config_id` 比对本地实际镜像，不一致即失败。
+
+### 3.5 两条通道的包必须分目录（PR-2 的实现前提）
+
+两条通道会为**同一个版本号**发布不同的包，而缓存路径原本是
+`<download_dir>/<base_version>/<download_type>/`，`download_type` 恒为 `"full"`，
+文件名又固定是 `docker-<arch>.zip`（[package_cache.rs:226-230](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/package_cache.rs#L226-L230)
+的收据校验会拒绝别的文件名）。所以瘦包和离线包会落进同一个目录、抢同一个
+`package-cache.json`：轻则另一条通道读到"identity does not match"硬错误，重则在 prod
+没有发布 SHA（`"external"` → 不校验）时**用错包**。
+
+处理：`DownloadType` 增加 `Registry`（Display `"registry"`），由策略对象携带，
+下载目录与 `PackageIdentity` 都从它派生 —— 两个调用点
+（[update.rs:118](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/update.rs#L118)、
+[docker_service.rs:594](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/docker_service.rs#L594)）
+原先硬编码 `"full"`，已一并改为跟随策略。瘦包因此落在 `<download_dir>/<version>/registry/`。
 
 ---
 
@@ -233,12 +261,14 @@ MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`�
 `Pull` 分支有单测证明 step5/6 未执行；`docker_channel` 写入后 `load_from_file` 能读回（防静默丢失）。
 **为什么第一个做**：这是唯一会碰现有代码的部分，越早合入，后面 4 个 PR 越是纯新增。
 
-### PR-2｜manifest 来源参数化
-**改**：`constants.rs`（prod/beta 两个新 URL + env 名）、`api.rs:662`（加通道入参，复用同一函数体）、
-`upgrade_strategy.rs`（不需要改，瘦通道只有一个 full 包）。
-**验收**：默认路径 URL 与今天逐字节一致（回归测试）；env override 生效；瘦 manifest 的 `hash` 缺失时
-按 `normalize_sha256` 语义拒绝或明确告警，不允许静默 `"external"` 进瘦通道。
-**顺带**：prod `latest.json` 的 CI 补 `hash`（发布侧一行）。
+### PR-2｜manifest 来源参数化 ✅ 已完成
+**改**：`constants.rs`（prod/beta 两个新 URL + env 名）、`api.rs`（`get_service_manifest(channel)`，
+原 `get_enhanced_service_manifest()` 变薄封装）、`upgrade.rs`、`upgrade_strategy.rs`（新增
+`DownloadType::Registry` + `required_full_hash`）、`package_cache.rs`（识别 `registry` 目录名）、
+调用点 `update.rs` / `docker_service.rs` 的 `PackageIdentity` 跟随策略。
+**验收（已测）**：默认路径 URL 与今天逐字节一致（回归测试）；env override 生效；registry 通道
+缺 SHA 直接失败；registry 清单出现 patch 块直接失败；registry 的 OSS 失败**不**降级到 API。
+**顺带**：prod `latest.json` 的 CI 补 `hash`（发布侧一行，仍待 PR-5）。
 
 ### PR-3｜pull-before-stop 模块（本方案的技术核心）
 **新增** `nuwax-cli/src/docker_service/registry_images.rs`：

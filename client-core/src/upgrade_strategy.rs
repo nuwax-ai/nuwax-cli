@@ -217,16 +217,15 @@ impl UpgradeStrategyManager {
                 "Using architecture-specific full package: {}",
                 &platform_info.url
             );
+            let published = platform_info.published_sha256(
+                self.manifest
+                    .packages
+                    .as_ref()
+                    .map(|packages| &packages.full),
+            )?;
             Ok(UpgradeStrategy::FullUpgrade {
                 url: platform_info.url.clone(),
-                hash: platform_info
-                    .published_sha256(
-                        self.manifest
-                            .packages
-                            .as_ref()
-                            .map(|packages| &packages.full),
-                    )?
-                    .unwrap_or_else(|| "external".to_string()),
+                hash: self.required_full_hash(published.as_deref(), &platform_info.url)?,
                 signature: platform_info.signature.clone(),
                 target_version: self.manifest.version.clone(),
                 download_type: self.full_download_type.clone(),
@@ -236,7 +235,7 @@ impl UpgradeStrategyManager {
             debug!("Using generic full package: {}", &full_info.url);
             Ok(UpgradeStrategy::FullUpgrade {
                 url: full_info.url.clone(),
-                hash: full_info.hash.clone(),
+                hash: self.required_full_hash(Some(full_info.hash.as_str()), &full_info.url)?,
                 signature: full_info.signature.clone(),
                 target_version: self.manifest.version.clone(),
                 download_type: self.full_download_type.clone(),
@@ -246,6 +245,22 @@ impl UpgradeStrategyManager {
             Err(anyhow::anyhow!(
                 "Full upgrade package for corresponding architecture not found"
             ))
+        }
+    }
+
+    /// 全量包的发布方 SHA。
+    ///
+    /// registry 瘦包必须给出可用的 SHA：瘦部署跳过 `docker load`，下载完整性是唯一能证明
+    /// "解出来的就是发布的那份"的环节，拿不到就拒绝开始部署。离线通道保持历史行为
+    /// （缺省填 `external` 占位，由 `normalize_sha256` 解释为"不校验"）。
+    fn required_full_hash(&self, published: Option<&str>, package: &str) -> Result<String> {
+        match published {
+            Some(hash) if !hash.is_empty() && hash != "external" => Ok(hash.to_string()),
+            _ if self.full_download_type == DownloadType::Registry => Err(anyhow::anyhow!(
+                "registry package {package} publishes no SHA-256; \
+                 refusing an unverified slim download"
+            )),
+            _ => Ok("external".to_string()),
         }
     }
 
@@ -493,10 +508,34 @@ mod tests {
     /// 下载目录与缓存收据才不会和离线包混用
     #[test]
     fn registry_channel_stamps_full_package_with_registry_download_type() {
+        let mut manifest = create_test_manifest();
+        match Architecture::detect() {
+            Architecture::X86_64 => {
+                manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .x86_64
+                    .as_mut()
+                    .unwrap()
+                    .hash = Some("a".repeat(64))
+            }
+            Architecture::Aarch64 => {
+                manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .aarch64
+                    .as_mut()
+                    .unwrap()
+                    .hash = Some("a".repeat(64))
+            }
+            _ => panic!("test host architecture unsupported"),
+        }
         let manager = UpgradeStrategyManager::new(
             "0.0.12".to_string(),
             false,
-            create_test_manifest(),
+            manifest,
             DownloadType::Registry,
         );
         let UpgradeStrategy::FullUpgrade {
@@ -530,6 +569,74 @@ mod tests {
             error.contains("registry channel does not support incremental patch"),
             "unexpected error: {error}"
         );
+    }
+
+    /// 瘦包跳过 docker load，SHA 是唯一的下载完整性证明：清单不给就必须拒绝
+    #[test]
+    fn registry_channel_requires_a_published_package_sha() {
+        let manager = UpgradeStrategyManager::new(
+            "0.0.12".to_string(),
+            false,
+            create_test_manifest(),
+            DownloadType::Registry,
+        );
+        let error = manager.select_full_upgrade_strategy().unwrap_err();
+        assert!(
+            error.to_string().contains("publishes no SHA-256"),
+            "unexpected error: {error}"
+        );
+
+        // 离线通道保持历史行为：没有可用 SHA 时填 external 占位继续部署
+        let offline = UpgradeStrategyManager::new(
+            "0.0.12".to_string(),
+            false,
+            create_test_manifest(),
+            DownloadType::Full,
+        )
+        .select_full_upgrade_strategy()
+        .unwrap();
+        let UpgradeStrategy::FullUpgrade { hash, .. } = offline else {
+            panic!("应该选择全量升级策略");
+        };
+        assert_eq!(hash, "external");
+
+        let mut manifest = create_test_manifest();
+        let digest = "c".repeat(64);
+        match Architecture::detect() {
+            Architecture::X86_64 => {
+                manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .x86_64
+                    .as_mut()
+                    .unwrap()
+                    .hash = Some(digest.clone());
+            }
+            Architecture::Aarch64 => {
+                manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .aarch64
+                    .as_mut()
+                    .unwrap()
+                    .hash = Some(digest.clone());
+            }
+            _ => panic!("test host architecture unsupported"),
+        }
+        let manager = UpgradeStrategyManager::new(
+            "0.0.12".to_string(),
+            false,
+            manifest,
+            DownloadType::Registry,
+        );
+        let UpgradeStrategy::FullUpgrade { hash, .. } =
+            manager.select_full_upgrade_strategy().unwrap()
+        else {
+            panic!("应该选择全量升级策略");
+        };
+        assert_eq!(hash, digest);
     }
 
     #[test]
