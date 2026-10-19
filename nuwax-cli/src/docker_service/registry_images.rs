@@ -1,6 +1,3 @@
-// PR-4 的瘦通道子命令是本模块唯一调用方；接线合入后删掉这条 allow。
-#![allow(dead_code)]
-
 //! 瘦（registry）通道的镜像就绪逻辑：**在服务停止之前**把候选包 Compose 引用的
 //! 镜像全部拉到本地，并按交付清单校验身份。
 //!
@@ -240,6 +237,10 @@ pub trait RegistryDeployOps {
     /// 仓库可达性预检。`Ok(false)` = 客户机拉不到；预检能力缺失时实现自行降级为 `Ok(true)`。
     fn registry_reachable(&self, reference: String) -> BoxFuture<'_, Result<bool>>;
     /// 停服。镜像就绪之前禁止调用。
+    ///
+    /// 生产部署走 `docker_service::stop_docker_services_and_wait`（带等待与超时），本模块
+    /// 用不到它；它留在这里是为了让"拉取阶段绝不停服"可被 mock 证明 —— mock 里被调用即 panic。
+    #[allow(dead_code)]
     fn stop_services(&self) -> BoxFuture<'_, Result<()>>;
 }
 
@@ -665,6 +666,21 @@ mod tests {
                 .unwrap_err()
                 .to_string();
         assert!(error.contains("arm64"), "{error}");
+    }
+
+    /// 交付清单的 architecture 用 docker 词汇（`amd64`/`arm64`），与
+    /// `verify_delivery_manifest` 的调用方一致。调用方若传 `client_core::architecture`
+    /// 的 `x86_64`/`aarch64`，每一次部署都会被判成架构不符 —— PR-4 的接线必须用前者。
+    #[test]
+    fn rejects_the_golang_architecture_vocabulary_from_the_caller() {
+        let error =
+            plan_candidate_images(&references(&[RECEIPTED]), &receipted_delivery(), "x86_64")
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("does not match this host ('x86_64')"),
+            "{error}"
+        );
     }
 
     #[test]

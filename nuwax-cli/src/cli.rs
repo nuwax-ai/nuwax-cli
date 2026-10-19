@@ -65,6 +65,29 @@ pub enum AutoUpgradeDeployCommand {
         )]
         project: Option<String>,
     },
+    /// Deploy from the registry channel: the slim package carries no offline image tars,
+    /// every image in the package Compose is pulled and identity-checked before services stop
+    RegistryDeploy {
+        /// Specify frontend service port (default: port 80)
+        #[arg(
+            long,
+            help = "Specify frontend service port, corresponds to FRONTEND_HOST_PORT variable in docker-compose.yml (default: port 80)"
+        )]
+        port: Option<u16>,
+        /// Specify custom docker-compose config file path
+        #[arg(
+            long,
+            help = "Specify custom docker-compose config file path (default: docker/docker-compose.yml)"
+        )]
+        config: Option<PathBuf>,
+        /// Specify docker-compose project name
+        #[arg(
+            short = 'p',
+            long,
+            help = "Specify docker-compose project name (default: read from compose file or use 'docker')"
+        )]
+        project: Option<String>,
+    },
     /// Show current auto upgrade configuration
     Status,
     /// Offline deployment from local archive (全量升级模式)
@@ -369,5 +392,45 @@ mod tests {
             }
             _ => panic!("expected upgrade download command"),
         }
+    }
+
+    #[test]
+    fn parses_registry_deploy_subcommand() {
+        let cli = Cli::parse_from([
+            "nuwax-cli",
+            "auto-upgrade-deploy",
+            "registry-deploy",
+            "--port",
+            "8081",
+            "--project",
+            "agent",
+        ]);
+
+        match cli.command {
+            Commands::AutoUpgradeDeploy(AutoUpgradeDeployCommand::RegistryDeploy {
+                port,
+                config,
+                project,
+            }) => {
+                assert_eq!(port, Some(8081));
+                assert_eq!(config, None);
+                assert_eq!(project.as_deref(), Some("agent"));
+            }
+            _ => panic!("expected registry deploy command"),
+        }
+    }
+
+    #[test]
+    fn registry_deploy_is_a_sibling_of_run_not_a_flag_on_it() {
+        // 通道选择必须是显式命令：`run` 永远读离线清单，瘦部署永远读 registry 清单，
+        // 一个被敲错的 flag 不该让部署拿到另一种包。
+        let cli = Cli::parse_from(["nuwax-cli", "auto-upgrade-deploy", "run"]);
+        assert!(matches!(
+            cli.command,
+            Commands::AutoUpgradeDeploy(AutoUpgradeDeployCommand::Run { .. })
+        ));
+        assert!(
+            Cli::try_parse_from(["nuwax-cli", "auto-upgrade-deploy", "run", "--registry"]).is_err()
+        );
     }
 }

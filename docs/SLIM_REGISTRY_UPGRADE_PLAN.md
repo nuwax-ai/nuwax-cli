@@ -182,26 +182,31 @@ CLI 侧不猜：pull 完用 `config_id` 比对本地实际镜像，不一致即�
 | 4 | `preflight_candidate_package` | 同（对 slim zip） |
 | 5 | 下载 14GiB fat zip | 下载 slim zip |
 | **6** | — | **停服前：解 compose → 抽镜像引用 → 与 `target` 交叉校验 → `docker pull` → `config_id` 校验** |
+| **6.5** | — | **`record_deployment_channel`：把本次通道写进配置（只写通道，不写版本）** |
 | 7 | `stop_docker_services_and_wait`（:1014，2s 轮询/30s 上限，超时即硬错） | 同 |
 | 8 | `PackageReplacement::apply`（:1055）+ `fix_script_permissions` | 同（见 §5.1 的 images 目录后果） |
 | 9 | `run_staged_deployment`（:317-445） | 同，但 `prepare_services` 的 step5/6 **换成 no-op** |
-| 10 | `finish_package_deployment`（:1083） | 同 + 记录 `docker_channel = registry` |
+| 10 | `finish_package_deployment`（:1083） | 同 + 版本与 `docker_channel` 一起落盘 |
+
+6.5 这步是实现时补的（原计划漏了）：第 9 步的 `prepare_services` 读的是**配置里的通道**，
+而配置原先到第 10 步才写 —— 首次瘦部署时它还是 `images`，于是会去 slim 包里找不存在的 tar。
+两条通道都在停服前写：瘦通道在镜像拉齐之后（拉不齐就不改状态），胖通道同样要改，
+否则 `registry` 状态的机器跑 `run` 时胖包的 tar 不会被加载。
 
 第 9 步的细节：`prepare_services`（[manager.rs:76-107](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/manager.rs#L76-L107)）
 的 step5 `load_images` 和 step6 `setup_image_tags_with_ducker_validation` 是唯一与镜像相关的两步，
-其余（挂载目录、MySQL 配置权限、脚本权限）瘦通道一样需要。所以引入一个枚举：
-
-```rust
-pub enum ImageAcquisition { Load, Pull }   // Pull 时 step5/6 跳过
-```
+其余（挂载目录、MySQL 配置权限、脚本权限）瘦通道一样需要。
+**PR-1 落地用的是配置状态 `versions.docker_channel`（`Images` / `Registry`）而不是给
+`prepare_services` 加 `ImageAcquisition` 参数**——通道是必须持久化的部署事实（§5.1、6.5），
+从配置读可以让签名全部不变；见 §6 PR-1 的偏差记录。
 
 step 6 的 `setup_image_tags_with_mappings`（[image_loader.rs:333](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/image_loader.rs#L333)）
 现在是"把 load 出来的名字去掉 `-amd64/-arm64` 后缀 re-tag"，**从不读 compose**。瘦通道里镜像名就是
-compose 里的引用，不需要 retag —— 这正是 `Pull` 分支要跳过它的原因。
+compose 里的引用，不需要 retag —— 这正是 `Registry` 通道要跳过它的原因。
 
 下游（`get_service_dependency_closure("mysql")` → 起 mysql → `wait_for_mysql_connection` →
 `execute_sql_diff_upgrade` → 其余层 → MySQL container-id 前后相等守卫 :418-423 → 全量健康检查 →
-最后写版本）全部原样，包括 mysql container-id 守卫：pull 出来的新镜像换了 container id 会照旧被抓住。
+最后写版本与通道）全部原样，包括 mysql container-id 守卫：pull 出来的新镜像换了 container id 会照旧被抓住。
 
 ---
 
@@ -317,12 +322,31 @@ MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`�
 断网/坏网络重试到上限后错误里带引用名与"before any service was stopped"；pull 成功但本地无镜像 → 可见错误；
 tag 被覆盖 → "does not match its delivery receipt"；无 manifest 的包指向胖通道；`:latest` 包在**任何传输之前**失败。
 
-### PR-4｜新子命令
-**改**：`cli.rs:45-88` 加 variant、`main.rs`（同 `Run` 走 CLI 自更新前置）、
-`auto_upgrade_deploy.rs`（新 `run_registry_deploy`，按 §4 时序复用 `run_staged_deployment`）、
-`locales/*.yml` 三语新键、`status` 输出增加当前通道。
-**验收**：`--help` 三语；错误路径全部有 i18n 键；失败语义与 §5.2 一致；在 dev box（192.168.32.117）
-真机跑通一次 0.0.119 → 0.0.120 并记录各阶段耗时。
+### PR-4｜新子命令 ✅ 已完成
+**改**：`cli.rs` 加 `AutoUpgradeDeployCommand::RegistryDeploy`（CLI 名 `auto-upgrade-deploy registry-deploy`）、
+`main.rs` 无需改动（现有 `else if let Commands::AutoUpgradeDeploy(_)` 分支已覆盖新子命令，
+照旧先跑 CLI 自更新前置 + compose 类型检测）、
+`auto_upgrade_deploy.rs`（`run_registry_deploy` / `run_auto_upgrade_deploy` 都变成薄封装，共同调用
+`run_channel_deployment(channel)`；按 §4 时序复用 `run_staged_deployment`）、`status` 输出当前通道。
+`registry_images.rs` 的 `#![allow(dead_code)]` 已删除，只在 `RegistryDeployOps::stop_services` 上留一条
+带理由的窄 allow（它存在的意义是让 mock 能证明"拉取阶段不停服"，生产停服走
+`stop_docker_services_and_wait`）。
+**落地时新增的一步（原计划没写）**：通道必须在 `prepare_services` 读到它**之前**落定。
+`prepare_services` 用 `app.config.get_docker_channel()` 决定"加载包内 tar"还是"按 Compose 引用取镜像"，
+而 §4 的时序里版本/通道是在部署成功后才写的 —— 首次瘦部署时它还是 `images`，于是会去 slim 包里
+找不存在的 tar 而失败。所以瘦通道在镜像拉齐之后（拉不完就不改状态）、两条通道在停服之前都会
+`record_deployment_channel(channel)`（只写通道，不写版本：失败回滚后机器跑的还是旧版本）。
+这一步顺带让反向切换也成立：`registry` 状态的机器上跑 `run`，胖包的 tar 才会被真正加载。
+**验收**：`registry-deploy` 与 `run` 是兄弟子命令而不是 `run --registry` 这种 flag（敲错 flag 不该换包语义，有测试）；
+clap 解析测试覆盖 `--port/--project`；`update_config_version` 版本与通道一起落盘有测试（防 §5.1 的模板静默丢失坑）；
+清单架构词汇用 docker 的 `amd64`/`arm64`，传 `x86_64` 会每次判成不匹配 —— 已加测试钉住（PR-3 的调用方必须用
+`docker_service::architecture::detect_architecture()`，不是 `client_core::architecture`）。
+**验收偏差（两条，都是原计划写错前提）**：
+1. "`--help` 三语"做不到，也不该在本 PR 做：clap 的帮助文本在本项目里完全不走 i18n（`cli.rs` 里 help
+   全是硬编码字面量，locale 里的 `commands.auto_upgrade_deploy.*_help` 一批键从来没有任何代码引用，是死键）。
+   新子命令沿用现状英文 help；换子命令自身的行为文案（`t!`）与既有键 `auto_upgrade_deploy.save_config_failed` 一致。
+2. "在 dev box 真机跑通 0.0.119 → 0.0.120"必须在 PR-5 发布侧产出 registry.json + slim 包之后才可能，
+   已挪到 PR-5 验收里。
 
 ### PR-5｜发布侧
 CI 产出：slim zip（断言 `unzip -l` 不含 `images/*.tar` **且** 含 `images/` 目录项）+ registry manifest +
@@ -349,7 +373,8 @@ manifest 一致 → 总耗时/停机时长/下载字节三项数据留档。
 
 ## 8. 待你确认（4 项）
 
-1. **子命令命名**：`auto-upgrade-deploy registry` / `slim-deploy` / `deploy-from-registry`？
+1. **子命令命名**：已按 `auto-upgrade-deploy registry-deploy` 实现（与既有 `offline-deploy` 同形状）。
+   要改成 `registry` / `slim-deploy` / `deploy-from-registry` 只需改 `cli.rs` 的 variant 名 + 2 个解析测试。
 2. **6 个 `:latest` 改成不可变 tag** —— 这是 CI 侧改动，PR-3 的校验强度取决于它。不做的话回滚是假的（§5.2），
    我不建议合入瘦通道。
 3. **内网/离线客户**继续走胖通道，CLI 不做 mirror 逻辑 —— 按你"各走各的、互不影响"我按是处理，若要支持

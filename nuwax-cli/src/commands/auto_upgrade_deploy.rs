@@ -241,13 +241,14 @@ fn validate_offline_archive_sql(archive_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 更新配置文件中的版本号并持久化
+/// 更新配置文件中的版本号与镜像交付通道并持久化
 ///
 /// 使用 Arc::make_mut 来获取可变引用，如果 Arc 有多个引用会自动克隆
 ///
 /// # 参数
 /// - `config`: 应用配置的可变 Arc 引用
 /// - `version`: 新的版本号字符串
+/// - `channel`: 刚刚成功部署所用的镜像交付通道
 ///
 /// # 错误
 /// 如果保存配置文件失败会返回错误
@@ -255,9 +256,13 @@ fn update_config_version(
     config: &mut Arc<client_core::config::AppConfig>,
     config_path: &Path,
     version: &str,
+    channel: client_core::config::DockerChannel,
 ) -> Result<()> {
     let config_mut = Arc::make_mut(config);
     config_mut.write_docker_versions(version.to_string());
+    // 版本与通道必须一起落盘：只记版本会让下一次 `prepare_services` 沿用上一条命令的通道，
+    // 而两条通道对"镜像从哪来"的要求相反。
+    config_mut.write_docker_channel(channel);
 
     config_mut
         .save_to_file(config_path)
@@ -265,7 +270,29 @@ fn update_config_version(
 
     info!(
         version = version,
+        channel = channel.as_str(),
         "✅ Updated and saved the version in configuration file"
+    );
+    Ok(())
+}
+
+/// 把本次命令的镜像交付通道写进配置（内存与磁盘），供紧随其后的 `prepare_services` 读取。
+///
+/// 必须停在停服/替包之前：`prepare_services` 用配置状态决定"加载包内 tar"还是"按 Compose
+/// 引用从仓库取镜像"，沿用上一条命令的记录会让本次命令自带的包被无视（胖包的 tar 不加载，
+/// 瘦包则去找并不存在的 tar）。版本号不在这里写 —— 部署失败回滚后机器跑的还是旧版本。
+fn record_deployment_channel(
+    app: &mut CliApp,
+    channel: client_core::config::DockerChannel,
+) -> Result<()> {
+    let config_mut = Arc::make_mut(&mut app.config);
+    config_mut.write_docker_channel(channel);
+    config_mut
+        .save_to_file(&app.config_path)
+        .context(t!("auto_upgrade_deploy.save_config_failed"))?;
+    info!(
+        "📡 Image delivery channel for this deployment: {channel}",
+        channel = channel.as_str()
     );
     Ok(())
 }
@@ -310,6 +337,9 @@ async fn wait_for_mysql_connection(compose_path: &Path, env_path: &Path) -> Resu
 struct StagedDeployment<'a> {
     had_existing_compose: bool,
     target_version: &'a str,
+    /// 本次部署用的镜像交付通道；成功后与版本号一起写回配置（§5.1：这是必须持久化的部署事实，
+    /// 不能让 `prepare_services` 靠 `docker/images` 目录是否存在来猜）。
+    channel: client_core::config::DockerChannel,
     database_starting: bool,
     replacement: Option<&'a mut crate::utils::package_replace::PackageReplacement>,
 }
@@ -439,7 +469,12 @@ async fn run_staged_deployment(
         .context("Docker services did not become healthy after MySQL migration")?;
 
     let app_config_path = app.config_path.clone();
-    update_config_version(&mut app.config, &app_config_path, staged.target_version)?;
+    update_config_version(
+        &mut app.config,
+        &app_config_path,
+        staged.target_version,
+        staged.channel,
+    )?;
     info!("✅ Deployment completed after MySQL migration and service health checks");
     Ok(())
 }
@@ -911,6 +946,14 @@ pub async fn handle_auto_upgrade_deploy_command(
             info!("🚀 Starting auto-upgrade deployment...");
             run_auto_upgrade_deploy(app, port, config, project).await
         }
+        AutoUpgradeDeployCommand::RegistryDeploy {
+            port,
+            config,
+            project,
+        } => {
+            info!("🚀 Starting registry (slim) deployment...");
+            run_registry_deploy(app, port, config, project).await
+        }
         AutoUpgradeDeployCommand::Status => {
             info!("Show auto-upgrade deployment status");
             show_status(app).await
@@ -938,12 +981,49 @@ fn deployment_target_version(strategy: &UpgradeStrategy, deployed_version: &str)
     }
 }
 
-/// 执行自动升级部署流程
+/// 执行自动升级部署流程（离线全量通道：包内自带 docker/images/*.tar）
 pub async fn run_auto_upgrade_deploy(
     app: &mut CliApp,
     frontend_port: Option<u16>,
     config_file: Option<PathBuf>,
     project_name: Option<String>,
+) -> Result<()> {
+    run_channel_deployment(
+        app,
+        frontend_port,
+        config_file,
+        project_name,
+        client_core::config::DockerChannel::Images,
+    )
+    .await
+}
+
+/// 执行瘦通道部署：清单取自 registry.json，包内没有离线镜像 tar，
+/// 镜像在**停服之前**按候选包 Compose 的引用从仓库拉取。
+pub async fn run_registry_deploy(
+    app: &mut CliApp,
+    frontend_port: Option<u16>,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+) -> Result<()> {
+    run_channel_deployment(
+        app,
+        frontend_port,
+        config_file,
+        project_name,
+        client_core::config::DockerChannel::Registry,
+    )
+    .await
+}
+
+/// 两条通道共用同一条部署时序：换文件、回滚、MySQL 边界这些危险部分只有一份实现，
+/// 差异只有三处——读哪份清单、停服前是否先拉镜像、成功后把 `docker_channel` 记成什么。
+async fn run_channel_deployment(
+    app: &mut CliApp,
+    frontend_port: Option<u16>,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+    channel: client_core::config::DockerChannel,
 ) -> Result<()> {
     info!("🚀 Starting auto-upgrade deployment...");
 
@@ -970,17 +1050,13 @@ pub async fn run_auto_upgrade_deploy(
     info!("📥 Downloading the latest Docker service version...");
 
     // 下载策略只读取一次 manifest；替包时记录策略目标，无替包时保留当前部署版本。
-    // `run` 是离线全量命令，因此固定读取离线通道清单（与本机已部署通道无关）。
+    // 清单来源由命令决定，而不是由本机上次用哪条通道部署决定：同一台机器可以在两条
+    // 通道之间切换，读错清单会拿到与本命令语义不符的包。
     let upgrade_args = crate::cli::UpgradeArgs {
         force: false,
         check: false,
     };
-    let upgrade_strategy = update::run_upgrade(
-        app,
-        upgrade_args,
-        client_core::config::DockerChannel::Images,
-    )
-    .await?;
+    let upgrade_strategy = update::run_upgrade(app, upgrade_args, channel).await?;
     let target_version =
         deployment_target_version(&upgrade_strategy, &app.config.get_docker_versions());
 
@@ -1015,6 +1091,20 @@ pub async fn run_auto_upgrade_deploy(
         ),
         None => None,
     };
+    if channel == client_core::config::DockerChannel::Registry {
+        // 6. 瘦通道：镜像必须在停服**之前**全部就绪。放在停服之后就把停机窗口拉长成
+        //    "传镜像 + 起服务"，而且传输失败时服务已经全停了。
+        if let Some(path) = package_path.as_deref() {
+            pull_candidate_images_before_stop(docker_manager, path, docker_manager.get_env_file())
+                .await?;
+        }
+    }
+    if package_path.is_some() {
+        // 通道必须在 `prepare_services` 读到它之前落定，两条通道对"镜像从哪来"的要求相反。
+        record_deployment_channel(app, channel)?;
+    } else {
+        info!("ℹ️ Nothing new to deploy; the recorded image delivery channel is unchanged");
+    }
     if had_existing_compose {
         // 3. 🛑 停止服务并等待（使用统一的公共方法）
         let stopped = docker_service::stop_docker_services_and_wait(
@@ -1067,6 +1157,7 @@ pub async fn run_auto_upgrade_deploy(
     let mut staged = StagedDeployment {
         had_existing_compose,
         target_version: &target_version,
+        channel,
         database_starting: false,
         replacement: replacement.as_mut(),
     };
@@ -1081,6 +1172,41 @@ pub async fn run_auto_upgrade_deploy(
     .await;
     let database_starting = staged.database_starting;
     finish_package_deployment(replacement, deployment, database_starting)
+}
+
+/// 停服之前把候选包 Compose 引用的镜像全部拉到本地并按交付清单校验身份。
+///
+/// 幂等：本地身份已经对上的引用只做 inspect，不重新传输，所以断点重跑不会重复下载
+/// 上 GB 的镜像层。失败一定发生在停服之前，服务照旧跑在旧版本上。
+async fn pull_candidate_images_before_stop(
+    docker_manager: &DockerManager,
+    package_path: &Path,
+    env_path: &Path,
+) -> Result<()> {
+    use crate::docker_service::registry_images::{
+        PullPolicy, plan_from_candidate_package, pull_candidate_images,
+    };
+    // 清单里的 architecture 用的是 docker 的词汇（amd64/arm64），与
+    // `verify_delivery_manifest` 的调用方一致；client_core::architecture 那套是
+    // x86_64/aarch64，喂进来会每次都判成不匹配。
+    let architecture = crate::docker_service::architecture::detect_architecture();
+    let plan = plan_from_candidate_package(package_path, env_path, architecture.as_str())
+        .context("Cannot plan registry images from the candidate package")?;
+    info!(
+        "🧭 Registry deployment must ensure {} image(s) for {architecture} before stopping services",
+        plan.len()
+    );
+    let started = std::time::Instant::now();
+    let report = pull_candidate_images(docker_manager, &plan, &PullPolicy::default())
+        .await
+        .context("Registry images were not ready; services were left running on the old version")?;
+    info!(
+        "✅ Images ready in {}s: {} pulled, {} already matched the delivery receipt",
+        started.elapsed().as_secs(),
+        report.pulled.len(),
+        report.reused.len()
+    );
+    Ok(())
 }
 
 /// Recover only managed release files before MySQL starts. From MySQL startup
@@ -1229,6 +1355,17 @@ pub async fn show_status(app: &mut CliApp) -> Result<()> {
 
     info!("📊 Auto-upgrade deployment status:");
     info!("Feature status: implemented");
+    let channel = app.config.get_docker_channel();
+    // 两条通道对"镜像从哪来"的要求相反，所以这台机器当前是哪条必须看得见。
+    info!(
+        "Image delivery channel: {channel} ({hint})",
+        channel = channel.as_str(),
+        hint = if channel.loads_offline_images() {
+            "offline package carries docker/images/*.tar"
+        } else {
+            "slim package, images pulled from the registry"
+        }
+    );
     info!("Process: download latest version -> smart backup -> deploy services -> start services");
 
     // 显示待执行的升级任务
@@ -1817,6 +1954,7 @@ pub async fn run_offline_deploy(
     let mut staged = StagedDeployment {
         had_existing_compose,
         target_version: &target_version,
+        channel: client_core::config::DockerChannel::Images,
         database_starting: false,
         replacement: Some(&mut replacement),
     };
@@ -1838,7 +1976,7 @@ mod tests {
     use super::{OnlineEnvPreserve, UpgradeStrategy, validate_offline_archive_sql};
     use anyhow::{Context, Result};
     use flate2::{Compression, write::GzEncoder};
-    use std::{fs::File, io::Write, path::Path};
+    use std::{fs::File, io::Write, path::Path, sync::Arc};
 
     fn valid_platform_sql() -> &'static str {
         "CREATE DATABASE IF NOT EXISTS agent_platform;\n\
@@ -1883,6 +2021,29 @@ mod tests {
                 .err()
                 .context("TAR.GZ incremental application must fail before extraction")?;
         assert!(error.to_string().contains("ZIP"));
+        Ok(())
+    }
+
+    /// 部署成功后版本号与镜像交付通道必须一起落盘：只记版本会让下一次
+    /// `prepare_services` 沿用上一条命令的通道，而两条通道对镜像来源的要求相反。
+    #[test]
+    fn deployment_records_the_channel_that_just_ran_alongside_the_version() -> Result<()> {
+        use client_core::config::{AppConfig, DockerChannel};
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.toml");
+        for channel in [DockerChannel::Images, DockerChannel::Registry] {
+            let mut config = Arc::new(AppConfig::default());
+            config.save_to_file(&path)?;
+            super::update_config_version(&mut config, &path, "0.0.120", channel)?;
+            let restored = AppConfig::load_from_file(&path)?;
+            assert_eq!(restored.get_docker_versions(), "0.0.120");
+            assert_eq!(
+                restored.get_docker_channel(),
+                channel,
+                "通道 {channel:?} 没有落盘"
+            );
+        }
         Ok(())
     }
 
