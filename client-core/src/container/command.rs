@@ -172,6 +172,36 @@ impl DockerManager {
 
         Ok(output)
     }
+
+    /// 带超时执行 docker 命令。超时后杀掉子进程：`docker pull` 卡在坏网络上时，
+    /// 只 drop future 会让 CLI 进程继续在后台持有连接，必须显式 kill。
+    pub(crate) async fn run_docker_command_with_timeout(
+        &self,
+        args: &[&str],
+        limit: std::time::Duration,
+    ) -> Result<std::process::Output> {
+        debug!(
+            "Executing docker command with {}s limit: {:?}",
+            limit.as_secs(),
+            args
+        );
+        let mut command = Command::new("docker");
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        tokio::time::timeout(limit, command.output())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "docker {} timed out after {} seconds",
+                    args.first().copied().unwrap_or("command"),
+                    limit.as_secs()
+                )
+            })?
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]

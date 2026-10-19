@@ -14,6 +14,7 @@ pub mod health_check;
 pub mod image_loader;
 pub mod manager;
 pub mod port_manager;
+pub mod registry_images;
 pub mod script_permissions;
 pub mod service_manager;
 

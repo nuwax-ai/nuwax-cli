@@ -586,6 +586,13 @@ pub mod timeout {
 
     /// 服务验证前等待时间（让服务稳定）
     pub const SERVICE_VERIFY_WAIT: u64 = 5;
+
+    /// 瘦通道单个镜像引用从仓库拉取的超时时间。镜像层可能上 GB，
+    /// 但这个调用发生在停服之前，超时只能放弃部署，不能拖成"看起来卡死"。
+    pub const REGISTRY_PULL_TIMEOUT: u64 = 3600;
+
+    /// 瘦通道停服前的仓库可达性预检超时时间
+    pub const REGISTRY_PROBE_TIMEOUT: u64 = 60;
 }
 
 /// SQL 相关常量

@@ -369,15 +369,24 @@ fn compose_env_value(
 
 /// 使用 `docker-compose-types` crate 解析配置文件，并处理 .env 文件中的环境变量
 pub fn load_compose_config_with_env(compose_path: &Path, env_path: &Path) -> Result<dct::Compose> {
-    let env_values = load_env_values(env_path)?;
-
-    // 2. 读取 docker-compose.yml 文件内容
     let content = fs::read_to_string(compose_path)
         .map_err(|e| DuckError::Docker(format!("Failed to read compose file: {e}")))?;
+    let env_values = load_env_values(env_path)?;
+    load_compose_config_with_env_values(&content, compose_path, &env_values)
+}
 
+/// 同一套解析，只是两个输入都由调用方给出。
+///
+/// 瘦（registry）通道需要它：候选包的 compose 与合并后的 env 在停服之前都只在内存里，
+/// 而"要拉哪些镜像"必须在那时就定下来。`compose_path` 只用于错误信息。
+pub fn load_compose_config_with_env_values(
+    content: &str,
+    compose_path: &Path,
+    env_values: &HashMap<String, String>,
+) -> Result<dct::Compose> {
     // Parse syntax before inserting environment data. Otherwise a password's
     // " #", ": ", quotes or newlines can become YAML syntax and change its value.
-    let mut document: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|error| {
+    let mut document: serde_yaml::Value = serde_yaml::from_str(content).map_err(|error| {
         let location = error
             .location()
             .map(|location| format!(" at line {}, column {}", location.line(), location.column()))
@@ -388,7 +397,7 @@ pub fn load_compose_config_with_env(compose_path: &Path, env_path: &Path) -> Res
             compose_path.display()
         ))
     })?;
-    let context = |key: &str| compose_env_value(key, &env_values, |key| std::env::var(key).ok());
+    let context = |key: &str| compose_env_value(key, env_values, |key| std::env::var(key).ok());
     interpolate_compose_value(&mut document, &mut Vec::new(), &context)?;
     // A deserialization error may contain the offending value (credentials).
     // Schema coercion errors below identify structural fields without values.
@@ -416,6 +425,62 @@ pub fn load_compose_config_with_env(compose_path: &Path, env_path: &Path) -> Res
     }
 
     Ok(compose_config)
+}
+
+/// 提取 Compose 里全部服务引用的镜像，去重后按字典序返回。
+///
+/// 只做类型化解析，不用正则：瘦（registry）通道要靠这个集合决定"要拉哪些镜像"，
+/// 漏一个就是停机后 `docker compose up` 现场拉取。没有 `image:` 的服务（只写 `build:`）
+/// 直接拒绝 —— 发布产物里没有构建上下文，客户端也不该在客户机上构建。
+pub fn compose_image_references(compose_path: &Path, env_path: &Path) -> Result<Vec<String>> {
+    let compose = load_compose_config_with_env(compose_path, env_path).with_context(|| {
+        format!(
+            "Failed to read image references from {}",
+            compose_path.display()
+        )
+    })?;
+    image_references_of(&compose)
+}
+
+/// `compose_image_references` 的候选包形式：compose 文本与合并后的 env 值都在内存里。
+pub fn compose_image_references_with_values(
+    content: &str,
+    compose_path: &Path,
+    env_values: &HashMap<String, String>,
+) -> Result<Vec<String>> {
+    let compose = load_compose_config_with_env_values(content, compose_path, env_values)
+        .with_context(|| {
+            format!(
+                "Failed to read image references from {}",
+                compose_path.display()
+            )
+        })?;
+    image_references_of(&compose)
+}
+
+fn image_references_of(compose: &dct::Compose) -> Result<Vec<String>> {
+    let mut missing_image = Vec::new();
+    // BTreeSet 而不是 HashSet：调用方要靠这个序列打日志、断点重跑，每次一致才有意义。
+    let mut references = std::collections::BTreeSet::new();
+    for (name, service) in &compose.services.0 {
+        match service
+            .as_ref()
+            .and_then(|service| service.image.as_deref())
+        {
+            Some(image) if !image.trim().is_empty() => {
+                references.insert(image.trim().to_string());
+            }
+            _ => missing_image.push(name.clone()),
+        }
+    }
+    if !missing_image.is_empty() {
+        missing_image.sort();
+        anyhow::bail!(
+            "Compose services without an image reference cannot be delivered from a registry: {}",
+            missing_image.join(", ")
+        );
+    }
+    Ok(references.into_iter().collect())
 }
 
 fn interpolate_scalar(raw: &str, context: &impl Fn(&str) -> Option<String>) -> Result<String> {
@@ -929,6 +994,102 @@ mod isolated_compose_environment_tests {
         let path = directory.path().join("invalid.env");
         std::fs::write(&path, "DEVICE_ID=valid\nBAD=\"unfinished\n")?;
         assert!(load_env_values(&path).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod image_reference_tests {
+    use super::*;
+
+    fn write(directory: &Path, name: &str, text: &str) -> Result<std::path::PathBuf> {
+        let path = directory.join(name);
+        fs::write(&path, text)?;
+        Ok(path)
+    }
+
+    #[test]
+    fn image_references_are_resolved_after_interpolation_and_deduplicated() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = write(
+            directory.path(),
+            "compose.yml",
+            concat!(
+                "services:\n",
+                "  im:\n    image: ${NUWAX_TEST_REGISTRY}/nuwax/nuwax-im:0.0.120\n",
+                "  gateway:\n    image: ${NUWAX_TEST_REGISTRY}/nuwax/nuwax-im:0.0.120\n",
+                "  mysql:\n    image: mysql:8.0\n",
+            ),
+        )?;
+        let env = write(
+            directory.path(),
+            "delivery.env",
+            "NUWAX_TEST_REGISTRY=registry.example.cn\n",
+        )?;
+        assert_eq!(
+            compose_image_references(&compose, &env)?,
+            vec![
+                "mysql:8.0".to_string(),
+                "registry.example.cn/nuwax/nuwax-im:0.0.120".to_string()
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_memory_form_and_the_file_form_agree_on_every_reference() -> Result<()> {
+        // 候选包走文本形式、已部署走文件形式；两条路必须给出同一个集合，
+        // 否则"按候选包拉镜像、按磁盘 compose 起服务"会拉到不同的东西。
+        let directory = tempfile::tempdir()?;
+        let compose = write(
+            directory.path(),
+            "compose.yml",
+            concat!(
+                "services:\n",
+                "  im:\n    image: ${NUWAX_TEST_REGISTRY}/nuwax/nuwax-im:0.0.120\n",
+                "  mysql:\n    image: mysql:8.0\n",
+                "  front:\n    image: registry.example.cn/nuwax/agent-platform-front:0.0.120\n",
+            ),
+        )?;
+        let env = write(
+            directory.path(),
+            "parity.env",
+            "NUWAX_TEST_REGISTRY=registry.example.cn\n",
+        )?;
+        let from_file = compose_image_references(&compose, &env)?;
+        let from_memory = compose_image_references_with_values(
+            &fs::read_to_string(&compose)?,
+            &compose,
+            &load_env_values(&env)?,
+        )?;
+        assert_eq!(from_file, from_memory);
+        assert_eq!(from_file.len(), 3);
+        // 顺序契约：调用方按这个序列打进度日志、断点重跑
+        let mut ascending = from_file.clone();
+        ascending.sort();
+        assert_eq!(from_file, ascending);
+        Ok(())
+    }
+
+    #[test]
+    fn services_without_an_image_are_refused_not_silently_skipped() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = write(
+            directory.path(),
+            "compose.yml",
+            concat!(
+                "services:\n",
+                "  mysql:\n    image: mysql:8.0\n",
+                "  builder:\n    build:\n      context: ./builder\n",
+                "  also-builder:\n    build: ./other\n",
+            ),
+        )?;
+        let env = write(directory.path(), "delivery.env", "")?;
+        let error = compose_image_references(&compose, &env)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("without an image reference"), "{error}");
+        assert!(error.contains("also-builder, builder"), "{error}");
         Ok(())
     }
 }

@@ -148,6 +148,8 @@ CLI 要不要改写 `.env`"整块逻辑**删除**。
 - `@sha256:<digest>`（最严但 compose 不可读，且 CI 必须先 push 再取 digest 再渲染 compose，是硬顺序依赖）
 
 CLI 侧不猜：pull 完用 `config_id` 比对本地实际镜像，不一致即失败。
+**PR-3 已把这条变成机器执法**：`plan_candidate_images` 拒绝任何"没有 delivery receipt 且引用可覆盖"
+的镜像（`:latest` 或无 tag），错误在**任何网络传输之前**抛出。CI 若不改这 6 个引用，瘦通道第一次部署就失败。
 
 ### 3.5 两条通道的包必须分目录（PR-2 的实现前提）
 
@@ -270,25 +272,50 @@ MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`�
 缺 SHA 直接失败；registry 清单出现 patch 块直接失败；registry 的 OSS 失败**不**降级到 API。
 **顺带**：prod `latest.json` 的 CI 补 `hash`（发布侧一行，仍待 PR-5）。
 
-### PR-3｜pull-before-stop 模块（本方案的技术核心）
+### PR-3｜pull-before-stop 模块（本方案的技术核心）✅ 已完成
 **新增** `nuwax-cli/src/docker_service/registry_images.rs`：
 1. 从 **staged 包**里的 compose（不是磁盘旧文件）取引用：
    `load_compose_config_with_env`（[config.rs:371](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/container/config.rs#L371)）
    已能拿到 typed `services[*].image`，用它，**不要用正则**
+   —— 落地偏差：候选包的 compose 与合并后的 env 在停服前**只存在于内存**，原函数要求两个磁盘路径，
+   因此拆出 `load_compose_config_with_env_values(content, path, env_values)` 作为原语，
+   磁盘版变薄封装；`compose_image_references{,_with_values}` 同理。
 2. 与 `DELIVERY_MANIFEST.components.*.target` 交叉校验：集合必须相等，多一个少一个都失败
+   —— **落地时改掉了，原规则不成立**：真实生产 compose 有 25 个引用，而
+   `DELIVERY_MANIFEST.components` 只登记自研组件（fixture 里 2 个）。相等会把每一次部署都拒掉。
+   实现的是两条更准的规则：
+   - `components.*.target ⊆ compose 引用`（manifest 写了但 compose 没引用 = 包内容对不上，失败）
+   - **没被 receipt 的引用必须本身不可变**（有 digest，或显式非 `latest` tag）——
+     这是对 §3.4 残留风险的机器执法：第三方镜像靠钉版本自证，自研镜像靠 manifest 自证，
+     谁都不许用 `:latest`。CI 若不先做 §3.4 的整改，这一步在打包后第一次部署就会失败。
 3. 逐引用 `pull`（失败重试 N 次；带进度日志）。`pull_images()`
    （[image.rs:62](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/container/image.rs#L62)）
    是 `docker compose pull`，但它读磁盘 compose —— 停服前磁盘还是旧 compose，**不能用**，
    要么按引用逐个 `docker pull`，要么对 staged 目录做 `compose -f <staged> pull`。倾向前者（可控、可校验）
+   —— 按前者落地：新增 `DockerManager::pull_image(reference)`，走
+   `run_docker_command_with_timeout`（新增，`REGISTRY_PULL_TIMEOUT` 1h，超时显式 kill 子进程）。
 4. 每个引用落地后 `docker inspect` 取 config digest，与 `config_id` 比对，不符即失败
+   —— 本地身份接受 `config_id` **或** `image_id`，与
+   [backup_release.rs:327-333](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/backup_release.rs#L327-L333)
+   的既有语义一致（containerd 存储驱动下 `docker image inspect .Id` 返回的是 OCI index digest，
+   不是 config digest；只用 `config_id` 会在这一类主机上假失败）。
 5. 已存在且 digest 匹配则跳过（幂等，断点重跑不重传）
 6. 全程不 prune、不 rmi
 
-**硬性验收**：**pull 全部完成之前，代码路径上不存在任何 `stop` 调用**（写一个测试：mock 停服函数被调用即 panic）。
+**硬性验收（已过）**：**pull 全部完成之前，代码路径上不存在任何 `stop` 调用**（写一个测试：mock 停服函数被调用即 panic）。
 这是 C4 的机器证明，不是 review 意见。理由：`prepare_services` 今天跑在 `compose down` 之后，
 照原位置放 pull 就等于"停机时长 = 镜像传输时长"，且 pull 失败留下服务全停状态。
-另需一条预检：客户机能不能解析/访问 ACR（`docker manifest inspect` 一个引用即可），失败时在停服前给出
-可读错误 + 指向胖通道。
+落地形态：编排函数只拿 `RegistryDeployOps` trait（`image_identity` / `pull_image` /
+`registry_reachable` / `stop_services`），`stop_services` 在 pull 路径上不可达，mock 里直接
+`panic!`；并用反向对照证实过——临时插入一次 `stop_services()` 调用后测试立即在该 panic 处失败，
+随后撤销。另需一条预检：客户机能不能解析/访问 ACR（`docker manifest inspect` 一个引用即可），失败时在停服前给出
+可读错误 + 指向胖通道。已实现，且 CLI 不支持 `docker manifest` 时降级为"跳过预检"而不是拒部署。
+预检打的引用是**第一个有 delivery receipt 的引用**（而不是字典序第一个）——生产 compose 里
+`alpine`/`mysql` 这类第三方镜像会排在前面，探通了公共仓库不能证明这台机器拉得到本次发布。
+
+**验收（已测，22 项）**：确定性排序（`BTreeSet`，全量跑才发现 `HashSet` 导致顺序不稳定）；
+断网/坏网络重试到上限后错误里带引用名与"before any service was stopped"；pull 成功但本地无镜像 → 可见错误；
+tag 被覆盖 → "does not match its delivery receipt"；无 manifest 的包指向胖通道；`:latest` 包在**任何传输之前**失败。
 
 ### PR-4｜新子命令
 **改**：`cli.rs:45-88` 加 variant、`main.rs`（同 `Run` 走 CLI 自更新前置）、
