@@ -133,14 +133,26 @@ impl CliApp {
                     }
                     Some(crate::cli::UpgradeSubcommand::Check { force }) => {
                         let args = crate::cli::UpgradeArgs { force, check: true };
-                        commands::run_upgrade(self, args).await.map_err(|e| {
+                        commands::run_upgrade(
+                            self,
+                            args,
+                            client_core::config::DockerChannel::Images,
+                        )
+                        .await
+                        .map_err(|e| {
                             client_core::DuckError::custom(
                                 t!("app.upgrade_failed", error = e.to_string()).to_string(),
                             )
                         })?;
                     }
                     None => {
-                        commands::run_upgrade(self, args).await.map_err(|e| {
+                        commands::run_upgrade(
+                            self,
+                            args,
+                            client_core::config::DockerChannel::Images,
+                        )
+                        .await
+                        .map_err(|e| {
                             client_core::DuckError::custom(
                                 t!("app.upgrade_failed", error = e.to_string()).to_string(),
                             )

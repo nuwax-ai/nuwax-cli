@@ -297,6 +297,10 @@ pub mod api {
     /// Docker版本JSON URL环境变量（最高优先级，允许自定义docker版本JSON地址）
     pub const NUWAX_API_DOCKER_VERSION_URL_ENV: &str = "NUWAX_API_DOCKER_VERSION_URL";
 
+    /// registry 瘦通道 Docker 版本 JSON URL 环境变量（最高优先级，仅作用于 registry 通道）
+    pub const NUWAX_API_DOCKER_REGISTRY_VERSION_URL_ENV: &str =
+        "NUWAX_API_DOCKER_REGISTRY_VERSION_URL";
+
     /// 生产环境API服务器地址
     const PRODUCTION_BASE_URL: &str = "https://api-version.nuwax.com";
 
@@ -393,6 +397,12 @@ pub mod api {
 
         /// Docker版本JSON (OSS) - 测试/发布环境
         pub const DOCKER_VERSION_OSS_BETA: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/beta/latest.json";
+
+        /// registry 瘦通道版本JSON (OSS) - 生产环境（与 latest.json 同目录，发布侧多传一个文件）
+        pub const DOCKER_REGISTRY_VERSION_OSS_PROD: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/registry.json";
+
+        /// registry 瘦通道版本JSON (OSS) - 测试/发布环境
+        pub const DOCKER_REGISTRY_VERSION_OSS_BETA: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/beta/registry.json";
 
         /// CLI 版本检查 JSON (OSS) - 生产环境
         pub const CLI_VERSION_OSS_PROD: &str =

@@ -17,6 +17,8 @@ pub enum DownloadType {
     Full,
     /// 增量升级
     Patch,
+    /// registry 瘦通道的全量升级：包内不含 `docker/images/*.tar`
+    Registry,
 }
 
 impl Display for DownloadType {
@@ -24,6 +26,7 @@ impl Display for DownloadType {
         match self {
             DownloadType::Full => write!(f, "full"),
             DownloadType::Patch => write!(f, "patch"),
+            DownloadType::Registry => write!(f, "registry"),
         }
     }
 }
@@ -100,20 +103,34 @@ pub struct UpgradeStrategyManager {
     force_full: bool,
     ///当前客户端架构
     architecture: Architecture,
+    ///全量包所属通道（离线 full / registry 瘦包），决定下载目录与缓存身份
+    full_download_type: DownloadType,
 }
 
 impl UpgradeStrategyManager {
     /// 创建新的升级策略管理器
+    ///
+    /// `full_download_type` 只能是 [`DownloadType::Full`] 或 [`DownloadType::Registry`]：
+    /// 两条通道会为同一版本号发布不同的包，缓存目录与收据身份必须区分开。
     pub fn new(
         current_version: String,
         force_full: bool,
         manifest: EnhancedServiceManifest,
+        full_download_type: DownloadType,
     ) -> Self {
+        assert!(
+            matches!(
+                full_download_type,
+                DownloadType::Full | DownloadType::Registry
+            ),
+            "full packages cannot be downloaded as {full_download_type}"
+        );
         Self {
             manifest,
             current_version,
             force_full,
             architecture: Architecture::detect(),
+            full_download_type,
         }
     }
 
@@ -162,6 +179,14 @@ impl UpgradeStrategyManager {
             }
             crate::version::VersionComparison::PatchUpgradeable => {
                 // 可以进行增量升级
+                if self.full_download_type == DownloadType::Registry {
+                    // registry 通道只发布瘦全量包：补丁包走的是离线通道的缓存目录，
+                    // 误发布到瘦通道清单会让两条通道共用同一个包收据，宁可拒绝执行。
+                    return Err(anyhow::anyhow!(
+                        "The registry channel does not support incremental patch packages; \
+                         publish a registry full package instead"
+                    ));
+                }
                 if !self.has_patch_for_architecture() {
                     info!(
                         "No incremental upgrade package for current architecture, selecting full upgrade strategy"
@@ -204,7 +229,7 @@ impl UpgradeStrategyManager {
                     .unwrap_or_else(|| "external".to_string()),
                 signature: platform_info.signature.clone(),
                 target_version: self.manifest.version.clone(),
-                download_type: DownloadType::Full,
+                download_type: self.full_download_type.clone(),
             })
         } else if let Some(package_info) = &self.manifest.packages {
             let full_info = &package_info.full;
@@ -214,7 +239,7 @@ impl UpgradeStrategyManager {
                 hash: full_info.hash.clone(),
                 signature: full_info.signature.clone(),
                 target_version: self.manifest.version.clone(),
-                download_type: DownloadType::Full,
+                download_type: self.full_download_type.clone(),
             })
         } else {
             //未找到对应架构的全量升级包，这里主动报错
@@ -399,8 +424,12 @@ mod tests {
         // 设置测试环境
         let _temp_dir = setup_test_environment();
 
-        let manager =
-            UpgradeStrategyManager::new("0.0.13.2".to_string(), false, create_test_manifest());
+        let manager = UpgradeStrategyManager::new(
+            "0.0.13.2".to_string(),
+            false,
+            create_test_manifest(),
+            DownloadType::Full,
+        );
 
         // 当前版本与服务器版本相同
         let strategy = manager.determine_strategy().unwrap();
@@ -413,8 +442,12 @@ mod tests {
         // 设置测试环境
         let _temp_dir = setup_test_environment();
 
-        let manager =
-            UpgradeStrategyManager::new("0.0.13.4".to_string(), false, create_test_manifest());
+        let manager = UpgradeStrategyManager::new(
+            "0.0.13.4".to_string(),
+            false,
+            create_test_manifest(),
+            DownloadType::Full,
+        );
 
         // 当前版本比服务器版本新
         let strategy = manager.determine_strategy().unwrap();
@@ -427,8 +460,12 @@ mod tests {
         // 设置测试环境
         let _temp_dir = setup_test_environment();
 
-        let manager =
-            UpgradeStrategyManager::new("0.0.12".to_string(), false, create_test_manifest());
+        let manager = UpgradeStrategyManager::new(
+            "0.0.12".to_string(),
+            false,
+            create_test_manifest(),
+            DownloadType::Full,
+        );
 
         // 不同基础版本，需要全量升级
         let strategy = manager.determine_strategy().unwrap();
@@ -452,13 +489,60 @@ mod tests {
         }
     }
 
+    /// 两条通道会为同一版本号发布不同的包：registry 策略必须自带 registry 下载类型，
+    /// 下载目录与缓存收据才不会和离线包混用
+    #[test]
+    fn registry_channel_stamps_full_package_with_registry_download_type() {
+        let manager = UpgradeStrategyManager::new(
+            "0.0.12".to_string(),
+            false,
+            create_test_manifest(),
+            DownloadType::Registry,
+        );
+        let UpgradeStrategy::FullUpgrade {
+            url, download_type, ..
+        } = manager.select_full_upgrade_strategy().unwrap()
+        else {
+            panic!("应该选择全量升级策略");
+        };
+        assert_eq!(download_type, DownloadType::Registry);
+        assert_eq!(download_type.to_string(), "registry");
+        assert_eq!(
+            url,
+            format!(
+                "https://example.com/{}/docker.zip",
+                Architecture::detect().as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn registry_channel_refuses_an_incremental_patch_package() {
+        let _temp_dir = setup_test_environment();
+        let manager = UpgradeStrategyManager::new(
+            "0.0.13".to_string(),
+            false,
+            create_test_manifest(),
+            DownloadType::Registry,
+        );
+        let error = manager.determine_strategy().unwrap_err().to_string();
+        assert!(
+            error.contains("registry channel does not support incremental patch"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[test]
     fn test_patch_upgrade_same_base_version() {
         // 设置测试环境
         let _temp_dir = setup_test_environment();
 
-        let manager =
-            UpgradeStrategyManager::new("0.0.13".to_string(), false, create_test_manifest());
+        let manager = UpgradeStrategyManager::new(
+            "0.0.13".to_string(),
+            false,
+            create_test_manifest(),
+            DownloadType::Full,
+        );
 
         // 相同基础版本，可以增量升级
         let strategy = manager.determine_strategy().unwrap();
@@ -476,8 +560,12 @@ mod tests {
         // 设置测试环境
         let _temp_dir = setup_test_environment();
 
-        let manager =
-            UpgradeStrategyManager::new("0.0.13.2".to_string(), true, create_test_manifest());
+        let manager = UpgradeStrategyManager::new(
+            "0.0.13.2".to_string(),
+            true,
+            create_test_manifest(),
+            DownloadType::Full,
+        );
 
         // 强制全量升级，即使可以增量升级
         let strategy = manager.determine_strategy().unwrap();
@@ -506,7 +594,8 @@ mod tests {
             _ => panic!("test host architecture unsupported"),
         };
         platform.hash = Some("a".repeat(64));
-        let manager = UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest);
+        let manager =
+            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DownloadType::Full);
         let UpgradeStrategy::FullUpgrade { hash, .. } =
             manager.select_full_upgrade_strategy().unwrap()
         else {
@@ -534,7 +623,8 @@ mod tests {
             _ => panic!("test host architecture unsupported"),
         };
         platform.url = manifest.packages.as_ref().unwrap().full.url.clone();
-        let manager = UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest);
+        let manager =
+            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DownloadType::Full);
         let UpgradeStrategy::FullUpgrade { hash, .. } =
             manager.select_full_upgrade_strategy().unwrap()
         else {
@@ -543,7 +633,8 @@ mod tests {
         assert_eq!(hash, "b".repeat(64));
 
         let manifest = create_test_manifest();
-        let manager = UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest);
+        let manager =
+            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DownloadType::Full);
         let UpgradeStrategy::FullUpgrade { hash, .. } =
             manager.select_full_upgrade_strategy().unwrap()
         else {
@@ -578,7 +669,8 @@ mod tests {
             };
             platform.hash = placeholder;
             platform.url = url;
-            let manager = UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest);
+            let manager =
+                UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DownloadType::Full);
             let UpgradeStrategy::FullUpgrade { hash, .. } =
                 manager.select_full_upgrade_strategy().unwrap()
             else {

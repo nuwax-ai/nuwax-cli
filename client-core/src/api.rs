@@ -1,10 +1,12 @@
-use crate::api_config::ApiConfig;
+use crate::api_config::{ApiConfig, ApiEndpoints};
 use crate::api_types::*;
 use crate::authenticated_client::AuthenticatedClient;
+use crate::config::DockerChannel;
 use crate::constants::api as api_constants;
 use crate::downloader::{DownloadProgress, DownloaderConfig, FileDownloader};
 use crate::error::DuckError;
 use crate::version::Version;
+use anyhow::Context as _;
 use anyhow::Result;
 use futures::stream::StreamExt;
 use reqwest::Client;
@@ -655,31 +657,28 @@ impl ApiClient {
         }
     }
 
-    /// 获取增强的服务清单（支持分架构和增量升级）
+    /// 获取增强的服务清单（离线镜像通道，历史默认行为）
     /// 优先从 OSS 获取，失败后降级到原 API 地址
     /// 支持通过 NUWAX_API_DOCKER_VERSION_URL 环境变量自定义 URL
     /// NUWAX_CLI_ENV=test 时使用 beta/latest.json
     pub async fn get_enhanced_service_manifest(&self) -> Result<EnhancedServiceManifest> {
-        // 检查是否设置了自定义 Docker 版本 URL 环境变量
-        let custom_url = std::env::var(api_constants::NUWAX_API_DOCKER_VERSION_URL_ENV);
+        self.get_service_manifest(DockerChannel::Images).await
+    }
 
-        let (oss_url, url_source) = if let Ok(url) = custom_url {
-            (url, "env NUWAX_API_DOCKER_VERSION_URL")
-        } else {
-            // 检查是否为测试环境
-            let cli_env = std::env::var("NUWAX_CLI_ENV").unwrap_or_default();
-            if cli_env.eq_ignore_ascii_case("test") || cli_env.eq_ignore_ascii_case("testing") {
-                (
-                    self.config.endpoints.docker_version_oss_beta.clone(),
-                    "beta OSS (test env)",
-                )
-            } else {
-                (
-                    self.config.endpoints.docker_version_oss_prod.clone(),
-                    "prod OSS",
-                )
-            }
-        };
+    /// 按镜像交付通道获取服务清单。
+    ///
+    /// registry 通道**不降级到 API**：API 端点只提供离线全量清单，降级过去会让瘦部署静默
+    /// 拿到带 tar 的包（多下十几 GiB，且镜像加载已被跳过），宁可直接失败。
+    pub async fn get_service_manifest(
+        &self,
+        channel: DockerChannel,
+    ) -> Result<EnhancedServiceManifest> {
+        let (oss_url, url_source) = manifest_url_for(
+            channel,
+            std::env::var(manifest_url_env(channel)).ok().as_deref(),
+            std::env::var("NUWAX_CLI_ENV").ok().as_deref(),
+            &self.config.endpoints,
+        );
 
         info!("Fetching service manifest from {}: {}", url_source, oss_url);
 
@@ -687,6 +686,11 @@ impl ApiClient {
             Ok(manifest) => {
                 info!("Successfully fetched manifest from {}", url_source);
                 return Ok(manifest);
+            }
+            Err(e) if channel == DockerChannel::Registry => {
+                return Err(e).with_context(|| {
+                    format!("registry channel manifest is not available at {oss_url}")
+                });
             }
             Err(e) => {
                 warn!(
@@ -843,6 +847,49 @@ pub mod system_info {
     }
 }
 
+/// 该通道清单 URL 的环境变量覆盖名（最高优先级）
+fn manifest_url_env(channel: DockerChannel) -> &'static str {
+    match channel {
+        DockerChannel::Images => api_constants::NUWAX_API_DOCKER_VERSION_URL_ENV,
+        DockerChannel::Registry => api_constants::NUWAX_API_DOCKER_REGISTRY_VERSION_URL_ENV,
+    }
+}
+
+/// 通道 + 环境变量覆盖 + CLI 环境 → 清单 URL。
+/// 选择规则集中在这个纯函数里，两条通道的优先级差异一目了然。
+fn manifest_url_for(
+    channel: DockerChannel,
+    url_override: Option<&str>,
+    cli_env: Option<&str>,
+    endpoints: &ApiEndpoints,
+) -> (String, &'static str) {
+    if let Some(url) = url_override {
+        let source = match channel {
+            DockerChannel::Images => "env NUWAX_API_DOCKER_VERSION_URL",
+            DockerChannel::Registry => "env NUWAX_API_DOCKER_REGISTRY_VERSION_URL",
+        };
+        return (url.to_string(), source);
+    }
+
+    let beta = cli_env
+        .is_some_and(|env| env.eq_ignore_ascii_case("test") || env.eq_ignore_ascii_case("testing"));
+    match (channel, beta) {
+        (DockerChannel::Images, true) => (
+            endpoints.docker_version_oss_beta.clone(),
+            "beta OSS (test env)",
+        ),
+        (DockerChannel::Images, false) => (endpoints.docker_version_oss_prod.clone(), "prod OSS"),
+        (DockerChannel::Registry, true) => (
+            endpoints.docker_registry_version_oss_beta.clone(),
+            "registry beta OSS (test env)",
+        ),
+        (DockerChannel::Registry, false) => (
+            endpoints.docker_registry_version_oss_prod.clone(),
+            "registry prod OSS",
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,6 +899,57 @@ mod tests {
     // 创建测试用的API客户端
     fn create_test_api_client() -> ApiClient {
         ApiClient::new(Some("test_client_id".to_string()), None)
+    }
+
+    /// 离线通道的默认 URL 必须与新增 registry 通道之前逐字节一致
+    #[test]
+    fn manifest_urls_are_channel_scoped_and_offline_defaults_are_unchanged() {
+        let endpoints = &ApiConfig::default().endpoints;
+        let (url, source) = manifest_url_for(DockerChannel::Images, None, None, endpoints);
+        assert_eq!(
+            url,
+            "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/latest.json"
+        );
+        assert_eq!(source, "prod OSS");
+
+        let (beta, beta_source) =
+            manifest_url_for(DockerChannel::Images, None, Some("TEST"), endpoints);
+        assert_eq!(beta, endpoints.docker_version_oss_beta);
+        assert_eq!(beta_source, "beta OSS (test env)");
+
+        // 覆盖变量只要存在就生效（哪怕是空值），与引入 registry 通道之前一致
+        let (override_empty, override_source) =
+            manifest_url_for(DockerChannel::Images, Some(""), None, endpoints);
+        assert_eq!(override_empty, "");
+        assert_eq!(override_source, "env NUWAX_API_DOCKER_VERSION_URL");
+
+        let (registry, source) = manifest_url_for(DockerChannel::Registry, None, None, endpoints);
+        assert_eq!(
+            registry,
+            "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/registry.json"
+        );
+        assert_eq!(source, "registry prod OSS");
+        let (registry_beta, _) =
+            manifest_url_for(DockerChannel::Registry, None, Some("testing"), endpoints);
+        assert_eq!(registry_beta, endpoints.docker_registry_version_oss_beta);
+
+        // 覆盖变量按通道隔离：瘦通道不能借用离线通道的覆盖
+        assert_eq!(
+            manifest_url_env(DockerChannel::Images),
+            "NUWAX_API_DOCKER_VERSION_URL"
+        );
+        assert_eq!(
+            manifest_url_env(DockerChannel::Registry),
+            "NUWAX_API_DOCKER_REGISTRY_VERSION_URL"
+        );
+        let (override_url, override_source) = manifest_url_for(
+            DockerChannel::Registry,
+            Some("http://192.168.32.117/registry.json"),
+            None,
+            endpoints,
+        );
+        assert_eq!(override_url, "http://192.168.32.117/registry.json");
+        assert_eq!(override_source, "env NUWAX_API_DOCKER_REGISTRY_VERSION_URL");
     }
 
     #[test]

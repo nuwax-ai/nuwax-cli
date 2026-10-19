@@ -970,11 +970,17 @@ pub async fn run_auto_upgrade_deploy(
     info!("📥 Downloading the latest Docker service version...");
 
     // 下载策略只读取一次 manifest；替包时记录策略目标，无替包时保留当前部署版本。
+    // `run` 是离线全量命令，因此固定读取离线通道清单（与本机已部署通道无关）。
     let upgrade_args = crate::cli::UpgradeArgs {
         force: false,
         check: false,
     };
-    let upgrade_strategy = update::run_upgrade(app, upgrade_args).await?;
+    let upgrade_strategy = update::run_upgrade(
+        app,
+        upgrade_args,
+        client_core::config::DockerChannel::Images,
+    )
+    .await?;
     let target_version =
         deployment_target_version(&upgrade_strategy, &app.config.get_docker_versions());
 

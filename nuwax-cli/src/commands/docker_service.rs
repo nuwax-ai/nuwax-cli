@@ -594,7 +594,7 @@ pub fn package_path_for_strategy(
             PackageIdentity::new(
                 &target_version.to_string(),
                 architecture.as_str(),
-                "full",
+                &download_type.to_string(),
                 url,
                 Some(hash),
             )?,

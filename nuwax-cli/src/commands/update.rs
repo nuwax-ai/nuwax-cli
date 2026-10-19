@@ -2,7 +2,9 @@ use crate::app::CliApp;
 use crate::cli::UpgradeArgs;
 use anyhow::Result;
 use client_core::{
-    api::ApiClient, config::AppConfig, package_cache::PackageIdentity,
+    api::ApiClient,
+    config::{AppConfig, DockerChannel},
+    package_cache::PackageIdentity,
     upgrade_strategy::UpgradeStrategy,
 };
 use std::{
@@ -49,7 +51,14 @@ async fn handle_service_download(
 }
 
 /// 下载Docker服务升级文件
-pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeStrategy> {
+///
+/// `channel` 由命令决定，不由本机配置决定：`auto-upgrade-deploy run` 和 `upgrade`
+/// 走离线全量清单，瘦部署命令走 registry 清单。
+pub async fn run_upgrade(
+    app: &mut CliApp,
+    args: UpgradeArgs,
+    channel: DockerChannel,
+) -> Result<UpgradeStrategy> {
     if args.check {
         info!("🔍 Checking Docker service upgrade versions");
         info!("========================");
@@ -72,7 +81,10 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
     // 2. 获取当前版本信息
     let current_version_str = app.config.get_docker_versions();
 
-    let upgrade_strategy = app.upgrade_manager.check_for_updates(args.force).await?;
+    let upgrade_strategy = app
+        .upgrade_manager
+        .check_for_updates(args.force, channel)
+        .await?;
 
     let download_dir: PathBuf = app.config.get_download_dir();
 
@@ -106,7 +118,7 @@ pub async fn run_upgrade(app: &mut CliApp, args: UpgradeArgs) -> Result<UpgradeS
             let identity = PackageIdentity::new(
                 &target_version.to_string(),
                 client_core::architecture::Architecture::detect().as_str(),
-                "full",
+                &download_type_str,
                 url,
                 Some(hash),
             )?;

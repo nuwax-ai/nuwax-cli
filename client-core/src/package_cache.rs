@@ -34,7 +34,7 @@ impl PackageIdentity {
         if version.is_empty() || !matches!(architecture, "x86_64" | "aarch64") {
             bail!("Invalid package version or architecture");
         }
-        if !matches!(download_type, "full" | "patch") {
+        if !matches!(download_type, "full" | "patch" | "registry") {
             bail!("Invalid package download type");
         }
         let parsed = url::Url::parse(url).context("Invalid package download URL")?;
