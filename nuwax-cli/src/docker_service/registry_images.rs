@@ -4,8 +4,13 @@
 //! 两条不变量：
 //! 1. 本模块不调用任何停服 / `compose down` / prune / rmi 能力 —— 停机时长必须只等于
 //!    "换文件 + 起服务"，不能等于"传镜像"；拉取失败时服务仍然跑在旧版本上。
-//! 2. 每个拉下来的镜像都要能和 `DELIVERY_MANIFEST.json` 登记的身份对上，否则 `:latest`
-//!    被覆盖过的当天会出现"版本账记 0.0.120、实际跑别的构建"。
+//! 2. `DELIVERY_MANIFEST.json` 登记了身份的镜像，拉下来必须和凭据对上；tag 被覆盖过会在
+//!    停服前失败，而不是"版本账记 0.0.120、实际跑别的构建"。
+//!
+//! 清单**没有**登记的引用（第三方镜像，以及发布侧尚未纳入凭据的自研镜像）按 compose
+//! 原样拉取，浮动 `:latest` 也照拉 —— 2026-10-20 用户决定的瘦通道语义就是"这些镜像取
+//! registry 当前的最新"。代价由发布侧承担：同一版本号在不同时间可能装出不同字节，
+//! 回滚只回滚包内产物、不回滚这类镜像。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -20,7 +25,8 @@ use tracing::{info, warn};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryImage {
     pub reference: String,
-    /// `None` = 交付清单没有覆盖它（第三方镜像）；此时只接受带不可变 tag/digest 的引用。
+    /// `None` = 交付清单没有覆盖它（第三方镜像，或发布侧尚未纳入凭据的自研镜像）：
+    /// 按引用原样拉取，不做身份校验，浮动 tag 也接受。
     pub receipt: Option<ImageReceipt>,
 }
 
@@ -44,28 +50,12 @@ fn normalize_digest(value: &str, what: &str) -> Result<String> {
     Ok(format!("sha256:{}", hex.to_ascii_lowercase()))
 }
 
-/// 判断一个镜像引用是否可被覆盖。
-///
-/// `name@sha256:…` 不可变；`name:1.2.3` 按现有约定视为可接受（第三方钉版本）；
-/// 裸 `name` 与 `name:latest` 可被覆盖 —— 胖通道有包内 tar 兜底，瘦通道不能靠它。
-fn reference_is_immutable(reference: &str) -> bool {
-    if let Some((_, digest)) = reference.split_once('@') {
-        return normalize_digest(digest, "image digest").is_ok();
-    }
-    // 只看最后一段：`registry.example.com:5000/foo/bar` 里的端口不是 tag。
-    let tail = reference.rsplit('/').next().unwrap_or(reference);
-    match tail.split_once(':') {
-        Some((_, tag)) => !tag.is_empty() && !tag.eq_ignore_ascii_case("latest"),
-        None => false,
-    }
-}
-
 /// 把候选包 Compose 的镜像引用集合与交付清单交叉校验，得出确定性的拉取计划。
 ///
-/// 交付清单只登记自研组件，所以规则是 `targets ⊆ compose 引用`，不是集合相等：
-/// - Compose 引用了清单没登记的镜像：第三方钉版本可以，`:latest` / 无 tag 一律失败；
+/// 交付清单只登记有凭据的组件，所以规则是 `targets ⊆ compose 引用`，不是集合相等：
 /// - 清单登记的镜像不在 Compose 里：说明包内 compose 与交付凭据不是同一份发布，失败；
-/// - 同一 target 被两个组件登记成不同身份：无法判定该拉哪个，失败。
+/// - 同一 target 被两个组件登记成不同身份：无法判定该拉哪个，失败；
+/// - Compose 引用了清单没登记的镜像：原样拉取（含 `:latest`），不做身份校验。
 pub fn plan_candidate_images(
     references: &[String],
     delivery: &DeliveryManifest,
@@ -130,26 +120,13 @@ pub fn plan_candidate_images(
         );
     }
 
-    let mut plan = Vec::with_capacity(wanted.len());
-    let mut loose = Vec::new();
-    for reference in wanted {
-        let receipt = receipts.get(reference).cloned();
-        if receipt.is_none() && !reference_is_immutable(reference) {
-            loose.push(reference.to_string());
-        }
-        plan.push(RegistryImage {
+    Ok(wanted
+        .into_iter()
+        .map(|reference| RegistryImage {
             reference: reference.to_string(),
-            receipt,
-        });
-    }
-    if !loose.is_empty() {
-        bail!(
-            "These Compose images have no delivery receipt and use an overwritable reference: {} \
-             (pin them to an immutable tag or digest, or register them in DELIVERY_MANIFEST)",
-            loose.join(", ")
-        );
-    }
-    Ok(plan)
+            receipt: receipts.get(reference).cloned(),
+        })
+        .collect())
 }
 
 /// 从候选包（zip 或 tar.gz）直接产出拉取计划。
@@ -595,26 +572,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_overwritable_references_without_a_receipt() {
-        let error = plan_candidate_images(
-            &references(&["nginx:latest", RECEIPTED]),
-            &receipted_delivery(),
-            "amd64",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("nginx:latest"), "{error}");
-        assert!(error.contains("no delivery receipt"), "{error}");
-
-        // 裸引用等价于 :latest
-        let error = plan_candidate_images(
-            &references(&["busybox", RECEIPTED]),
-            &receipted_delivery(),
-            "amd64",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("busybox"), "{error}");
+    fn plans_unreceipted_references_exactly_as_the_compose_declares_them() {
+        // 浮动 tag 是发布侧选定的语义：必须进计划、按原样拉，不能在这里被拒。
+        let plan = plan_of(&["nginx:latest", "busybox", RECEIPTED]);
+        assert_eq!(plan.len(), 3);
+        assert!(
+            plan.iter()
+                .any(|image| image.reference == "nginx:latest" && image.receipt.is_none())
+        );
+        assert!(
+            plan.iter()
+                .any(|image| image.reference == "busybox" && image.receipt.is_none())
+        );
+        assert!(
+            plan.iter()
+                .any(|image| image.reference == RECEIPTED && image.receipt.is_some())
+        );
     }
 
     #[test]
@@ -853,20 +826,6 @@ mod tests {
         assert!(error.contains("declares no images"), "{error}");
     }
 
-    #[test]
-    fn treats_only_latest_and_untagged_references_as_overwritable() {
-        assert!(reference_is_immutable("alpine:3.22.4"));
-        assert!(reference_is_immutable("mysql:8.0"));
-        assert!(reference_is_immutable("registry:5000/team/app:1.2.3"));
-        assert!(reference_is_immutable(
-            "registry.example.cn/nuwax/rcoder@sha256:3333333333333333333333333333333333333333333333333333333333333333"
-        ));
-        assert!(!reference_is_immutable("registry.cn/app:latest"));
-        assert!(!reference_is_immutable("busybox"));
-        // 端口不是 tag：裸引用（哪怕带 host:port）等价于 :latest
-        assert!(!reference_is_immutable("registry:5000/team/app"));
-    }
-
     fn zip_package(
         directory: &Path,
         compose_text: &str,
@@ -946,10 +905,12 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn a_package_still_publishing_latest_tags_fails_before_any_transfer() -> Result<()> {
-        // 这就是 §3.4 说的"CI 还没把 6 个 :latest 换成不可变引用"的真实形状：
-        // 必须在停服/传输之前失败，而不是拉完才发现无法校验身份。
+    /// 发布侧选定的语义：清单没登记的浮动 `:latest` 照原样拉，不在计划阶段被拒。
+    /// 顺带证明可达性预检仍打在发布仓库（有凭据的那个引用）上，而不是字典序第一个的
+    /// `agent-platform-front`。
+    #[tokio::test]
+    async fn a_floating_latest_reference_is_pulled_verbatim_before_services_stop() -> Result<()> {
+        let floating = "registry.example.cn/nuwax/agent-platform-front:latest";
         let directory = tempfile::tempdir()?;
         let archive = zip_package(
             directory.path(),
@@ -961,15 +922,24 @@ mod tests {
             Some(&receipted_delivery()),
             "",
         )?;
-        let error =
-            plan_from_candidate_package(&archive, &directory.path().join("missing.env"), "amd64")
-                .unwrap_err()
-                .to_string();
-        assert!(
-            error.contains("agent-platform-front:latest"),
-            "未登记且可覆盖的引用必须点名：{error}"
+        let plan =
+            plan_from_candidate_package(&archive, &directory.path().join("missing.env"), "amd64")?;
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].reference, floating);
+        assert!(plan[0].receipt.is_none());
+
+        let ops = MockOps::new();
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default()).await?;
+        assert_eq!(
+            report.pulled,
+            vec![floating.to_string(), RECEIPTED.to_string()]
         );
-        assert!(error.contains("no delivery receipt"), "{error}");
+        let calls = ops.calls();
+        assert_eq!(calls[0], format!("probe {RECEIPTED}"));
+        assert!(
+            calls.contains(&format!("pull {floating}")),
+            "浮动引用必须按 compose 里的名字原样拉取：{calls:?}"
+        );
         Ok(())
     }
 }

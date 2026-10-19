@@ -137,19 +137,17 @@ pub struct DeliveryComponent {
 客户端零感知 —— "拉最新 compose、按最新 compose 拉镜像"天然自洽。原设计中"`DOCKER_REGISTRY` 归谁写 /
 CLI 要不要改写 `.env`"整块逻辑**删除**。
 
-推论（唯一残留风险）：`latest` 可被覆盖。失败模式两种，都致命：
+推论（残留风险）：`latest` 可被覆盖。失败模式两种：
 - 升级记的是 `0.0.120`，pull 到的是当天 `latest` 指向的别的构建，而
   [update_config_version, auto_upgrade_deploy.rs:254](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/auto_upgrade_deploy.rs#L254)
   老实写入 120 → 账实不符
-- 回滚时旧 compose 引用的仍是 `latest` → **回滚后跑的还是新镜像**，回滚是假的
+- 回滚时旧 compose 引用的仍是 `latest` → **回滚后跑的还是新镜像**，回滚只覆盖包内产物
 
-处置：**CI 把这 6 个引用改成不可变**，两种写法选一：
-- `:0.0.120`（可读、可直接 pull、人眼可审）—— **推荐**
-- `@sha256:<digest>`（最严但 compose 不可读，且 CI 必须先 push 再取 digest 再渲染 compose，是硬顺序依赖）
-
-CLI 侧不猜：pull 完用 `config_id` 比对本地实际镜像，不一致即失败。
-**PR-3 已把这条变成机器执法**：`plan_candidate_images` 拒绝任何"没有 delivery receipt 且引用可覆盖"
-的镜像（`:latest` 或无 tag），错误在**任何网络传输之前**抛出。CI 若不改这 6 个引用，瘦通道第一次部署就失败。
+处置（**2026-10-20 用户决定：接受浮动 `:latest`，CLI 不执法**）：瘦通道对这些镜像的产品语义就是
+"取 registry 当前的最新"，不要求 CI 改成不可变引用。上面两条因此是**已接受的产品属性**，不是待修缺陷。
+仍然被执法的只有"有凭据的镜像"：`DELIVERY_MANIFEST` 登记了 `image_id`/`config_id` 的组件
+（当前 = repo-collab、nuwax-im），pull 完必须与凭据对上，tag 被覆盖过会在停服前失败。
+CLI 侧不猜：pull 完用 `config_id`（或 OCI index `image_id`）比对本地实际镜像，不一致即失败。
 
 ### 3.5 两条通道的包必须分目录（PR-2 的实现前提）
 
@@ -233,9 +231,10 @@ compose 里的引用，不需要 retag —— 这正是 `Registry` 通道要跳�
 ### 5.2 文件回滚 ≠ 镜像回滚
 
 `recover_error`（[package_replace.rs:1018](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/utils/package_replace.rs#L1018)）
-只还原文件，不动 docker 状态。瘦通道里如果 6 个引用还写 `latest`，回滚后旧 compose 引用的还是 `latest`，
-本地 `latest` 已被新 pull 覆盖 → 回滚无效（见 §3.4）。钉死引用后，旧 compose 指向旧 tag，本地镜像层还在
-（**PR-3 明确禁止在部署链路里 `docker image prune` / `rmi`**），回滚后 `up` 直接命中本地。
+只还原文件，不动 docker 状态。瘦通道里浮动 `:latest` 引用回滚后拉到的还是 registry 当前的最新，
+**镜像不随回滚回退**（§3.4 已列为接受的产品属性，不是缺陷）；有凭据的两个组件则会在停服前直接失败，
+因为它们拉到的内容与旧包凭据对不上。有凭据的引用因此不能只靠回滚还原文件。
+本地旧镜像层仍在（**PR-3 明确禁止在部署链路里 `docker image prune` / `rmi`**）。
 
 MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`；之后失败 =
 `retain_for_recovery`（[auto_upgrade_deploy.rs:1083](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/auto_upgrade_deploy.rs#L1083)），
@@ -290,9 +289,9 @@ MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`�
    `DELIVERY_MANIFEST.components` 只登记自研组件（fixture 里 2 个）。相等会把每一次部署都拒掉。
    实现的是两条更准的规则：
    - `components.*.target ⊆ compose 引用`（manifest 写了但 compose 没引用 = 包内容对不上，失败）
-   - **没被 receipt 的引用必须本身不可变**（有 digest，或显式非 `latest` tag）——
-     这是对 §3.4 残留风险的机器执法：第三方镜像靠钉版本自证，自研镜像靠 manifest 自证，
-     谁都不许用 `:latest`。CI 若不先做 §3.4 的整改，这一步在打包后第一次部署就会失败。
+   - **没被 receipt 的引用按 compose 原样拉取**（`:latest`、无 tag 都接受），不做身份校验。
+     2026-10-20 用户决定：这些镜像的语义就是"取 registry 当前最新"，CLI 不执法。
+     PR-3 原本拒绝"无凭据 + 可覆盖引用"，该分支连同 `reference_is_immutable` 已删除。
 3. 逐引用 `pull`（失败重试 N 次；带进度日志）。`pull_images()`
    （[image.rs:62](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/container/image.rs#L62)）
    是 `docker compose pull`，但它读磁盘 compose —— 停服前磁盘还是旧 compose，**不能用**，
@@ -350,7 +349,7 @@ clap 解析测试覆盖 `--port/--project`；`update_config_version` 版本与�
 
 ### PR-5｜发布侧
 CI 产出：slim zip（断言 `unzip -l` 不含 `images/*.tar` **且** 含 `images/` 目录项）+ registry manifest +
-镜像 push（**必须先把 `:latest` 换成不可变 tag**，再渲染 compose，再打 zip，再传 manifest）+
+镜像 push（`:latest` 可以保留，CLI 不再要求改成不可变引用；有凭据的组件按实际 push 身份填 manifest）+
 `DELIVERY_MANIFEST.json` 的 `target/config_id/image_id` 填真值 + 上传前断言 manifest 引用的 digest 在 ACR 已存在。
 **验收**：CI 里跑一条端到端：干净机器 → `init` → 新子命令 → 服务健康 → `docker images` 全部引用与
 manifest 一致 → 总耗时/停机时长/下载字节三项数据留档。
@@ -374,9 +373,9 @@ manifest 一致 → 总耗时/停机时长/下载字节三项数据留档。
 ## 8. 待你确认（4 项）
 
 1. **子命令命名**：已按 `auto-upgrade-deploy registry-deploy` 实现（与既有 `offline-deploy` 同形状）。
-   要改成 `registry` / `slim-deploy` / `deploy-from-registry` 只需改 `cli.rs` 的 variant 名 + 2 个解析测试。
-2. **6 个 `:latest` 改成不可变 tag** —— 这是 CI 侧改动，PR-3 的校验强度取决于它。不做的话回滚是假的（§5.2），
-   我不建议合入瘦通道。
+   2026-10-20 复核过 `registry` / `pull` / `slim` 三个更短的候选，**决定保持现名**，不要再提改名。
+2. **6 个 `:latest` 是否改成不可变 tag** —— 2026-10-20 已决定：**不改，接受浮动 `:latest`**，
+   CLI 侧的拒绝分支已删除。代价（同版本号不同时间可能装出不同字节、镜像不随回滚回退）记在 §3.4 / §5.2。
 3. **内网/离线客户**继续走胖通道，CLI 不做 mirror 逻辑 —— 按你"各走各的、互不影响"我按是处理，若要支持
    客户内网仓库需要另开设计。
 4. **prod `latest.json` 补 `hash`** 是否允许动这条 CI（PR-2 顺带，纯收益，不影响老客户端）。
