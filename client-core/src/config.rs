@@ -45,6 +45,10 @@ pub struct VersionConfig {
     /// 已应用的补丁历史
     #[serde(default)]
     pub applied_patches: Vec<AppliedPatch>,
+
+    /// 镜像交付通道
+    #[serde(default)]
+    pub docker_channel: DockerChannel,
 }
 
 /// 已应用的补丁记录
@@ -53,6 +57,36 @@ pub struct AppliedPatch {
     pub version: String,
     pub level: u32,
     pub applied_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Docker 服务镜像的交付通道。
+///
+/// `Images` 是历史行为：包内携带 `docker/images/*.tar`，准备阶段 `docker load` 后 retag。
+/// `Registry` 为瘦部署：包内不携带 tar，镜像按 Compose 引用从镜像仓库拉取。
+///
+/// 该状态必须显式记录而不能靠 `docker/images` 目录是否存在来嗅探：一旦在 `Registry`
+/// 通道下完成过一次部署，包替换流程会把历史遗留的 tar 一并移除（`images` 不是受保护
+/// 目录），此后离线通道会因找不到 tar 而失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DockerChannel {
+    #[default]
+    Images,
+    Registry,
+}
+
+impl DockerChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Images => "images",
+            Self::Registry => "registry",
+        }
+    }
+
+    /// 准备阶段是否需要加载包内离线镜像 tar
+    pub fn loads_offline_images(self) -> bool {
+        matches!(self, Self::Images)
+    }
 }
 
 // 为了向后兼容，保留Versions类型别名
@@ -72,6 +106,7 @@ impl VersionConfig {
             last_full_upgrade: None,
             last_patch_upgrade: None,
             applied_patches: Vec::new(),
+            docker_channel: DockerChannel::default(),
         }
     }
 
@@ -297,6 +332,16 @@ impl AppConfig {
         self.versions.docker_service = docker_service;
     }
 
+    /// 获取已部署服务使用的镜像交付通道
+    pub fn get_docker_channel(&self) -> DockerChannel {
+        self.versions.docker_channel
+    }
+
+    /// 写入镜像交付通道
+    pub fn write_docker_channel(&mut self, docker_channel: DockerChannel) {
+        self.versions.docker_channel = docker_channel;
+    }
+
     /// 智能查找并加载配置文件
     /// 按优先级查找：config.toml -> /app/config.toml
     pub fn find_and_load_config() -> Result<Self> {
@@ -343,6 +388,7 @@ impl AppConfig {
 
         TEMPLATE
             .replace("{docker_service_version}", &self.get_docker_versions())
+            .replace("{docker_channel}", self.versions.docker_channel.as_str())
             .replace("{compose_file}", &compose_file)
             .replace(
                 "{env_file}",
@@ -482,6 +528,45 @@ mod tests {
         Ok(())
     }
 
+    /// config.toml 由模板占位符替换生成，字段漏加占位符会在保存时静默丢失
+    #[test]
+    fn image_channel_survives_template_save_and_reload() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.toml");
+        for channel in [DockerChannel::Images, DockerChannel::Registry] {
+            let mut config = AppConfig::default();
+            config.write_docker_channel(channel);
+            config.save_to_file(&path)?;
+            let rendered = fs::read_to_string(&path)?;
+            assert!(
+                rendered.contains(&format!("docker_channel = \"{}\"", channel.as_str())),
+                "rendered config lost docker_channel: {rendered}"
+            );
+            let restored = AppConfig::load_from_file(&path)?;
+            assert_eq!(restored.get_docker_channel(), channel);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn image_channel_defaults_to_offline_images_and_rejects_unknown_values() {
+        let legacy: VersionConfig = toml::from_str("docker_service = \"0.0.13\"").unwrap();
+        assert_eq!(legacy.docker_channel, DockerChannel::default());
+        assert!(legacy.docker_channel.loads_offline_images());
+
+        let registry: VersionConfig =
+            toml::from_str("docker_service = \"0.0.13\"\ndocker_channel = \"registry\"").unwrap();
+        assert_eq!(registry.docker_channel, DockerChannel::Registry);
+        assert!(!registry.docker_channel.loads_offline_images());
+
+        assert!(
+            toml::from_str::<VersionConfig>(
+                "docker_service = \"0.0.13\"\ndocker_channel = \"imagse\""
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn test_version_config_new() {
         let config = VersionConfig::new();
@@ -571,6 +656,7 @@ mod tests {
             last_full_upgrade: None,
             last_patch_upgrade: None,
             applied_patches: Vec::new(),
+            docker_channel: DockerChannel::default(),
         };
 
         assert!(old_config.needs_migration());
@@ -589,6 +675,7 @@ mod tests {
             last_full_upgrade: None,
             last_patch_upgrade: None,
             applied_patches: Vec::new(),
+            docker_channel: DockerChannel::default(),
         };
 
         assert!(config.needs_migration());
@@ -716,6 +803,7 @@ mod tests {
             last_full_upgrade: None,
             last_patch_upgrade: None,
             applied_patches: Vec::new(),
+            docker_channel: DockerChannel::default(),
         };
         assert!(old_config.needs_migration());
 

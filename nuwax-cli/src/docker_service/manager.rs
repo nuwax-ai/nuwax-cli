@@ -6,7 +6,7 @@ use crate::docker_service::image_loader::{ImageLoader, LoadResult, TagResult};
 use crate::docker_service::port_manager::PortManager;
 use crate::docker_service::script_permissions::ScriptPermissionManager;
 
-use client_core::config::AppConfig;
+use client_core::config::{AppConfig, DockerChannel};
 use client_core::constants::timeout;
 use client_core::container::DockerManager;
 use std::path::PathBuf;
@@ -16,7 +16,6 @@ use tracing::{error, info, warn};
 
 /// Docker 服务管理器
 pub struct DockerServiceManager {
-    #[allow(dead_code)]
     config: Arc<AppConfig>,
     docker_manager: Arc<DockerManager>,
     work_dir: PathBuf,
@@ -95,12 +94,24 @@ impl DockerServiceManager {
             .check_and_fix_script_permissions()
             .await?;
 
-        // 5. 加载镜像并获取映射信息
-        let load_result = self.load_images().await?;
+        // 5. 镜像就绪：由配置的交付通道决定。
+        //    images 通道加载包内离线 tar 并去掉架构后缀 retag；registry 通道的镜像引用
+        //    已写在 Compose 里，由 Docker 自行从仓库拉取，此处不能再依赖包内 tar。
+        match self.config.get_docker_channel() {
+            DockerChannel::Images => {
+                let load_result = self.load_images().await?;
 
-        // 6. 使用ducker验证并设置镜像标签（推荐方法）
-        self.setup_image_tags_with_ducker_validation(&load_result.image_mappings)
-            .await?;
+                // 6. 使用ducker验证并设置镜像标签（推荐方法）
+                self.setup_image_tags_with_ducker_validation(&load_result.image_mappings)
+                    .await?;
+            }
+            DockerChannel::Registry => {
+                info!(
+                    "📡 Registry image channel: skipping offline image load and retag; \
+                     Compose image references are pulled from the registry"
+                );
+            }
+        }
 
         info!("Docker service deployment prepared");
         Ok(())
@@ -130,11 +141,11 @@ impl DockerServiceManager {
             )));
         }
 
-        // 检查镜像目录
+        // 检查镜像目录：仅离线通道需要包内 tar
         let images_dir = self
             .work_dir
             .join(client_core::constants::docker::IMAGES_DIR_NAME);
-        if !images_dir.exists() {
+        if self.config.get_docker_channel().loads_offline_images() && !images_dir.exists() {
             return Err(DockerServiceError::EnvironmentCheck(format!(
                 "{}",
                 t!(
