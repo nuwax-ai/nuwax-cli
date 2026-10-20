@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::{
     api_types::{EnhancedServiceManifest, PatchPackageInfo},
     architecture::Architecture,
+    config::DockerChannel,
     constants::docker::get_compose_file_path,
     constants::docker::get_docker_work_dir,
     version::Version,
@@ -110,21 +111,20 @@ pub struct UpgradeStrategyManager {
 impl UpgradeStrategyManager {
     /// 创建新的升级策略管理器
     ///
-    /// `full_download_type` 只能是 [`DownloadType::Full`] 或 [`DownloadType::Registry`]：
-    /// 两条通道会为同一版本号发布不同的包，缓存目录与收据身份必须区分开。
+    /// `channel` 决定全量包属于哪条发布通道：两条通道会为同一版本号发布不同的包，
+    /// 下载目录与缓存收据身份必须区分开，否则瘦包会覆盖离线包、让另一条通道读到错误的收据。
+    /// 增量（`DownloadType::Patch`）不由这里表达，它只属于离线通道，
+    /// 所以参数用的是 `DockerChannel` 而不是 `DownloadType`。
     pub fn new(
         current_version: String,
         force_full: bool,
         manifest: EnhancedServiceManifest,
-        full_download_type: DownloadType,
+        channel: DockerChannel,
     ) -> Self {
-        assert!(
-            matches!(
-                full_download_type,
-                DownloadType::Full | DownloadType::Registry
-            ),
-            "full packages cannot be downloaded as {full_download_type}"
-        );
+        let full_download_type = match channel {
+            DockerChannel::Images => DownloadType::Full,
+            DockerChannel::Registry => DownloadType::Registry,
+        };
         Self {
             manifest,
             current_version,
@@ -248,19 +248,20 @@ impl UpgradeStrategyManager {
         }
     }
 
-    /// 全量包的发布方 SHA。
+    /// 全量包的发布方 SHA。两条通道的原始文本都先过 `package_cache::normalize_sha256`，
+    /// 让 `external` 占位、空值、`sha256:` 前缀和 64 位十六进制只有一份判定规则。
     ///
     /// registry 瘦包必须给出可用的 SHA：瘦部署跳过 `docker load`，下载完整性是唯一能证明
     /// "解出来的就是发布的那份"的环节，拿不到就拒绝开始部署。离线通道保持历史行为
-    /// （缺省填 `external` 占位，由 `normalize_sha256` 解释为"不校验"）。
+    /// （缺省填 `external` 占位，下游同样解释为"不校验"）。
     fn required_full_hash(&self, published: Option<&str>, package: &str) -> Result<String> {
-        match published {
-            Some(hash) if !hash.is_empty() && hash != "external" => Ok(hash.to_string()),
-            _ if self.full_download_type == DownloadType::Registry => Err(anyhow::anyhow!(
+        match crate::package_cache::normalize_sha256(published)? {
+            Some(hash) => Ok(hash),
+            None if self.full_download_type == DownloadType::Registry => Err(anyhow::anyhow!(
                 "registry package {package} publishes no SHA-256; \
                  refusing an unverified slim download"
             )),
-            _ => Ok("external".to_string()),
+            None => Ok("external".to_string()),
         }
     }
 
@@ -443,7 +444,7 @@ mod tests {
             "0.0.13.2".to_string(),
             false,
             create_test_manifest(),
-            DownloadType::Full,
+            DockerChannel::Images,
         );
 
         // 当前版本与服务器版本相同
@@ -461,7 +462,7 @@ mod tests {
             "0.0.13.4".to_string(),
             false,
             create_test_manifest(),
-            DownloadType::Full,
+            DockerChannel::Images,
         );
 
         // 当前版本比服务器版本新
@@ -479,7 +480,7 @@ mod tests {
             "0.0.12".to_string(),
             false,
             create_test_manifest(),
-            DownloadType::Full,
+            DockerChannel::Images,
         );
 
         // 不同基础版本，需要全量升级
@@ -536,7 +537,7 @@ mod tests {
             "0.0.12".to_string(),
             false,
             manifest,
-            DownloadType::Registry,
+            DockerChannel::Registry,
         );
         let UpgradeStrategy::FullUpgrade {
             url, download_type, ..
@@ -562,7 +563,7 @@ mod tests {
             "0.0.13".to_string(),
             false,
             create_test_manifest(),
-            DownloadType::Registry,
+            DockerChannel::Registry,
         );
         let error = manager.determine_strategy().unwrap_err().to_string();
         assert!(
@@ -578,7 +579,7 @@ mod tests {
             "0.0.12".to_string(),
             false,
             create_test_manifest(),
-            DownloadType::Registry,
+            DockerChannel::Registry,
         );
         let error = manager.select_full_upgrade_strategy().unwrap_err();
         assert!(
@@ -591,7 +592,7 @@ mod tests {
             "0.0.12".to_string(),
             false,
             create_test_manifest(),
-            DownloadType::Full,
+            DockerChannel::Images,
         )
         .select_full_upgrade_strategy()
         .unwrap();
@@ -629,7 +630,7 @@ mod tests {
             "0.0.12".to_string(),
             false,
             manifest,
-            DownloadType::Registry,
+            DockerChannel::Registry,
         );
         let UpgradeStrategy::FullUpgrade { hash, .. } =
             manager.select_full_upgrade_strategy().unwrap()
@@ -648,7 +649,7 @@ mod tests {
             "0.0.13".to_string(),
             false,
             create_test_manifest(),
-            DownloadType::Full,
+            DockerChannel::Images,
         );
 
         // 相同基础版本，可以增量升级
@@ -671,7 +672,7 @@ mod tests {
             "0.0.13.2".to_string(),
             true,
             create_test_manifest(),
-            DownloadType::Full,
+            DockerChannel::Images,
         );
 
         // 强制全量升级，即使可以增量升级
@@ -702,7 +703,7 @@ mod tests {
         };
         platform.hash = Some("a".repeat(64));
         let manager =
-            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DownloadType::Full);
+            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DockerChannel::Images);
         let UpgradeStrategy::FullUpgrade { hash, .. } =
             manager.select_full_upgrade_strategy().unwrap()
         else {
@@ -731,7 +732,7 @@ mod tests {
         };
         platform.url = manifest.packages.as_ref().unwrap().full.url.clone();
         let manager =
-            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DownloadType::Full);
+            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DockerChannel::Images);
         let UpgradeStrategy::FullUpgrade { hash, .. } =
             manager.select_full_upgrade_strategy().unwrap()
         else {
@@ -741,7 +742,7 @@ mod tests {
 
         let manifest = create_test_manifest();
         let manager =
-            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DownloadType::Full);
+            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DockerChannel::Images);
         let UpgradeStrategy::FullUpgrade { hash, .. } =
             manager.select_full_upgrade_strategy().unwrap()
         else {
@@ -776,8 +777,12 @@ mod tests {
             };
             platform.hash = placeholder;
             platform.url = url;
-            let manager =
-                UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DownloadType::Full);
+            let manager = UpgradeStrategyManager::new(
+                "0.0.12.0".into(),
+                false,
+                manifest,
+                DockerChannel::Images,
+            );
             let UpgradeStrategy::FullUpgrade { hash, .. } =
                 manager.select_full_upgrade_strategy().unwrap()
             else {

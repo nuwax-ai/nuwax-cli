@@ -2,7 +2,7 @@ use crate::{
     api::ApiClient,
     config::{AppConfig, DockerChannel},
     database::Database,
-    upgrade_strategy::{DownloadType, UpgradeStrategy, UpgradeStrategyManager},
+    upgrade_strategy::{UpgradeStrategy, UpgradeStrategyManager},
 };
 use anyhow::Context as _;
 use anyhow::Result;
@@ -93,19 +93,10 @@ impl UpgradeManager {
             current_version.to_string(),
             force_full,
             enhanced_service_manifest,
-            full_download_type(channel),
+            channel,
         );
         let upgrade_strategy: UpgradeStrategy = upgrade_strategy_manager.determine_strategy()?;
 
         Ok(upgrade_strategy)
-    }
-}
-
-/// 全量包所属通道 → 下载类型。两条通道会为同一版本号发布不同的包，下载目录与
-/// 缓存收据必须分开，否则瘦包会覆盖离线包并让另一条通道读到错误的收据。
-fn full_download_type(channel: DockerChannel) -> DownloadType {
-    match channel {
-        DockerChannel::Images => DownloadType::Full,
-        DockerChannel::Registry => DownloadType::Registry,
     }
 }
