@@ -347,7 +347,7 @@ tag 被覆盖 → "does not match its delivery receipt"；无 manifest 的包指
 **验收**：`registry-deploy` 与 `run` 是兄弟子命令而不是 `run --registry` 这种 flag（敲错 flag 不该换包语义，有测试）；
 clap 解析测试覆盖 `--port/--project`；`update_config_version` 版本与通道一起落盘有测试（防 §5.1 的模板静默丢失坑）；
 清单架构词汇用 docker 的 `amd64`/`arm64`，传 `x86_64` 会每次判成不匹配 —— 已加测试钉住（PR-3 的调用方必须用
-`docker_service::architecture::detect_architecture()`，不是 `client_core::architecture`）。
+`docker_service::get_system_architecture()`，与交付清单预检同一个入口，不是 `client_core::architecture`）。
 **验收偏差（两条，都是原计划写错前提）**：
 1. "`--help` 三语"做不到，也不该在本 PR 做：clap 的帮助文本在本项目里完全不走 i18n（`cli.rs` 里 help
    全是硬编码字面量，locale 里的 `commands.auto_upgrade_deploy.*_help` 一批键从来没有任何代码引用，是死键）。

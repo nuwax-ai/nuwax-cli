@@ -1210,10 +1210,10 @@ async fn pull_candidate_images_before_stop(
     use crate::docker_service::registry_images::{
         PullPolicy, plan_from_candidate_package, pull_candidate_images,
     };
-    // 清单里的 architecture 用的是 docker 的词汇（amd64/arm64），与
-    // `verify_delivery_manifest` 的调用方一致；client_core::architecture 那套是
+    // 清单里的 architecture 用的是 docker 的词汇（amd64/arm64），与交付清单预检走的
+    // `get_system_architecture` 同一个入口；client_core::architecture 那套是
     // x86_64/aarch64，喂进来会每次都判成不匹配。
-    let architecture = crate::docker_service::architecture::detect_architecture();
+    let architecture = crate::docker_service::get_system_architecture();
     let plan = plan_from_candidate_package(package_path, env_path, architecture.as_str())
         .context("Cannot plan registry images from the candidate package")?;
     info!(
