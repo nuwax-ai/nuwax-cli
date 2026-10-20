@@ -66,7 +66,8 @@ pub enum AutoUpgradeDeployCommand {
         project: Option<String>,
     },
     /// Deploy from the registry channel: the slim package carries no offline image tars,
-    /// every image in the package Compose is pulled and identity-checked before services stop
+    /// every image in the package Compose is pulled before services stop, and the ones the
+    /// delivery manifest registered are identity-checked
     RegistryDeploy {
         /// Specify frontend service port (default: port 80)
         #[arg(

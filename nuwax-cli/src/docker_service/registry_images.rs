@@ -292,7 +292,8 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
     {
         bail!(
             "This host cannot reach the registry for {} before services are stopped. \
-             Use the offline channel (auto-upgrade-deploy run) or repair DNS/registry access",
+             Use the offline channel (auto-upgrade-deploy run) or repair DNS/registry access \
+             (a private registry also needs `docker login` on this host)",
             probe_target.reference
         );
     }
@@ -302,11 +303,12 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
     for (index, image) in plan.iter().enumerate() {
         let position = format!("[{}/{}]", index + 1, total);
         // 只有"能证明本地这份就是本批发布内容"时才允许跳过传输，也就是凭据命中。
-        // 没有凭据的引用（含浮动 `:latest`）必须真的执行 pull：本地已存在不代表 registry
-        // 没有更新的构建。代价可控 —— 内容没变时 Docker 自己只解析 manifest、不重传层。
-        if let Some(identity) = ops.image_identity(image.reference.clone()).await?
-            && image.receipt.is_some()
-            && matches_receipt(&identity, image)
+        // 没有凭据的引用（含浮动 `:latest`）直接 pull：本地已存在不代表 registry 没有更新
+        // 的构建，先 inspect 一次也换不来任何信息。代价可控 —— 内容没变时 Docker 自己
+        // 只解析 manifest、不重传层。
+        if let Some(receipt) = &image.receipt
+            && let Some(identity) = ops.image_identity(image.reference.clone()).await?
+            && identity_matches_receipt(&identity, receipt)
         {
             info!(
                 "📦 {position} {} is already present with the expected identity; skipping download",
@@ -352,7 +354,7 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
         }
 
         // 校验发生在 pull 之后：退出码为 0 只说明命令跑完，不说明拉到的是清单里那个构建
-        //（`:latest` 当天可能已被覆盖）。
+        //（同一个 tag 在包发布之后可能被人覆盖重推）。
         let identity = ops
             .image_identity(image.reference.clone())
             .await?
@@ -362,8 +364,10 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
                     image.reference
                 )
             })?;
-        if !matches_receipt(&identity, image) {
-            describe_mismatch(image, &identity)?;
+        if let Some(receipt) = &image.receipt
+            && !identity_matches_receipt(&identity, receipt)
+        {
+            describe_mismatch(image, receipt, &identity)?;
         }
         info!("✅ {position} {} ready at {identity}", image.reference);
         report.pulled.push(image.reference.clone());
@@ -371,29 +375,26 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
     Ok(report)
 }
 
-/// 本地镜像身份是否与该引用的凭据一致。
+/// 本地镜像身份是否与交付凭据一致。
 ///
 /// 经典 image store 暴露 config digest，containerd store 可能暴露 OCI index digest，
 /// 发布侧两个都记，所以任一命中即通过 —— 与 `backup_release::validate_runtime_delivery`
 /// 的回滚校验同一套语义。
-fn matches_receipt(identity: &str, image: &RegistryImage) -> bool {
-    match &image.receipt {
-        Some(receipt) => identity == receipt.config_id || identity == receipt.image_id,
-        None => true,
-    }
+///
+/// 参数是凭据本身而不是 `RegistryImage`：没有凭据的引用不参与身份判定，把 `None ⇒ 通过`
+/// 写进这个函数里，迟早会被误用成"无凭据的 `:latest` 不用重拉"。
+fn identity_matches_receipt(identity: &str, receipt: &ImageReceipt) -> bool {
+    identity == receipt.config_id || identity == receipt.image_id
 }
 
-fn describe_mismatch(image: &RegistryImage, identity: &str) -> Result<()> {
-    match &image.receipt {
-        Some(receipt) => bail!(
-            "Image {} does not match its delivery receipt: expected config {} (or index {}), local store has {identity}. \
-             The tag was most likely overwritten after the package was built; refusing to deploy an unaccounted image",
-            image.reference,
-            receipt.config_id,
-            receipt.image_id
-        ),
-        None => bail!("Image {} disappeared while being pulled", image.reference),
-    }
+fn describe_mismatch(image: &RegistryImage, receipt: &ImageReceipt, identity: &str) -> Result<()> {
+    bail!(
+        "Image {} does not match its delivery receipt: expected config {} (or index {}), local store has {identity}. \
+         The tag was most likely overwritten after the package was built; refusing to deploy an unaccounted image",
+        image.reference,
+        receipt.config_id,
+        receipt.image_id
+    )
 }
 
 #[cfg(test)]
@@ -702,6 +703,7 @@ mod tests {
 
     /// 跳过传输只在凭据命中时发生：`mysql:8.0` 虽然本地已有，但没有凭据能证明它就是本批
     /// 要的那份，所以必须 pull（registry 内容没变时 Docker 自己不会重传层）。
+    /// 无凭据的引用连那次预检 inspect 都不做 —— 结果不会影响任何决定。
     #[tokio::test]
     async fn reuses_only_the_local_image_whose_receipt_already_matches() {
         let ops = MockOps::new()
@@ -717,7 +719,6 @@ mod tests {
             ops.calls(),
             vec![
                 format!("probe {RECEIPTED}"),
-                "inspect mysql:8.0".to_string(),
                 "pull mysql:8.0".to_string(),
                 "inspect mysql:8.0".to_string(),
                 format!("inspect {RECEIPTED}"),
