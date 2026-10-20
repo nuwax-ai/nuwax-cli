@@ -303,7 +303,9 @@ MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`�
    [backup_release.rs:327-333](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/backup_release.rs#L327-L333)
    的既有语义一致（containerd 存储驱动下 `docker image inspect .Id` 返回的是 OCI index digest，
    不是 config digest；只用 `config_id` 会在这一类主机上假失败）。
-5. 已存在且 digest 匹配则跳过（幂等，断点重跑不重传）
+5. **跳过传输只发生在凭据命中时**：无凭据引用（含浮动 `:latest`）每次都执行 pull —— 本地已有
+   同 tag 的旧构建不能证明它就是 registry 当前的最新，跳过就等于"升级"没拉新镜像。
+   代价可控：内容没变时 Docker 自己只解析 manifest、不重传层（断点重跑仍然不重传大层）。
 6. 全程不 prune、不 rmi
 
 **硬性验收（已过）**：**pull 全部完成之前，代码路径上不存在任何 `stop` 调用**（写一个测试：mock 停服函数被调用即 panic）。

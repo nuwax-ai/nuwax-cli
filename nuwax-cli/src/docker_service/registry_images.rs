@@ -257,7 +257,9 @@ impl Default for PullPolicy {
     }
 }
 
-/// 拉取结果：哪些本次新拉、哪些本地身份已对（断点重跑不重传）。
+/// 拉取结果：哪些本次执行了 pull、哪些凭据已命中所以不必重传。
+///
+/// `reused` 只可能来自有交付凭据的引用；无凭据引用（含浮动 `:latest`）每次都 pull。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PullReport {
     pub pulled: Vec<String>,
@@ -299,7 +301,11 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
     let total = plan.len();
     for (index, image) in plan.iter().enumerate() {
         let position = format!("[{}/{}]", index + 1, total);
+        // 只有"能证明本地这份就是本批发布内容"时才允许跳过传输，也就是凭据命中。
+        // 没有凭据的引用（含浮动 `:latest`）必须真的执行 pull：本地已存在不代表 registry
+        // 没有更新的构建。代价可控 —— 内容没变时 Docker 自己只解析 manifest、不重传层。
         if let Some(identity) = ops.image_identity(image.reference.clone()).await?
+            && image.receipt.is_some()
             && matches_receipt(&identity, image)
         {
             info!(
@@ -694,8 +700,10 @@ mod tests {
         assert!(report.reused.is_empty());
     }
 
+    /// 跳过传输只在凭据命中时发生：`mysql:8.0` 虽然本地已有，但没有凭据能证明它就是本批
+    /// 要的那份，所以必须 pull（registry 内容没变时 Docker 自己不会重传层）。
     #[tokio::test]
-    async fn reuses_local_images_whose_identity_already_matches() {
+    async fn reuses_only_the_local_image_whose_receipt_already_matches() {
         let ops = MockOps::new()
             .with_local(RECEIPTED, CONFIG_ID)
             .with_local("mysql:8.0", OTHER_ID);
@@ -703,15 +711,56 @@ mod tests {
         let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
             .await
             .unwrap();
-        assert!(report.pulled.is_empty());
+        assert_eq!(report.reused, vec![RECEIPTED.to_string()]);
+        assert_eq!(report.pulled, vec!["mysql:8.0".to_string()]);
         assert_eq!(
-            report.reused,
-            vec!["mysql:8.0".to_string(), RECEIPTED.to_string()]
+            ops.calls(),
+            vec![
+                format!("probe {RECEIPTED}"),
+                "inspect mysql:8.0".to_string(),
+                "pull mysql:8.0".to_string(),
+                "inspect mysql:8.0".to_string(),
+                format!("inspect {RECEIPTED}"),
+            ]
+        );
+    }
+
+    /// `:latest` 的语义就是"取 registry 当前的最新"：本地哪怕已经存在同 tag 的旧构建，
+    /// 也绝不能跳过 pull，否则升级命令只是把上一次拉的东西又用了一遍。
+    #[tokio::test]
+    async fn always_pulls_a_floating_latest_even_when_it_is_already_local() {
+        let floating = "registry.example.cn/nuwax/rcoder:latest";
+        let ops = MockOps::new()
+            .with_local(floating, OTHER_ID)
+            .with_local(RECEIPTED, CONFIG_ID);
+        let plan = plan_of(&[floating, RECEIPTED]);
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+            .await
+            .unwrap();
+        assert!(
+            report.reused.contains(&RECEIPTED.to_string()),
+            "有凭据的镜像仍应免重传：{:?}",
+            report
         );
         assert!(
-            !ops.calls().iter().any(|call| call.starts_with("pull ")),
-            "断点重跑不应重新传输：{:?}",
-            ops.calls()
+            report.pulled.contains(&floating.to_string()),
+            "浮动 latest 必须重新 pull：{:?}",
+            report
+        );
+        let calls = ops.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| **call == format!("pull {floating}"))
+                .count(),
+            1,
+            "{calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call == &format!("pull {RECEIPTED}")),
+            "凭据已命中的镜像不该重传：{calls:?}"
         );
     }
 
