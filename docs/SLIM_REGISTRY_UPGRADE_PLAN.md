@@ -360,6 +360,9 @@ clap 解析测试覆盖 `--port/--project`；`update_config_version` 版本与�
    已挪到 PR-5 验收里。
 
 ### PR-5｜发布侧
+发布侧执行工单已单独成文（含 build-agent-docker 的行号、最小差异、自检脚本、验收顺序与不许动清单）：
+[SLIM_REGISTRY_RELEASE_WORKORDER.md](SLIM_REGISTRY_RELEASE_WORKORDER.md)。本节只保留客户端视角的约束。
+
 CI 产出：slim zip（断言 `unzip -l` 不含 `images/*.tar` **且** 含 `images/` 目录项）+ registry manifest +
 镜像 push（`:latest` 可以保留，CLI 不再要求改成不可变引用；有凭据的组件按实际 push 身份填 manifest）+
 `DELIVERY_MANIFEST.json` 的 `target/config_id/image_id` 填真值 + 上传前断言 manifest 引用的 digest 在 ACR 已存在。
