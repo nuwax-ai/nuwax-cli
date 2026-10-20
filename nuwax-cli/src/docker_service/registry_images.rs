@@ -215,8 +215,9 @@ pub trait RegistryDeployOps {
     /// 本地镜像身份；引用不存在时返回 `None`。
     fn image_identity(&self, reference: String) -> BoxFuture<'_, Result<Option<String>>>;
     fn pull_image(&self, reference: String) -> BoxFuture<'_, Result<()>>;
-    /// 停服前的仓库可达性预检。`Ok(false)` 只用于日志告警：它不走 registry mirrors，
-    /// 不能作为"这台机器拉不到镜像"的结论；真正的判定在 pull 循环里。
+    /// 停服前的仓库可达性预检。**只用于日志**：`Ok(false)` 和 `Err` 都不构成"这台机器拉不到
+    /// 镜像"的结论，判定权在 pull 循环。`registry_reachable` 之所以允许返回 `Err` 是因为
+    /// 预检命令本身可能跑不起来（超时、daemon 异常），实现无法把这类失败压成 `false`。
     /// 预检能力缺失时实现自行降级为 `Ok(true)`。
     fn registry_reachable(&self, reference: String) -> BoxFuture<'_, Result<bool>>;
     /// 停服。镜像就绪之前禁止调用。
@@ -293,20 +294,27 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
     // 实测在配了镜像加速的 Docker 29 主机上对 docker.io 引用必然失败，而同一时刻
     // `docker pull` 是成功的 —— 拿它当硬闸门会把整条瘦通道挡死在能装成的机器上。真正
     // 拉不到时下面的 pull 循环会报错，实测 DNS 失败只要 35ms，省不了多少时间。
+    //
+    // 连"预检命令本身跑不起来"（daemon 套接字异常、仓库被防火墙静默丢包直到 60s 超时）
+    // 也只能告警：这一段的判定权归 pull 循环，任何一条从预检流出的失败都不许在拉取开始
+    // 之前终结部署，否则超时这种最不像"连不上"的情况反而成了唯一的拦停理由。
     let probe_target = plan
         .iter()
         .find(|image| image.receipt.is_some())
         .unwrap_or(&plan[0]);
-    if !ops
-        .registry_reachable(probe_target.reference.clone())
-        .await?
-    {
-        warn!(
+    match ops.registry_reachable(probe_target.reference.clone()).await {
+        Ok(true) => {}
+        Ok(false) => warn!(
             "⚠️ Registry pre-check for {} did not pass; continuing with the real pulls. \
              This CLI may not use registry mirrors for manifest inspect, so it is not proof \
              that images cannot be pulled",
             probe_target.reference
-        );
+        ),
+        Err(error) => warn!(
+            "⚠️ Registry pre-check for {} could not run: {error}; \
+             continuing with the real pulls",
+            probe_target.reference
+        ),
     }
 
     let mut report = PullReport::default();
@@ -436,6 +444,8 @@ mod tests {
         /// `manifest inspect` 那条预检的结果。与 `net_ok` 分开是实测要求：配了镜像加速的
         /// 主机上预检失败而 pull 成功，两者混在一个开关里就演不出这个场景。
         probe_ok: AtomicBool,
+        /// 预检命令自身跑不起来（超时、daemon 异常）。真机上防火墙静默丢包就是这个形状。
+        probe_err: AtomicBool,
         /// 这台机器能不能真的把镜像拉下来。
         net_ok: AtomicBool,
     }
@@ -448,6 +458,7 @@ mod tests {
                 pull_failures: Mutex::new(BTreeMap::new()),
                 pull_result: Mutex::new(Some(CONFIG_ID.to_string())),
                 probe_ok: AtomicBool::new(true),
+                probe_err: AtomicBool::new(false),
                 net_ok: AtomicBool::new(true),
             }
         }
@@ -483,6 +494,12 @@ mod tests {
         /// 实测过的镜像加速主机：预检（`manifest inspect` 不走 mirrors）失败，pull 成功。
         fn precheck_only_failure(self) -> Self {
             self.probe_ok.store(false, Ordering::SeqCst);
+            self
+        }
+
+        /// 预检命令本身跑不起来：仓库被防火墙静默丢包直到超时，或 daemon 异常。
+        fn probe_error(self) -> Self {
+            self.probe_err.store(true, Ordering::SeqCst);
             self
         }
 
@@ -542,7 +559,16 @@ mod tests {
         fn registry_reachable(&self, reference: String) -> BoxFuture<'_, Result<bool>> {
             self.record(format!("probe {reference}"));
             let probe_ok = self.probe_ok.load(Ordering::SeqCst);
-            Box::pin(async move { Ok(probe_ok) })
+            let probe_err = self.probe_err.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if probe_err {
+                    Err(anyhow!(
+                        "docker manifest inspect timed out after 60 seconds"
+                    ))
+                } else {
+                    Ok(probe_ok)
+                }
+            })
         }
 
         fn stop_services(&self) -> BoxFuture<'_, Result<()>> {
@@ -673,7 +699,12 @@ mod tests {
             plan_candidate_images(&references(&[RECEIPTED]), &receipted_delivery(), "arm64")
                 .unwrap_err()
                 .to_string();
-        assert!(error.contains("arm64"), "{error}");
+        assert!(
+            error.contains(
+                "DELIVERY_MANIFEST architecture 'amd64' does not match this host ('arm64')"
+            ),
+            "{error}"
+        );
     }
 
     /// 交付清单的 architecture 用 docker 词汇（`amd64`/`arm64`），与
@@ -918,6 +949,29 @@ mod tests {
                 .filter(|call| call.starts_with("probe"))
                 .count(),
             1
+        );
+    }
+
+    /// 预检命令自己跑不起来（仓库被防火墙静默丢包直到 60s 超时、daemon 异常）时，也不能
+    /// 让它拦停部署：这条通道上唯一有资格判定"拉不到"的是 pull 循环，而它已经在下面
+    /// 重试并把引用名报出来。若在这里 `?` 出去，超时这种最不像"连不上"的失败反而成了
+    /// 唯一的拦停理由，而且报错发生在任何一次拉取尝试之前。
+    #[tokio::test]
+    async fn a_precheck_that_could_not_run_still_reaches_the_pull_loop() {
+        let ops = MockOps::new().probe_error();
+        let plan = plan_of(&["mysql:8.0", RECEIPTED]);
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+            .await
+            .expect("预检跑不起来不该拦住拉得到的镜像");
+        assert_eq!(
+            report.pulled,
+            vec!["mysql:8.0".to_string(), RECEIPTED.to_string()]
+        );
+        assert_eq!(
+            ops.calls().first().map(String::as_str),
+            Some(format!("probe {RECEIPTED}").as_str()),
+            "预检仍然要跑一次并把失败记进日志：{:?}",
+            ops.calls()
         );
     }
 

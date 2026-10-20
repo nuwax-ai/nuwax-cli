@@ -317,12 +317,16 @@ MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`�
 随后撤销。另需一条预检：客户机能不能解析/访问 ACR（`docker manifest inspect` 一个引用即可）。
 预检打的引用是**第一个有 delivery receipt 的引用**（而不是字典序第一个）——生产 compose 里
 `alpine`/`mysql` 这类第三方镜像会排在前面，探通了公共仓库不能证明这台机器拉得到本次发布。
-CLI 不支持 `docker manifest` 时降级为"跳过预检"；**预检失败本身也只告警，不再拒部署**
-（2026-10-20 在 Ubuntu 24.04.4 / Docker 29.9.0 实测后改的决定，见 §8 第 5 项）。
+CLI 不支持 `docker manifest` 时降级为"跳过预检"；**预检失败、乃至预检命令本身跑不起来
+（仓库被防火墙静默丢包直到 60s 超时、daemon 异常）都只告警，不再拒部署**
+（2026-10-20 在 Ubuntu 24.04.4 / Docker 29.9.0 实测后改的决定，见 §8 第 5 项；
+`Err` 那一半是二轮回查补的——只降级 `Ok(false)` 会让超时这种最不像"连不上"的失败变成
+唯一的拦停理由，而且拦在任何一次拉取尝试之前）。
 
-**验收（已测，22 项）**：确定性排序（`BTreeSet`，全量跑才发现 `HashSet` 导致顺序不稳定）；
+**验收（已测，26 项）**：确定性排序（`BTreeSet`，全量跑才发现 `HashSet` 导致顺序不稳定）；
 断网/坏网络重试到上限后错误里带引用名与"before any service was stopped"；pull 成功但本地无镜像 → 可见错误；
-tag 被覆盖 → "does not match its delivery receipt"；无 manifest 的包指向胖通道；`:latest` 包在**任何传输之前**失败。
+tag 被覆盖 → "does not match its delivery receipt"；无 manifest 的包指向胖通道；`:latest` 包在**任何传输之前**失败；
+预检返回 false 与预检返回 Err 两条路径都把镜像拉完。
 
 ### PR-4｜新子命令 ✅ 已完成
 **改**：`cli.rs` 加 `AutoUpgradeDeployCommand::RegistryDeploy`（CLI 名 `auto-upgrade-deploy registry-deploy`）、
