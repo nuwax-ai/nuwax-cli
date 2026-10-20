@@ -211,7 +211,9 @@ pub trait RegistryDeployOps {
     /// 本地镜像身份；引用不存在时返回 `None`。
     fn image_identity(&self, reference: String) -> BoxFuture<'_, Result<Option<String>>>;
     fn pull_image(&self, reference: String) -> BoxFuture<'_, Result<()>>;
-    /// 仓库可达性预检。`Ok(false)` = 客户机拉不到；预检能力缺失时实现自行降级为 `Ok(true)`。
+    /// 停服前的仓库可达性预检。`Ok(false)` 只用于日志告警：它不走 registry mirrors，
+    /// 不能作为"这台机器拉不到镜像"的结论；真正的判定在 pull 循环里。
+    /// 预检能力缺失时实现自行降级为 `Ok(true)`。
     fn registry_reachable(&self, reference: String) -> BoxFuture<'_, Result<bool>>;
     /// 停服。镜像就绪之前禁止调用。
     ///
@@ -282,6 +284,11 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
     // 预检打在哪个引用上是有讲究的：计划按字典序排，`plan[0]` 很可能是 Docker Hub 的
     // `alpine`，而瘦通道真正依赖的是发布侧自己的仓库。有凭据的引用一定来自那个仓库，
     // 所以优先探它；探通了才说明"这台机器能从发布仓库拉镜像"。
+    //
+    // 探不通只告警，不拦部署：`docker manifest inspect` 不走 daemon 的 registry-mirrors，
+    // 实测在配了镜像加速的 Docker 29 主机上对 docker.io 引用必然失败，而同一时刻
+    // `docker pull` 是成功的 —— 拿它当硬闸门会把整条瘦通道挡死在能装成的机器上。真正
+    // 拉不到时下面的 pull 循环会报错，实测 DNS 失败只要 35ms，省不了多少时间。
     let probe_target = plan
         .iter()
         .find(|image| image.receipt.is_some())
@@ -290,10 +297,10 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
         .registry_reachable(probe_target.reference.clone())
         .await?
     {
-        bail!(
-            "This host cannot reach the registry for {} before services are stopped. \
-             Use the offline channel (auto-upgrade-deploy run) or repair DNS/registry access \
-             (a private registry also needs `docker login` on this host)",
+        warn!(
+            "⚠️ Registry pre-check for {} did not pass; continuing with the real pulls. \
+             This CLI may not use registry mirrors for manifest inspect, so it is not proof \
+             that images cannot be pulled",
             probe_target.reference
         );
     }
@@ -348,7 +355,8 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
         if let Some(error) = last_error {
             return Err(error.context(format!(
                 "Registry image {} could not be fetched after {attempts} attempts; \
-                 deployment aborted before any service was stopped",
+                 deployment aborted before any service was stopped. Check DNS/registry access \
+                 and `docker login`, or use the offline channel (auto-upgrade-deploy run)",
                 image.reference
             )));
         }
@@ -421,7 +429,11 @@ mod tests {
         local: Mutex<BTreeMap<String, String>>,
         pull_failures: Mutex<BTreeMap<String, u32>>,
         pull_result: Mutex<Option<String>>,
-        reachable: AtomicBool,
+        /// `manifest inspect` 那条预检的结果。与 `net_ok` 分开是实测要求：配了镜像加速的
+        /// 主机上预检失败而 pull 成功，两者混在一个开关里就演不出这个场景。
+        probe_ok: AtomicBool,
+        /// 这台机器能不能真的把镜像拉下来。
+        net_ok: AtomicBool,
     }
 
     impl MockOps {
@@ -431,7 +443,8 @@ mod tests {
                 local: Mutex::new(BTreeMap::new()),
                 pull_failures: Mutex::new(BTreeMap::new()),
                 pull_result: Mutex::new(Some(CONFIG_ID.to_string())),
-                reachable: AtomicBool::new(true),
+                probe_ok: AtomicBool::new(true),
+                net_ok: AtomicBool::new(true),
             }
         }
 
@@ -456,8 +469,16 @@ mod tests {
             self
         }
 
+        /// 这台机器既探不到也拉不到发布仓库。
         fn unreachable(self) -> Self {
-            self.reachable.store(false, Ordering::SeqCst);
+            self.probe_ok.store(false, Ordering::SeqCst);
+            self.net_ok.store(false, Ordering::SeqCst);
+            self
+        }
+
+        /// 实测过的镜像加速主机：预检（`manifest inspect` 不走 mirrors）失败，pull 成功。
+        fn precheck_only_failure(self) -> Self {
+            self.probe_ok.store(false, Ordering::SeqCst);
             self
         }
 
@@ -485,6 +506,9 @@ mod tests {
 
         fn pull_image(&self, reference: String) -> BoxFuture<'_, Result<()>> {
             self.record(format!("pull {reference}"));
+            if !self.net_ok.load(Ordering::SeqCst) {
+                return Box::pin(async move { Err(anyhow!("registry is not reachable")) });
+            }
             let outcome = {
                 let mut failures = self.pull_failures.lock().unwrap();
                 match failures.get_mut(&reference) {
@@ -513,8 +537,8 @@ mod tests {
 
         fn registry_reachable(&self, reference: String) -> BoxFuture<'_, Result<bool>> {
             self.record(format!("probe {reference}"));
-            let reachable = self.reachable.load(Ordering::SeqCst);
-            Box::pin(async move { Ok(reachable) })
+            let probe_ok = self.probe_ok.load(Ordering::SeqCst);
+            Box::pin(async move { Ok(probe_ok) })
         }
 
         fn stop_services(&self) -> BoxFuture<'_, Result<()>> {
@@ -839,31 +863,83 @@ mod tests {
         );
     }
 
+    /// 预检失败不再拦部署：判定权在 pull 循环，它报错时同样发生在停服之前，而实测
+    /// DNS 层面的失败只要毫秒级，预检省不下时间，却能假阳性挡死能用 pull 的机器。
     #[tokio::test]
-    async fn unreachable_registry_aborts_before_any_pull_or_stop() {
+    async fn an_unreachable_host_fails_in_the_pull_loop_before_any_stop() {
         let ops = MockOps::new().unreachable();
         let plan = plan_of(&[RECEIPTED]);
-        let error = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let policy = PullPolicy {
+            attempts: 3,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(2),
+        };
+        let error = pull_candidate_images(&ops, &plan, &policy)
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("cannot reach the registry"), "{error}");
+        assert!(error.contains(RECEIPTED), "{error}");
+        assert!(error.contains("after 3 attempts"), "{error}");
+        assert!(error.contains("before any service was stopped"), "{error}");
         assert!(error.contains("offline channel"), "{error}");
-        assert_eq!(ops.calls(), vec![format!("probe {RECEIPTED}")]);
+        assert_eq!(
+            ops.calls(),
+            vec![
+                format!("probe {RECEIPTED}"),
+                format!("inspect {RECEIPTED}"),
+                format!("pull {RECEIPTED}"),
+                format!("pull {RECEIPTED}"),
+                format!("pull {RECEIPTED}"),
+            ]
+        );
+    }
+
+    /// 这台 Ubuntu 24 / Docker 29 主机上实测到的形状：`manifest inspect` 因为不走
+    /// registry mirrors 而失败，`docker pull` 完全正常。预检必须只做告警，否则整条
+    /// 瘦通道在这类机器上永远装不成。
+    #[tokio::test]
+    async fn a_failed_precheck_still_pulls_every_image_that_is_actually_available() {
+        let ops = MockOps::new().precheck_only_failure();
+        let plan = plan_of(&["mysql:8.0", RECEIPTED]);
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+            .await
+            .expect("预检失败不该拦住拉得到的镜像");
+        assert_eq!(
+            report.pulled,
+            vec!["mysql:8.0".to_string(), RECEIPTED.to_string()]
+        );
+        assert_eq!(
+            ops.calls()
+                .iter()
+                .filter(|call| call.starts_with("probe"))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn probes_the_release_registry_not_the_alphabetically_first_image() {
         // 字典序把 `mysql:8.0`（Docker Hub）排在发布仓库前面。探通了公共仓库不能说明
-        // 这台机器拉得到本次发布的镜像，预检就白做了。
+        // 这台机器拉得到本次发布的镜像，告警信息就该打在发布仓库的引用上。
         let ops = MockOps::new().unreachable();
         let plan = plan_of(&["mysql:8.0", RECEIPTED]);
-        let error = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let policy = PullPolicy {
+            attempts: 1,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(2),
+        };
+        let error = pull_candidate_images(&ops, &plan, &policy)
             .await
             .unwrap_err()
             .to_string();
-        assert_eq!(ops.calls(), vec![format!("probe {RECEIPTED}")]);
-        assert!(error.contains(RECEIPTED), "{error}");
+        let calls = ops.calls();
+        assert_eq!(calls[0], format!("probe {RECEIPTED}"), "{calls:?}");
+        assert!(
+            !calls.iter().any(|call| call == "probe mysql:8.0"),
+            "预检探错了仓库：{calls:?}"
+        );
+        // 判定来自 pull 循环，报的是计划里第一个拉不掉的引用。
+        assert!(error.contains("mysql:8.0"), "{error}");
     }
 
     #[tokio::test]

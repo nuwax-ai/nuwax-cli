@@ -314,10 +314,11 @@ MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`�
 落地形态：编排函数只拿 `RegistryDeployOps` trait（`image_identity` / `pull_image` /
 `registry_reachable` / `stop_services`），`stop_services` 在 pull 路径上不可达，mock 里直接
 `panic!`；并用反向对照证实过——临时插入一次 `stop_services()` 调用后测试立即在该 panic 处失败，
-随后撤销。另需一条预检：客户机能不能解析/访问 ACR（`docker manifest inspect` 一个引用即可），失败时在停服前给出
-可读错误 + 指向胖通道。已实现，且 CLI 不支持 `docker manifest` 时降级为"跳过预检"而不是拒部署。
+随后撤销。另需一条预检：客户机能不能解析/访问 ACR（`docker manifest inspect` 一个引用即可）。
 预检打的引用是**第一个有 delivery receipt 的引用**（而不是字典序第一个）——生产 compose 里
 `alpine`/`mysql` 这类第三方镜像会排在前面，探通了公共仓库不能证明这台机器拉得到本次发布。
+CLI 不支持 `docker manifest` 时降级为"跳过预检"；**预检失败本身也只告警，不再拒部署**
+（2026-10-20 在 Ubuntu 24.04.4 / Docker 29.9.0 实测后改的决定，见 §8 第 5 项）。
 
 **验收（已测，22 项）**：确定性排序（`BTreeSet`，全量跑才发现 `HashSet` 导致顺序不稳定）；
 断网/坏网络重试到上限后错误里带引用名与"before any service was stopped"；pull 成功但本地无镜像 → 可见错误；
@@ -377,7 +378,7 @@ manifest 一致 → 总耗时/停机时长/下载字节三项数据留档。
 
 ---
 
-## 8. 待你确认（4 项）
+## 8. 待你确认（5 项，其中 1、2、5 已定）
 
 1. **子命令命名**：已按 `auto-upgrade-deploy registry-deploy` 实现（与既有 `offline-deploy` 同形状）。
    2026-10-20 复核过 `registry` / `pull` / `slim` 三个更短的候选，**决定保持现名**，不要再提改名。
@@ -386,6 +387,17 @@ manifest 一致 → 总耗时/停机时长/下载字节三项数据留档。
 3. **内网/离线客户**继续走胖通道，CLI 不做 mirror 逻辑 —— 按你"各走各的、互不影响"我按是处理，若要支持
    客户内网仓库需要另开设计。
 4. **prod `latest.json` 补 `hash`** 是否允许动这条 CI（PR-2 顺带，纯收益，不影响老客户端）。
+5. **停服前的仓库预检要不要当硬闸门** —— 2026-10-20 已定：**只告警，判定交给 pull 循环**。
+   Ubuntu 24.04.4 / Docker 29.9.0（`driver=overlayfs`，即 containerd 存储）实测：
+   `docker manifest inspect alpine:latest` 因不走 `registry-mirrors` 报 "error pinging v2 registry"，
+   同一时刻 `docker pull alpine:latest` 成功（该主机 mirrors=`docker.xuanyuan.me`）；而真不可达时
+   `docker pull no-such-registry.invalid/…` 与 `manifest inspect` 都是 35ms 失败（DNS 层就挂了），
+   预检省不下等待。你补充的事实：生产 compose 的引用全部是阿里云全域名，不落在 mirror 路径上，
+   所以这个假阳性对本发布仓库不致命 —— 但拦部署的成本是 0，没理由留着它。
+   顺带实测确认了 §5 的双 digest 设计**必须保留**：containerd 存储上
+   `docker image inspect --format {{.Id}}` 返回的是 OCI index digest（`alpine:latest` 的
+   `.Id` == `Descriptor.digest` == `RepoDigests[0]` 三者同一个值），只认 `config_id` 会让所有
+   Docker 29 客户机身份校验全灭。
 
 另外三项需要你提供（不是决策，是输入）：一份真实生产 `DELIVERY_MANIFEST.json`；slim 包估算体积；
 以及（可选）连续两个版本 fat zip 的尾部 8 MiB，用来量化 §1 里剩下的那点镜像构建不确定性。

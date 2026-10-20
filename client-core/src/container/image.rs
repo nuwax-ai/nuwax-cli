@@ -128,7 +128,9 @@ impl DockerManager {
 
     /// 停服前的仓库可达性预检：客户机能不能解析并访问该引用所在的仓库。
     ///
-    /// 失败要发生在停服之前，否则预检本身就把部署变成了停机故障。
+    /// 只能当诊断用，不能当部署闸门：`docker manifest inspect` 不走 daemon 的
+    /// registry-mirrors，实测（Docker 29.9.0 + 配置了镜像加速的主机）对 `docker.io` 引用
+    /// 必然报 "error pinging v2 registry"，而同一台机器 `docker pull` 是成功的。
     pub async fn registry_reachable(&self, reference: &str) -> Result<bool> {
         let output = self
             .run_docker_command_with_timeout(
