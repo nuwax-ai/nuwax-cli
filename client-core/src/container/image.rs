@@ -110,7 +110,7 @@ impl DockerManager {
             // 引用不存在与 docker daemon 不可用都走这里；把 stderr 带上，
             // 否则"daemon 没起来"会被上层误报成"本地缺镜像"。
             let stderr = command_error_summary(&output.stderr);
-            if stderr.contains("No such image") || stderr.contains("not found") {
+            if is_missing_image_error(&stderr) {
                 return Ok(None);
             }
             return Err(anyhow::anyhow!(
@@ -173,4 +173,44 @@ fn command_error_summary(stderr: &[u8]) -> String {
         end -= 1;
     }
     format!("{}…", &collapsed[..end])
+}
+
+/// 这条 inspect 失败是不是"本地没有这个引用"。
+///
+/// 措辞在实现之间不统一：Docker（实测 29.9.0）输出 `No such image`，podman 的 docker
+/// 兼容层输出小写 `no such image`，另有 `not found` 变体。判定不中会把"本地缺镜像"
+/// 升级成硬错误，而首次瘦部署每台机器都会走这条分支，所以按关键词大小写不敏感匹配。
+/// 反向误判（把 daemon 故障读成缺镜像）才会多跑一次 pull 并在那里报出真正的错。
+fn is_missing_image_error(stderr: &str) -> bool {
+    let folded = stderr.to_ascii_lowercase();
+    folded.contains("no such image") || folded.contains("not found")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_missing_image_error;
+
+    #[test]
+    fn recognizes_each_missing_image_wording() {
+        for stderr in [
+            "Error response from daemon: No such image: nuwax-im:0.0.120",
+            "Error: no such image: registry.example.cn/nuwax/nuwax-im:0.0.120",
+            "Error response from daemon: image not found",
+        ] {
+            assert!(is_missing_image_error(stderr), "{stderr}");
+        }
+    }
+
+    #[test]
+    fn does_not_read_a_broken_daemon_as_a_missing_image() {
+        for stderr in [
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+            "permission denied while trying to connect to the Docker daemon socket",
+        ] {
+            assert!(
+                !is_missing_image_error(stderr),
+                "{stderr} 不能当成缺镜像，否则 daemon 故障会被报成拉取失败"
+            );
+        }
+    }
 }
