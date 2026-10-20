@@ -981,6 +981,23 @@ fn deployment_target_version(strategy: &UpgradeStrategy, deployed_version: &str)
     }
 }
 
+/// 本次部署应当记进配置的镜像交付通道。
+///
+/// 没有包可换（清单上的版本本机已经装着）时不能改成命令自带的那条通道：磁盘上的产物仍属于
+/// 本机上次部署用的通道，翻过去会让下一次部署按错误的通道取镜像。危险方向是真实的——
+/// 瘦通道换包时会清掉历史 tar，此后 `Images` 记录连 `docker/images` 目录都找不到。
+fn channel_to_record(
+    package_path: Option<&Path>,
+    requested: client_core::config::DockerChannel,
+    recorded: client_core::config::DockerChannel,
+) -> client_core::config::DockerChannel {
+    if package_path.is_some() {
+        requested
+    } else {
+        recorded
+    }
+}
+
 /// 执行自动升级部署流程（离线全量通道：包内自带 docker/images/*.tar）
 pub async fn run_auto_upgrade_deploy(
     app: &mut CliApp,
@@ -1099,9 +1116,14 @@ async fn run_channel_deployment(
                 .await?;
         }
     }
+    // 通道必须在 `prepare_services` 读到它之前落定，两条通道对"镜像从哪来"的要求相反。
+    let deployed_channel = channel_to_record(
+        package_path.as_deref(),
+        channel,
+        app.config.get_docker_channel(),
+    );
     if package_path.is_some() {
-        // 通道必须在 `prepare_services` 读到它之前落定，两条通道对"镜像从哪来"的要求相反。
-        record_deployment_channel(app, channel)?;
+        record_deployment_channel(app, deployed_channel)?;
     } else {
         info!("ℹ️ Nothing new to deploy; the recorded image delivery channel is unchanged");
     }
@@ -1157,7 +1179,7 @@ async fn run_channel_deployment(
     let mut staged = StagedDeployment {
         had_existing_compose,
         target_version: &target_version,
-        channel,
+        channel: deployed_channel,
         database_starting: false,
         replacement: replacement.as_mut(),
     };
@@ -1176,8 +1198,10 @@ async fn run_channel_deployment(
 
 /// 停服之前把候选包 Compose 引用的镜像全部拉到本地并按交付清单校验身份。
 ///
-/// 幂等：本地身份已经对上的引用只做 inspect，不重新传输，所以断点重跑不会重复下载
-/// 上 GB 的镜像层。失败一定发生在停服之前，服务照旧跑在旧版本上。
+/// 幂等：交付凭据已命中的引用只做 inspect、不重新传输；没有凭据的引用（含浮动 `:latest`）
+/// 每次都执行 pull，否则"取最新"就变成"复用上次拉的那份"。断点重跑不会重复下载上 GB 的
+/// 镜像层 —— registry 内容没变时 Docker 自己只解析 manifest。失败一定发生在停服之前，
+/// 服务照旧跑在旧版本上。
 async fn pull_candidate_images_before_stop(
     docker_manager: &DockerManager,
     package_path: &Path,
@@ -2045,6 +2069,31 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// 无包可换时不能把配置里的通道翻成命令自带的那条：磁盘上的产物还是上一条命令的通道
+    /// 装的，翻过去之后下一次部署会按错误的通道取镜像（瘦通道装完会删掉历史 tar）。
+    #[test]
+    fn a_deploy_without_a_package_keeps_the_recorded_channel() {
+        use client_core::config::DockerChannel;
+
+        let package = std::path::Path::new("/tmp/candidate.zip");
+        for recorded in [DockerChannel::Images, DockerChannel::Registry] {
+            let opposite = match recorded {
+                DockerChannel::Images => DockerChannel::Registry,
+                DockerChannel::Registry => DockerChannel::Images,
+            };
+            assert_eq!(
+                super::channel_to_record(Some(package), opposite, recorded),
+                opposite,
+                "换了包就要按本次命令的通道记账"
+            );
+            assert_eq!(
+                super::channel_to_record(None, opposite, recorded),
+                recorded,
+                "没换包时记录必须原样保留"
+            );
+        }
     }
 
     #[test]

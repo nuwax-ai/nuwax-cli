@@ -180,7 +180,7 @@ CLI 侧不猜：pull 完用 `config_id`（或 OCI index `image_id`）比对本�
 | 4 | `preflight_candidate_package` | 同（对 slim zip） |
 | 5 | 下载 14GiB fat zip | 下载 slim zip |
 | **6** | — | **停服前：解 compose → 抽镜像引用 → 与 `target` 交叉校验 → `docker pull` → `config_id` 校验** |
-| **6.5** | — | **`record_deployment_channel`：把本次通道写进配置（只写通道，不写版本）** |
+| **6.5** | — | **`record_deployment_channel`：把本次通道写进配置（只写通道，不写版本；没有包可换时不改记录）** |
 | 7 | `stop_docker_services_and_wait`（:1014，2s 轮询/30s 上限，超时即硬错） | 同 |
 | 8 | `PackageReplacement::apply`（:1055）+ `fix_script_permissions` | 同（见 §5.1 的 images 目录后果） |
 | 9 | `run_staged_deployment`（:317-445） | 同，但 `prepare_services` 的 step5/6 **换成 no-op** |
@@ -338,6 +338,11 @@ tag 被覆盖 → "does not match its delivery receipt"；无 manifest 的包指
 找不存在的 tar 而失败。所以瘦通道在镜像拉齐之后（拉不完就不改状态）、两条通道在停服之前都会
 `record_deployment_channel(channel)`（只写通道，不写版本：失败回滚后机器跑的还是旧版本）。
 这一步顺带让反向切换也成立：`registry` 状态的机器上跑 `run`，胖包的 tar 才会被真正加载。
+**review 补的约束**：6.5 只在**真的换包**时执行。清单版本已经装着时策略是 `NoUpgrade`，
+没有包可换，此时若仍把通道记成本次命令自带的那条，第 10 步会把它一起落盘 —— 磁盘上的产物
+还是上一条命令的通道装的，下一次部署就按错误的通道取镜像。危险方向是真实的：瘦通道换包会
+清掉历史 tar（`images` 不是受保护目录），此后 `Images` 记录连 `docker/images` 都找不到，
+`check_environment` 直接报错。见 `channel_to_record` 及其测试。
 **验收**：`registry-deploy` 与 `run` 是兄弟子命令而不是 `run --registry` 这种 flag（敲错 flag 不该换包语义，有测试）；
 clap 解析测试覆盖 `--port/--project`；`update_config_version` 版本与通道一起落盘有测试（防 §5.1 的模板静默丢失坑）；
 清单架构词汇用 docker 的 `amd64`/`arm64`，传 `x86_64` 会每次判成不匹配 —— 已加测试钉住（PR-3 的调用方必须用
