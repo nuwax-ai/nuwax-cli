@@ -363,6 +363,10 @@ clap 解析测试覆盖 `--port/--project`；`update_config_version` 版本与�
 CI 产出：slim zip（断言 `unzip -l` 不含 `images/*.tar` **且** 含 `images/` 目录项）+ registry manifest +
 镜像 push（`:latest` 可以保留，CLI 不再要求改成不可变引用；有凭据的组件按实际 push 身份填 manifest）+
 `DELIVERY_MANIFEST.json` 的 `target/config_id/image_id` 填真值 + 上传前断言 manifest 引用的 digest 在 ACR 已存在。
+**digest 写法**：客户端只接受 `sha256:<64hex>` 或裸 `<64hex>`（`normalize_digest` 委托给
+`package_cache::normalize_sha256`，与包哈希同一套文本规则）——`sha256: <hex>` 这种带空格的、
+以及 `external`/空串这类占位符都会被拒；参照 `client-core/tests/fixtures/delivery-from-producer.json`
+的真实形状（id 带 `sha256:` 前缀，`compose.sha256`/`release_sha256` 是裸 64hex）。
 **验收**：CI 里跑一条端到端：干净机器 → `init` → 新子命令 → 服务健康 → `docker images` 全部引用与
 manifest 一致 → 总耗时/停机时长/下载字节三项数据留档。
 
