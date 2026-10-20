@@ -39,15 +39,20 @@ pub struct ImageReceipt {
 }
 
 /// 归一化 digest：接受 `sha256:<64hex>` 与裸 `<64hex>`，其余报错。
+///
+/// 校验规则本身复用 `package_cache::normalize_sha256`（全仓库只有一份 sha256 文本判定），
+/// 这里只补瘦通道多出来的那条要求：凭据必须存在，占位符不算。
 fn normalize_digest(value: &str, what: &str) -> Result<String> {
-    let hex = value.strip_prefix("sha256:").unwrap_or(value).trim();
-    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!(
-            "{what} is not a sha256 digest: {value} \
-             (the registry channel requires real digests, not placeholders)"
-        );
-    }
-    Ok(format!("sha256:{}", hex.to_ascii_lowercase()))
+    let invalid = || anyhow!("{what} is not a sha256 digest: {value}");
+    let hex = client_core::package_cache::normalize_sha256(Some(value))
+        .map_err(|_| invalid())?
+        .ok_or_else(|| {
+            anyhow!(
+                "{what} is not a sha256 digest: {value} \
+                 (the registry channel requires real digests, not placeholders)"
+            )
+        })?;
+    Ok(format!("sha256:{hex}"))
 }
 
 /// 把候选包 Compose 的镜像引用集合与交付清单交叉校验，得出确定性的拉取计划。
@@ -69,8 +74,7 @@ pub fn plan_candidate_images(
     }
 
     let mut receipts: BTreeMap<String, ImageReceipt> = BTreeMap::new();
-    for component in delivery.components.keys() {
-        let entry = &delivery.components[component];
+    for (component, entry) in &delivery.components {
         let target = entry.target.trim();
         if target.is_empty() {
             bail!("DELIVERY_MANIFEST component {component} records an empty image target");
@@ -375,7 +379,7 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
         if let Some(receipt) = &image.receipt
             && !identity_matches_receipt(&identity, receipt)
         {
-            describe_mismatch(image, receipt, &identity)?;
+            return Err(mismatch_error(image, receipt, &identity));
         }
         info!("✅ {position} {} ready at {identity}", image.reference);
         report.pulled.push(image.reference.clone());
@@ -395,8 +399,8 @@ fn identity_matches_receipt(identity: &str, receipt: &ImageReceipt) -> bool {
     identity == receipt.config_id || identity == receipt.image_id
 }
 
-fn describe_mismatch(image: &RegistryImage, receipt: &ImageReceipt, identity: &str) -> Result<()> {
-    bail!(
+fn mismatch_error(image: &RegistryImage, receipt: &ImageReceipt, identity: &str) -> anyhow::Error {
+    anyhow!(
         "Image {} does not match its delivery receipt: expected config {} (or index {}), local store has {identity}. \
          The tag was most likely overwritten after the package was built; refusing to deploy an unaccounted image",
         image.reference,
