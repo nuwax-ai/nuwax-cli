@@ -25,8 +25,11 @@
   （`deny_unknown_fields` 满足）✅，`architecture=amd64`、`ARCH_INFO=ARCHITECTURE=x86_64`（两套词汇各就各位）✅
 - 我重算 `sha256(docker/docker-compose.yml)` **等于**清单 `compose.sha256` ✅
 - 清单登记 2 个组件：`repo-collab` / `nuwax-im`，`target` 逐字节命中 compose ✅
-- compose 内 25 个 `image:` 引用**全部**落在 `nuwax-docker-images-registry.cn-hangzhou.cr.aliyuncs.com/nuwax/`
-  （生产命名空间、字面量、无 `${}`）✅ —— 这一条是 §4 beta 难题的根源
+- compose 内 25 处 `image:`（`image_references_of` 用 BTreeSet 去重后是 **17 个引用**）**全部**落在
+  `nuwax-docker-images-registry.cn-hangzhou.cr.aliyuncs.com/nuwax/`
+  （生产命名空间、字面量、无 `${}`）✅ —— 这一条是 §4 beta 难题的根源。
+  17 个里 **6 个是浮动 `:latest`**（自研：`agent-platform-front`/`agent-platform-backend`/`mcp-proxy`/
+  `rcoder`/`repo-collab`/`nuwax-im`），**11 个是固定 tag 第三方**（mysql/redis/minio/milvus/…）
 - 保留的 `docker/im-app/.delivery.json`、`docker/repo-collab-app/.delivery.json` 是组件收据，客户端不读，无害
 
 发布侧提交：`build-agent-docker` `01e5521`（`prepare --slim-no-image-tars` + `docker-slim-*` 目标），未 push。
@@ -120,7 +123,7 @@ done
 - 有 `platforms` 时走分架构分支，`packages.full` 只为兼容人读，可留可不留，留就要一致。
 - 发布文件仍然落在 `nuwax-cli/docker-versions/{env}/registry.json`，随 tag 同步上 OSS（改 workflow 是下一步，见 §6）。
 
-**beta 演练的拦路问题（必须先定策略）**：compose 的 25 个引用全在生产命名空间 `nuwax/`，
+**beta 演练的拦路问题（必须先定策略）**：compose 去重后的 17 个引用全在生产命名空间 `nuwax/`，
 而清单只给 `repo-collab`、`nuwax-im` 两个组件配了凭据。于是 beta 真机跑瘦通道时：
 
 - 这 2 个有凭据的组件：本地/仓库拉到的是生产仓**旧** `:latest`，与本次构建的凭据不符 →

@@ -126,11 +126,11 @@ pub struct DeliveryComponent {
 ### 3.4 生产 compose 的镜像引用现状
 
 [build-agent-docker/docker/docker-compose.yml](file:///Volumes/soddy/git_workspace/build-agent-docker/docker/docker-compose.yml)，
-25 处 `image:` **全字面量，无变量**：
+25 处 `image:` **全字面量，无变量**（去重后 17 个引用，即客户端拉取循环真正迭代的条数）：
 
 - 可变 `:latest`，6 个，全是自研应用：`agent-platform-front`、`agent-platform-backend`、`mcp-proxy`、
   `rcoder`、`repo-collab`、`nuwax-im`（两处）
-- 钉死版本，19 个第三方：`mysql:8.0`、`redis:7.0`、`milvus:v2.5.8`、`elasticsearch:9.2.1`、
+- 钉死版本，18 处 / 去重 **11 个**第三方镜像：`mysql:8.0`、`redis:7.0`、`milvus:v2.5.8`、`elasticsearch:9.2.1`、
   `rocketmq:5.5.1`、`minio:RELEASE.2025-09-07T16-13-09Z`、`alpine:3.22.4`、`busybox:1.36-uclibc` 等
 
 推论（正面）：镜像身份 100% 活在这个文件里，而它是包里被逐文件替换的管理文件。CI 新增容器/改镜像版本，
@@ -285,7 +285,7 @@ MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`�
    因此拆出 `load_compose_config_with_env_values(content, path, env_values)` 作为原语，
    磁盘版变薄封装；`compose_image_references{,_with_values}` 同理。
 2. 与 `DELIVERY_MANIFEST.components.*.target` 交叉校验：集合必须相等，多一个少一个都失败
-   —— **落地时改掉了，原规则不成立**：真实生产 compose 有 25 个引用，而
+   —— **落地时改掉了，原规则不成立**：真实生产 compose 有 25 处引用（去重 17 个），而
    `DELIVERY_MANIFEST.components` 只登记自研组件（fixture 里 2 个）。相等会把每一次部署都拒掉。
    实现的是两条更准的规则：
    - `components.*.target ⊆ compose 引用`（manifest 写了但 compose 没引用 = 包内容对不上，失败）
@@ -380,7 +380,7 @@ manifest 一致 → 总耗时/停机时长/下载字节三项数据留档。
 | 指标 | 胖通道 | 瘦通道 |
 |---|---|---|
 | 下载字节 | 14.1 GiB | slim zip（估数百 MB）+ **镜像增量层** |
-| 镜像就绪耗时 | `docker load` 全部 tar，数十分钟，无法增量 | 只传变化层；未变的 19 个第三方镜像**零传输** |
+| 镜像就绪耗时 | `docker load` 全部 tar，数十分钟，无法增量 | 只传变化层；未变的 11 个第三方镜像**零传输** |
 | 停机时长 | ≥ load 时长 | ≈ `compose up` + MySQL ready + Live Diff |
 | 峰值磁盘 | ~42 GiB | 无 tar、无 fat zip |
 | 发布侧维护 | 全量包 ×1 | 全量包 ×1 + slim 包 ×1 + manifest ×1（无差异包） |
