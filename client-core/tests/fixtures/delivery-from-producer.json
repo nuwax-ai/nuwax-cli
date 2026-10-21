@@ -3,41 +3,78 @@
   "components": {
     "nuwax-im": {
       "artifacts": {
-        "im-app/nuwax-im-gateway-bootstrap.jar": "9faa0cdbd8af130d1d8aa7a12588855da59545cbe15afabb7e99a00da388918e",
-        "im-app/nuwax-im-web-bootstrap.jar": "c395de21d575f34824a527209fc303f85bbb77932b9e69a99dbe4a75b9e536f2"
+        "im-app/nuwax-im-gateway-bootstrap.jar": "36089f6a4de5b1374bda288e9d0bcb42075612f4ff50e7d923f59df0c451f433",
+        "im-app/nuwax-im-web-bootstrap.jar": "5fae0f3894c3c4322f0347bf18dfe2155dc1a63cf35be05a6c225818c149cd98"
       },
-      "config_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-      "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-      "source": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "config_id": "sha256:a6f911d69bfb0a9c52ec6a2fd3f1429fb2237198e159d14854e7b62c1ca41ea8",
+      "image_id": "sha256:d2d45c3f72ac9fb3c11dba567fb043c4caadd0b678922bc1e067a0ed6da86591",
+      "source": "sha256:d2d45c3f72ac9fb3c11dba567fb043c4caadd0b678922bc1e067a0ed6da86591",
       "target": "nuwax-docker-images-registry.cn-hangzhou.cr.aliyuncs.com/nuwax/nuwax-im:latest",
-      "version": "fixture-1"
+      "version": "1.0.0"
     },
     "repo-collab": {
       "artifacts": {
-        "repo-collab-app/dist/index.js": "e06757f41c77d002071190eb4688976cae19fd47e569b04ccedbca153564f6be"
+        "repo-collab-app/dist/ai-edit.js": "b6a01a248248e78349192350bef9858d10b87f1f7abaa326ab2f757950507638",
+        "repo-collab-app/dist/ai-edit.js.map": "28746c9746bf2dcc1120b9a889f2b80f888745c1a0fe85dd92368eb1d72f44d0",
+        "repo-collab-app/dist/auth.js": "8539e9016a883c1adf8ff1b467bdd9971a30f015b01ccb4f0a77cd2f5e4fb6a4",
+        "repo-collab-app/dist/auth.js.map": "a2727b05978b97c1e2b7d4765a25e7333abe406e30f93abb121680871cd58f55",
+        "repo-collab-app/dist/autosave.js": "7440e804a83c29b1db147194f49e946c7e57f30104136e28cb5eaee628b60e4d",
+        "repo-collab-app/dist/autosave.js.map": "4d1b89a33b66922a564034874e065e328601a14669a2936e99d6bcdcdbcf491c",
+        "repo-collab-app/dist/code-highlight.js": "4970730acb1b679f817384873dcaf6f2ee77ec0147143b866a4a13a54cea5596",
+        "repo-collab-app/dist/code-highlight.js.map": "af0aa5f5bc806b9840af127bcf3c888db10b912066e48bdbe88a33dda4af680b",
+        "repo-collab-app/dist/config.js": "350e1f3851fb54eb014a27cc5374ac64f82114554ea0081ed61f9e14a83de1d9",
+        "repo-collab-app/dist/config.js.map": "0e4da3ebe7ca76a0a328e656afbaac23bb767477ed2d26b98866d38599b13acf",
+        "repo-collab-app/dist/datatable.js": "c00cd110ad5d87a30bcbdc6220852ce4fbf29e93a86b72247b29c0466c601fc9",
+        "repo-collab-app/dist/datatable.js.map": "6538703ffdf162f9c06e2ccef5f7b465d5469e5f9dac51fe3e490521ac7d60df",
+        "repo-collab-app/dist/doc-extensions.js": "27157d3ba7d898c9e05eb82d2ddd9b9e9b1fad956c6a86be7849f10738483cda",
+        "repo-collab-app/dist/doc-extensions.js.map": "1b286838fac1c0f632efcc0f498c9a0f5adee5b18efcbdb118780d8daf3b5a92",
+        "repo-collab-app/dist/export.js": "c23b560b5a81ac4cde7727e67544dec9fad272462e13ea2680d633a15b010b22",
+        "repo-collab-app/dist/export.js.map": "1454205f728b2e90d39ab640632ecd33b19d05529d7a55c54d4638525b6e9bea",
+        "repo-collab-app/dist/html.js": "9cbeb0643611517914ddf2f133c6f3377f2794e03a59235bd9e0aad8011e59fc",
+        "repo-collab-app/dist/html.js.map": "1eaa1acb815322bbecf6ed979537c2bbe034b347b8f092738ffb9e1fd3f69662",
+        "repo-collab-app/dist/import.js": "7dbb805f6276803573586aad8b0bf9632be5390cc11d6fbd24399f0e37a94830",
+        "repo-collab-app/dist/import.js.map": "1565f9bbc8b6e832aa60914b74057ea8fab967c61fad1cb3fb68f097defc954e",
+        "repo-collab-app/dist/index.js": "9fffab5983c9e103d049bb213fdfdc89bc70f7971b9bc97559a41f6f04d366d3",
+        "repo-collab-app/dist/index.js.map": "1846c5315d572f0fcace0c6d2e9345b21f9824159800624e0f6cb3d2c3c8f5ce",
+        "repo-collab-app/dist/persistence.js": "16c4ff818bf653bdc41489d08ada7ee0be6e3dbb46b425e7c1a8574251f540b8",
+        "repo-collab-app/dist/persistence.js.map": "23312ace9c960933f9cd54a93dbbff0ddc445b2653a4e9b6ee170804b123251e",
+        "repo-collab-app/dist/pptx-edit.js": "5ce6a9eef7a6441fd4c4d071818729aa60b2862852effb0b9a6fe83e0dc9aa52",
+        "repo-collab-app/dist/pptx-edit.js.map": "cb2f47baca189215575b1b8b2c8466d4706c8fe7ad30df83284138aacfff87e1",
+        "repo-collab-app/dist/pptx-export.js": "00b3e0c9d9884897bc6d08d1b6def33d62509b8bff98f5468bc1c22c640717ac",
+        "repo-collab-app/dist/pptx-export.js.map": "6d7fbe966fe6c2231f6262430476958188c5159a7f32fc5d6951698f4a1839c4",
+        "repo-collab-app/dist/pptx-import.js": "43e7bb3563a82bdfa12cc0ad6231c4731449821b31d6bf57530e05c070a206ad",
+        "repo-collab-app/dist/pptx-import.js.map": "c51c50bcdb8dbc78c56b7499623ca04987d4ab1c70b3f0f2adf79180b3ea53de",
+        "repo-collab-app/dist/sheet-edit.js": "a2cbcedd44fbb9135c8eb85326010a3f65f342fa02c3d8edbd33dddd99823c5a",
+        "repo-collab-app/dist/sheet-edit.js.map": "03a013c327e4abcb4b13802c021d0388d220c2ce2489d4318ea0c49ad0df3467",
+        "repo-collab-app/dist/sheet-export.js": "545aa65dbb8eeff3310edad10692052b7151c64e732a1474812221d124cf4ab9",
+        "repo-collab-app/dist/sheet-export.js.map": "422c375918bce8fe897966f9feed1fa433a93e2b4a6edbbf2cba75eefda70263",
+        "repo-collab-app/dist/sheet-import.js": "db7d83fc77394ab5c4f5626393814ff87c9057c4b876f282a72dea7d8405347c",
+        "repo-collab-app/dist/sheet-import.js.map": "08ca8ba0d94fc3cbfc5ad7218b2dda049e0615e16cdf7a0752787769c373ffc2",
+        "repo-collab-app/dist/sheet-replay.js": "ea106ea8b7d94158db60911ebbb538b1fb47c66d6e64b0c7fdc06192dfbdff78",
+        "repo-collab-app/dist/sheet-replay.js.map": "6891870d13ae6f72a16fd61905109efc6223be9659345389a40cbef4d1023dfe"
       },
-      "config_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-      "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-      "source": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "config_id": "sha256:7c0292e724d71071aee1ef9a5e62e4fa1efaf7892dac3bbc72920a6ab9deb84f",
+      "image_id": "sha256:bdd17c44bc65be40ab2f5bdb794c7adf4c36579a96f9359c1e4753f1df9d3460",
+      "source": "sha256:bdd17c44bc65be40ab2f5bdb794c7adf4c36579a96f9359c1e4753f1df9d3460",
       "target": "nuwax-docker-images-registry.cn-hangzhou.cr.aliyuncs.com/nuwax/repo-collab:latest",
-      "version": "fixture-1"
+      "version": "0.0.1"
     }
   },
   "compose": {
     "path": "docker-compose.yml",
-    "sha256": "fda0e2f675f28a49fa241e0ab7b659ccd2cea52adf14a7fce5e417c327afdc65"
+    "sha256": "6b148a5aa603804290c9310ec8bc9424b25cb9d1f756b14f4d796f37fb1fafa3"
   },
   "contract_version": 1,
   "mysql": {
     "files": {
-      "config/init_mysql.sql": "15a0b1b481877b1dc6e097a664def4ee65a13692a658a1e1641f4c33f68f3b3d",
+      "config/init_mysql.sql": "9e46f33b1e4b8670072248bcb5337504d30e260c1ae61fbd398472c8bae214e1",
       "config/init_mysql_data.sql": "2611501d3e3662c3d33e1e5a35d7f6b3a061a31cc4e39bc398a0ea264b158943",
       "config/init_mysql_databases.sql": "93b16ac06f2aa9e279692e58fd03681ecd88dd17a35f46d7f0b4eee6c00ec044",
-      "config/init_mysql_im.sql": "eafd4929bb8cea3ccd8a2df82c267dcf335fedb1bdad3a2efb616ce06a205d81",
+      "config/init_mysql_im.sql": "c341e7437ea4ed980a213425badaa3d2e3f4ce23b9cb231d33d6208a1c88fff5",
       "config/init_mysql_permissions.sh": "c085c5e4a9b1eb559c7629117e360d5d1571d14c98fe49da1d322714d86c1ef1",
       "config/mysql-schema-manifest.json": "3127fd6b3c864493f4cde2aeb226ef8bdd62b75b97db83623a2df02a9531f8a5"
     },
     "manifest": "config/mysql-schema-manifest.json"
   },
-  "release_sha256": "113fc2adede2df1b72ccd10b0d90e5becde8cd7d59e7b591985fc4b052cd6c4e"
+  "release_sha256": "8d05e53dc7768c52fdd51de1a4115ce34a7947825791e3acf045763560798fb3"
 }
