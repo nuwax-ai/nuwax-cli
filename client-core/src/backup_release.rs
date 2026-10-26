@@ -326,9 +326,19 @@ fn validate_runtime_delivery(
             .ok_or_else(|| anyhow!("Saved runtime does not contain a delivery component image"))?;
         // Docker's classic image store exposes the platform config ID; containerd
         // may expose the original OCI index ID. The producer records both.
+        //
+        // 身份不一致只告警不拦（2026-10-26 用户决定，与部署侧同一方向）：用户手动
+        // `docker compose pull` 更新过镜像是合法操作，备份/回滚记录的是实际运行的
+        // 镜像身份，不该因此被拒。
         if runtime.image_id != component.image_id && runtime.image_id != component.config_id {
-            bail!(
-                "Local component runtime does not match the delivery receipt; load the matching full package images before creating or restoring this backup"
+            tracing::warn!(
+                "⚠️ Component runtime {} identity {} differs from the delivery receipt \
+                 (config {} or index {}); the backup/rollback records the image that is \
+                 actually running",
+                component.target,
+                runtime.image_id,
+                component.config_id,
+                component.image_id
             );
         }
     }
@@ -1294,7 +1304,18 @@ pub(crate) mod release_snapshot_tests {
             .find(|image| image.reference == "unit/im:latest")
             .ok_or_else(|| anyhow!("Missing fixture component image"))?
             .image_id = format!("sha256:{}", "5".repeat(64));
-        assert!(capture_release_files(&root, "A", images).is_err());
+        // 身份与凭据漂移只告警不拦（2026-10-26 用户决定）：快照记录实际运行的镜像身份。
+        let drifted = capture_release_files(&root, "A", images)?;
+        assert_eq!(
+            drifted
+                .context
+                .runtime_images
+                .iter()
+                .find(|image| image.reference == "unit/im:latest")
+                .ok_or_else(|| anyhow!("Missing fixture component runtime"))?
+                .image_id,
+            format!("sha256:{}", "5".repeat(64))
+        );
         let snapshot = capture_release_files(&root, "A", write_release(&root, "A", "schema")?)?;
         let mut context = snapshot.context.clone();
         context.roots.push(".env".to_string());

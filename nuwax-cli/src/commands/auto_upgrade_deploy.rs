@@ -1230,10 +1230,13 @@ async fn pull_candidate_images_before_stop(
     .await
     .context("Registry images were not ready; services were left running on the old version")?;
     info!(
-        "✅ Images ready in {}s: {} pulled, {} already matched the delivery receipt",
+        "✅ Images ready in {}s: {} pulled, {} already matched the delivery receipt, \
+         {} drifted beyond the receipt (deployed with the registry's current image; \
+         see the ⚠️/🔀 warnings above)",
         started.elapsed().as_secs(),
         report.pulled.len(),
-        report.reused.len()
+        report.reused.len(),
+        report.drifted.len()
     );
     Ok(())
 }
