@@ -1221,9 +1221,14 @@ async fn pull_candidate_images_before_stop(
         plan.len()
     );
     let started = std::time::Instant::now();
-    let report = pull_candidate_images(docker_manager, &plan, &PullPolicy::default())
-        .await
-        .context("Registry images were not ready; services were left running on the old version")?;
+    let report = pull_candidate_images(
+        docker_manager,
+        &plan,
+        &PullPolicy::default(),
+        architecture.as_str(),
+    )
+    .await
+    .context("Registry images were not ready; services were left running on the old version")?;
     info!(
         "✅ Images ready in {}s: {} pulled, {} already matched the delivery receipt",
         started.elapsed().as_secs(),

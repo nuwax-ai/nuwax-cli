@@ -220,6 +220,17 @@ pub trait RegistryDeployOps {
     /// 预检命令本身可能跑不起来（超时、daemon 异常），实现无法把这类失败压成 `false`。
     /// 预检能力缺失时实现自行降级为 `Ok(true)`。
     fn registry_reachable(&self, reference: String) -> BoxFuture<'_, Result<bool>>;
+    /// 内容兜底判定：解析该引用现网 index 中 `arch` 平台子 manifest 的 `config.digest`。
+    ///
+    /// index 被 `docker manifest create/push` 重建后 digest 必变而内容不变（2026-10-26
+    /// 双机实测：containerd 存储的 `.Id` 就是 index digest，仅按 `.Id` 比对会把内容一致
+    /// 的镜像误判成被覆盖）。解析不出时实现返回 `Ok(None)`，调用方维持原判定 —— 兜底
+    /// 只放宽"内容确实一致"的情形，任何失败都不放行。
+    fn index_config_digest(
+        &self,
+        reference: String,
+        arch: String,
+    ) -> BoxFuture<'_, Result<Option<String>>>;
     /// 停服。镜像就绪之前禁止调用。
     ///
     /// 生产部署走 `docker_service::stop_docker_services_and_wait`（带等待与超时），本模块
@@ -239,6 +250,14 @@ impl RegistryDeployOps for DockerManager {
 
     fn registry_reachable(&self, reference: String) -> BoxFuture<'_, Result<bool>> {
         Box::pin(async move { DockerManager::registry_reachable(self, &reference).await })
+    }
+
+    fn index_config_digest(
+        &self,
+        reference: String,
+        arch: String,
+    ) -> BoxFuture<'_, Result<Option<String>>> {
+        Box::pin(async move { DockerManager::index_config_digest(self, &reference, &arch).await })
     }
 
     fn stop_services(&self) -> BoxFuture<'_, Result<()>> {
@@ -275,11 +294,14 @@ pub struct PullReport {
 
 /// 在停服之前把计划里的镜像全部拉到本地并校验身份。
 ///
-/// 全程只调用 `registry_reachable` / `image_identity` / `pull_image`。
+/// 全程只调用 `registry_reachable` / `image_identity` / `pull_image` /
+/// `index_config_digest`。`arch` 是 docker 词汇（amd64/arm64），供身份不匹配时的
+/// 内容兜底查询挑平台子 manifest 用。
 pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
     ops: &O,
     plan: &[RegistryImage],
     policy: &PullPolicy,
+    arch: &str,
 ) -> Result<PullReport> {
     if plan.is_empty() {
         bail!("The candidate package Compose declares no images; nothing to pull");
@@ -387,7 +409,30 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
         if let Some(receipt) = &image.receipt
             && !identity_matches_receipt(&identity, receipt)
         {
-            return Err(mismatch_error(image, receipt, &identity));
+            // 兜底：index 重建（`docker manifest create/push`）会让 index digest 变而
+            // 镜像内容不变。`.Id` 是 index digest 的存储（containerd，Docker 28+ 默认）
+            // 会在这里被误拒 —— 2026-10-26 双机实测 prod 0.0.96 全部命中的正是这种
+            // 情形。所以 identity 两条都不等时，再解析现网 index 的平台子 manifest
+            // 的 config.digest 与凭据 config_id 比对：内容一致即放行，任何解析失败
+            // 维持拒绝。
+            let mismatch = match ops
+                .index_config_digest(image.reference.clone(), arch.to_string())
+                .await
+            {
+                Ok(Some(config_digest)) if config_digest == receipt.config_id => {
+                    warn!(
+                        "🔀 {position} {} index digest {identity} differs from the receipt, \
+                         but its {arch} manifest config digest matches the receipt config_id; \
+                         the index was re-serialized without changing image content",
+                        image.reference
+                    );
+                    None
+                }
+                fallback => Some(fallback),
+            };
+            if let Some(fallback) = mismatch {
+                return Err(mismatch_error(image, receipt, &identity, arch, fallback));
+            }
         }
         info!("✅ {position} {} ready at {identity}", image.reference);
         report.pulled.push(image.reference.clone());
@@ -407,13 +452,41 @@ fn identity_matches_receipt(identity: &str, receipt: &ImageReceipt) -> bool {
     identity == receipt.config_id || identity == receipt.image_id
 }
 
-fn mismatch_error(image: &RegistryImage, receipt: &ImageReceipt, identity: &str) -> anyhow::Error {
+fn mismatch_error(
+    image: &RegistryImage,
+    receipt: &ImageReceipt,
+    identity: &str,
+    arch: &str,
+    fallback: Result<Option<String>, anyhow::Error>,
+) -> anyhow::Error {
+    let fallback_note = match fallback {
+        Ok(Some(config_digest)) => format!(
+            "the registry {arch} manifest config digest is {config_digest}, which also does \
+             not match the receipt, so this is NOT a re-serialized index: the image content \
+             itself differs from this package's build"
+        ),
+        Ok(None) => format!(
+            "the registry index could not be resolved to a single {arch} manifest config \
+             digest (not an index, or the platform manifest is not unique)"
+        ),
+        Err(error) => format!("the fallback registry query failed: {error:#}"),
+    };
     anyhow!(
-        "Image {} does not match its delivery receipt: expected config {} (or index {}), local store has {identity}. \
-         The tag was most likely overwritten after the package was built; refusing to deploy an unaccounted image",
+        "Image {} does not match its delivery receipt: expected config {} (or index {}), \
+         local store has {identity}. Fallback check: {fallback_note}. \
+         Verifiable causes (the receipt was taken from the registry when the package was \
+         built; inspect with `docker buildx imagetools inspect {}` and compare the {arch} \
+         child manifest's config.digest with the receipt config_id): \
+         (1) the tag was overwritten by a different build after the package was built; \
+         (2) the receipt was collected before the last push of this tag; \
+         (3) this host's storage driver reports a different identity (classic image store \
+         reports the config digest, containerd store reports the index digest — the \
+         config-digest fallback above already covers re-serialized indexes). \
+         Refusing to deploy an unaccounted image",
         image.reference,
         receipt.config_id,
-        receipt.image_id
+        receipt.image_id,
+        image.reference
     )
 }
 
@@ -448,6 +521,9 @@ mod tests {
         probe_err: AtomicBool,
         /// 这台机器能不能真的把镜像拉下来。
         net_ok: AtomicBool,
+        /// 内容兜底查询（`index_config_digest`）的返回。默认 `Ok(None)`：不影响旧用例。
+        /// 错误存 `String`（`anyhow::Error` 不可 Clone）。
+        index_config: Mutex<Result<Option<String>, String>>,
     }
 
     impl MockOps {
@@ -460,6 +536,7 @@ mod tests {
                 probe_ok: AtomicBool::new(true),
                 probe_err: AtomicBool::new(false),
                 net_ok: AtomicBool::new(true),
+                index_config: Mutex::new(Ok(None)),
             }
         }
 
@@ -500,6 +577,13 @@ mod tests {
         /// 预检命令本身跑不起来：仓库被防火墙静默丢包直到超时，或 daemon 异常。
         fn probe_error(self) -> Self {
             self.probe_err.store(true, Ordering::SeqCst);
+            self
+        }
+
+        /// 设置内容兜底查询的结果：`Some(digest)` = index 解析出的平台 config digest，
+        /// `None` = 不是 index/解析不出，`Err` = 查询本身失败。
+        fn with_index_config(self, outcome: Result<Option<String>, String>) -> Self {
+            *self.index_config.lock().unwrap() = outcome;
             self
         }
 
@@ -569,6 +653,16 @@ mod tests {
                     Ok(probe_ok)
                 }
             })
+        }
+
+        fn index_config_digest(
+            &self,
+            reference: String,
+            arch: String,
+        ) -> BoxFuture<'_, Result<Option<String>>> {
+            self.record(format!("index-config {reference}/{arch}"));
+            let outcome = self.index_config.lock().unwrap().clone();
+            Box::pin(async move { outcome.map_err(|message| anyhow!(message)) })
         }
 
         fn stop_services(&self) -> BoxFuture<'_, Result<()>> {
@@ -738,7 +832,7 @@ mod tests {
     async fn pulling_never_stops_services() {
         let plan = plan_of(&["mysql:8.0", RECEIPTED]);
         let ops = MockOps::new();
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
             .await
             .unwrap();
         // MockOps::stop_services 是 panic!，所以能走到这里本身就是结论；
@@ -769,7 +863,7 @@ mod tests {
             .with_local(RECEIPTED, CONFIG_ID)
             .with_local("mysql:8.0", OTHER_ID);
         let plan = plan_of(&["mysql:8.0", RECEIPTED]);
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
             .await
             .unwrap();
         assert_eq!(report.reused, vec![RECEIPTED.to_string()]);
@@ -794,7 +888,7 @@ mod tests {
             .with_local(floating, OTHER_ID)
             .with_local(RECEIPTED, CONFIG_ID);
         let plan = plan_of(&[floating, RECEIPTED]);
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
             .await
             .unwrap();
         assert!(
@@ -828,7 +922,7 @@ mod tests {
     async fn reuses_a_local_image_whose_identity_is_the_oci_index() {
         let ops = MockOps::new().with_local(RECEIPTED, INDEX_ID);
         let plan = plan_of(&[RECEIPTED]);
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
             .await
             .unwrap();
         assert_eq!(report.reused, vec![RECEIPTED.to_string()]);
@@ -838,10 +932,74 @@ mod tests {
     async fn accepts_a_pulled_image_whose_identity_is_the_oci_index() {
         let ops = MockOps::new().set_pulled_identity(Some(INDEX_ID));
         let plan = plan_of(&[RECEIPTED]);
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
             .await
             .unwrap();
         assert_eq!(report.pulled, vec![RECEIPTED.to_string()]);
+    }
+
+    /// 2026-10-26 双机实测的主场景：index 被 `docker manifest create/push` 重建，
+    /// containerd 存储的 `.Id`（index digest）与收据两条都不等，但平台 config.digest
+    /// 与收据 config_id 一致 —— 内容就是那一版，必须放行而不是拒绝部署。
+    #[tokio::test]
+    async fn accepts_when_the_index_drifts_but_the_config_digest_still_matches() {
+        let ops = MockOps::new()
+            .set_pulled_identity(Some(OTHER_ID))
+            .with_index_config(Ok(Some(CONFIG_ID.to_string())));
+        let plan = plan_of(&[RECEIPTED]);
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
+            .await
+            .unwrap();
+        assert_eq!(report.pulled, vec![RECEIPTED.to_string()]);
+        assert!(
+            ops.calls()
+                .iter()
+                .any(|call| call.starts_with("index-config "))
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_when_the_fallback_config_digest_also_differs() {
+        let ops = MockOps::new()
+            .set_pulled_identity(Some(OTHER_ID))
+            .with_index_config(Ok(Some(OTHER_ID.to_string())));
+        let plan = plan_of(&[RECEIPTED]);
+        let error = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("image content itself differs"), "{error}");
+        assert!(error.contains("imagetools inspect"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn rejects_when_the_fallback_cannot_resolve_the_index() {
+        let ops = MockOps::new()
+            .set_pulled_identity(Some(OTHER_ID))
+            .with_index_config(Ok(None));
+        let plan = plan_of(&[RECEIPTED]);
+        let error = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("could not be resolved"),
+            "兜底解析不出必须维持拒绝：{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_when_the_fallback_query_itself_fails() {
+        let ops = MockOps::new()
+            .set_pulled_identity(Some(OTHER_ID))
+            .with_index_config(Err("registry unreachable".to_string()));
+        let plan = plan_of(&[RECEIPTED]);
+        let error = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("fallback registry query failed"), "{error}");
+        assert!(error.contains("registry unreachable"), "{error}");
     }
 
     #[tokio::test]
@@ -853,7 +1011,7 @@ mod tests {
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(2),
         };
-        let error = pull_candidate_images(&ops, &plan, &policy)
+        let error = pull_candidate_images(&ops, &plan, &policy, "amd64")
             .await
             .unwrap_err()
             .to_string();
@@ -873,7 +1031,7 @@ mod tests {
     async fn rejects_an_image_whose_tag_was_overwritten_after_the_package_was_built() {
         let ops = MockOps::new().set_pulled_identity(Some(OTHER_ID));
         let plan = plan_of(&[RECEIPTED]);
-        let error = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let error = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
             .await
             .unwrap_err()
             .to_string();
@@ -888,7 +1046,7 @@ mod tests {
     async fn rejects_a_successful_pull_that_left_no_image_behind() {
         let ops = MockOps::new().set_pulled_identity(None);
         let plan = plan_of(&[RECEIPTED]);
-        let error = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let error = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
             .await
             .unwrap_err()
             .to_string();
@@ -909,7 +1067,7 @@ mod tests {
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(2),
         };
-        let error = pull_candidate_images(&ops, &plan, &policy)
+        let error = pull_candidate_images(&ops, &plan, &policy, "amd64")
             .await
             .unwrap_err()
             .to_string();
@@ -936,7 +1094,7 @@ mod tests {
     async fn a_failed_precheck_still_pulls_every_image_that_is_actually_available() {
         let ops = MockOps::new().precheck_only_failure();
         let plan = plan_of(&["mysql:8.0", RECEIPTED]);
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
             .await
             .expect("预检失败不该拦住拉得到的镜像");
         assert_eq!(
@@ -960,7 +1118,7 @@ mod tests {
     async fn a_precheck_that_could_not_run_still_reaches_the_pull_loop() {
         let ops = MockOps::new().probe_error();
         let plan = plan_of(&["mysql:8.0", RECEIPTED]);
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default())
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
             .await
             .expect("预检跑不起来不该拦住拉得到的镜像");
         assert_eq!(
@@ -986,7 +1144,7 @@ mod tests {
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(2),
         };
-        let error = pull_candidate_images(&ops, &plan, &policy)
+        let error = pull_candidate_images(&ops, &plan, &policy, "amd64")
             .await
             .unwrap_err()
             .to_string();
@@ -1003,7 +1161,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_an_empty_plan_instead_of_claiming_success() {
         let ops = MockOps::new();
-        let error = pull_candidate_images(&ops, &[], &PullPolicy::default())
+        let error = pull_candidate_images(&ops, &[], &PullPolicy::default(), "amd64")
             .await
             .unwrap_err()
             .to_string();
@@ -1113,7 +1271,7 @@ mod tests {
         assert!(plan[0].receipt.is_none());
 
         let ops = MockOps::new();
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default()).await?;
+        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64").await?;
         assert_eq!(
             report.pulled,
             vec![floating.to_string(), RECEIPTED.to_string()]
