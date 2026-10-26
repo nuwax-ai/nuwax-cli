@@ -942,17 +942,19 @@ pub async fn handle_auto_upgrade_deploy_command(
             port,
             config,
             project,
+            force_full,
         } => {
             info!("🚀 Starting auto-upgrade deployment...");
-            run_auto_upgrade_deploy(app, port, config, project).await
+            run_auto_upgrade_deploy(app, port, config, project, force_full).await
         }
         AutoUpgradeDeployCommand::RegistryDeploy {
             port,
             config,
             project,
+            force_full,
         } => {
             info!("🚀 Starting registry (slim) deployment...");
-            run_registry_deploy(app, port, config, project).await
+            run_registry_deploy(app, port, config, project, force_full).await
         }
         AutoUpgradeDeployCommand::Status => {
             info!("Show auto-upgrade deployment status");
@@ -1035,6 +1037,7 @@ pub async fn run_auto_upgrade_deploy(
     frontend_port: Option<u16>,
     config_file: Option<PathBuf>,
     project_name: Option<String>,
+    force_full: bool,
 ) -> Result<()> {
     run_channel_deployment(
         app,
@@ -1042,6 +1045,7 @@ pub async fn run_auto_upgrade_deploy(
         config_file,
         project_name,
         client_core::config::DockerChannel::Images,
+        force_full,
     )
     .await
 }
@@ -1053,6 +1057,7 @@ pub async fn run_registry_deploy(
     frontend_port: Option<u16>,
     config_file: Option<PathBuf>,
     project_name: Option<String>,
+    force_full: bool,
 ) -> Result<()> {
     run_channel_deployment(
         app,
@@ -1060,6 +1065,7 @@ pub async fn run_registry_deploy(
         config_file,
         project_name,
         client_core::config::DockerChannel::Registry,
+        force_full,
     )
     .await
 }
@@ -1072,6 +1078,7 @@ async fn run_channel_deployment(
     config_file: Option<PathBuf>,
     project_name: Option<String>,
     channel: client_core::config::DockerChannel,
+    force_full: bool,
 ) -> Result<()> {
     info!("🚀 Starting auto-upgrade deployment...");
 
@@ -1100,8 +1107,10 @@ async fn run_channel_deployment(
     // 下载策略只读取一次 manifest；替包时记录策略目标，无替包时保留当前部署版本。
     // 清单来源由命令决定，而不是由本机上次用哪条通道部署决定：同一台机器可以在两条
     // 通道之间切换，读错清单会拿到与本命令语义不符的包。
+    // force_full 是"同版本跨通道换包/强制重下"的唯一入口：默认 false 时同版本仍判
+    // NoUpgrade（行为不变），置位后策略层走 FullUpgrade 并按本命令的通道取清单。
     let upgrade_args = crate::cli::UpgradeArgs {
-        force: false,
+        force: force_full,
         check: false,
     };
     let upgrade_strategy = update::run_upgrade(app, upgrade_args, channel).await?;
@@ -1384,8 +1393,8 @@ pub async fn schedule_delayed_deploy(app: &mut CliApp, time: u32, unit: &str) ->
         task_id = task.task_id
     );
 
-    // 执行自动升级部署
-    match run_auto_upgrade_deploy(app, None, None, None).await {
+    // 执行自动升级部署（定时任务走默认行为：同版本仍判 NoUpgrade）
+    match run_auto_upgrade_deploy(app, None, None, None, false).await {
         Ok(_) => {
             let config_manager =
                 client_core::config_manager::ConfigManager::new_with_database(app.database.clone());

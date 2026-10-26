@@ -64,6 +64,13 @@ pub enum AutoUpgradeDeployCommand {
             help = "Specify docker-compose project name (default: read from compose file or use 'docker')"
         )]
         project: Option<String>,
+        /// Force a full re-download even when the local version already matches the
+        /// channel pointer (cross-channel switch on the same version, corrupted caches)
+        #[arg(
+            long,
+            help = "Force full upgrade even if the target version is already deployed"
+        )]
+        force_full: bool,
     },
     /// Deploy from the registry channel: the slim package carries no offline image tars,
     /// every image in the package Compose is pulled before services stop, and the ones the
@@ -88,6 +95,13 @@ pub enum AutoUpgradeDeployCommand {
             help = "Specify docker-compose project name (default: read from compose file or use 'docker')"
         )]
         project: Option<String>,
+        /// Force a full re-download even when the local version already matches the
+        /// channel pointer (cross-channel switch on the same version, corrupted caches)
+        #[arg(
+            long,
+            help = "Force full upgrade even if the target version is already deployed"
+        )]
+        force_full: bool,
     },
     /// Show current auto upgrade configuration
     Status,
@@ -412,12 +426,42 @@ mod tests {
                 port,
                 config,
                 project,
+                force_full,
             }) => {
                 assert_eq!(port, Some(8081));
                 assert_eq!(config, None);
                 assert_eq!(project.as_deref(), Some("agent"));
+                // 默认 false：同版本仍判 NoUpgrade，跨通道换包必须显式要求。
+                assert!(!force_full);
             }
             _ => panic!("expected registry deploy command"),
+        }
+    }
+
+    #[test]
+    fn force_full_flag_wires_through_both_deploy_commands() {
+        // --force-full 是同版本跨通道换包/强制重下的唯一入口，两条部署命令都要能接。
+        for args in [
+            vec!["nuwax-cli", "auto-upgrade-deploy", "run", "--force-full"],
+            vec![
+                "nuwax-cli",
+                "auto-upgrade-deploy",
+                "registry-deploy",
+                "--force-full",
+            ],
+        ] {
+            let cli = Cli::parse_from(&args);
+            let force_full = match cli.command {
+                Commands::AutoUpgradeDeploy(AutoUpgradeDeployCommand::Run {
+                    force_full, ..
+                }) => force_full,
+                Commands::AutoUpgradeDeploy(AutoUpgradeDeployCommand::RegistryDeploy {
+                    force_full,
+                    ..
+                }) => force_full,
+                _ => panic!("expected a deploy command: {args:?}"),
+            };
+            assert!(force_full, "{args:?}");
         }
     }
 
