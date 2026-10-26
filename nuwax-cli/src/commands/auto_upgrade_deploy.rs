@@ -1964,6 +1964,12 @@ pub async fn run_offline_deploy(
     )?;
     preflight_candidate_package_at(&archive_path, false, docker_manager.get_env_file())
         .context("Offline package preflight failed before stopping services")?;
+    // 通道必须在 `prepare_services` 读到它之前落定（与 run_channel_deployment 同一纪律）：
+    // offline 部署可能带上任一通道的包，而 prepare_services 按配置的旧记账决定
+    // "加载包内 tar"还是"compose pull"——胖包机器离线部署瘦包时，旧记账 images 会让
+    // 本次部署去找并不存在的 tar（2026-10-26 逻辑复查补上；成功后 update_config_version
+    // 幂等重写同一值）。
+    record_deployment_channel(app, offline_package_channel(&archive_path))?;
     let upgrade_strategy = UpgradeStrategy::FullUpgrade {
         url: String::new(),
         hash: String::new(),
