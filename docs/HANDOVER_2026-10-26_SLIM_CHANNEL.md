@@ -3,6 +3,10 @@
 给接手的 Claude Code：**这不再是"规划阶段"**。发布自动化和瘦通道 prod 首发都已由别的 agent 落地并实跑过，
 本仓库剩下的活是客户端四处（§4 的 P0–P4）。先读 §1 坐标并把 §2 的只读命令跑一遍，再动代码。
 
+> **⚠️ 2026-10-26 下午更新（先读 §8 再按旧文行事）**：P0 已按 (c) 落地且双机验收通过，P2 已随
+> `7144ea0` 完成；**身份校验语义已从"拒绝"改为"告警继续"（用户决定）**——本文 §0/§2.8/§4-P0 的
+> "拒绝部署"表述已不是现状。剩余队列：P1、P3、P4。
+
 ---
 
 ## 0. 一句话现状
@@ -224,3 +228,50 @@ done
 > `/Volumes/zhitai/git_workspace/nuwax-ossutil/target/release/`；`.41` 免密今天被拒、要密码就交回发布方，
 > `192.168.32.117` 不要用；本机 shell 是 zsh，`$var:latest` 会被当历史修饰符，必须写 `"${var}:latest"`；
 > 提交分片、不 push、数字自己复核。基线：`cargo nextest run -p client-core -p nuwax-cli` = 551 passed / 4 skipped。
+
+---
+
+## 8. 后记（2026-10-26 下午：P0/P2 已解决，语义已改告警）
+
+### 8.1 P0 已按 (c) 落地，双机验收通过
+
+- **客户端**：`eb37bc6`（identity 双不等时解析现网 index 平台子 manifest 的 `config.digest` 内容兜底）
+  + `7144ea0`（**语义改为告警继续**）。**`7144ea0` 是用户在 (c) 之上的进一步决定**：`:latest` 浮动语义下
+  用户手动 `docker compose pull` 合法，15/17 张镜像本来就浮动不校验，部署/备份/回滚都不该因身份
+  不匹配拒绝 —— 身份不匹配 → 内容判定（🔀 索引重序列化 / ⚠️ 内容变更）→ **告警 + 继续部署**，
+  `PullReport.drifted` 进部署摘要。保留的门：pull 失败仍硬失败（可用性）、数据级恢复 schema 配套、
+  回滚可行性预检。备份侧 `backup_release::validate_runtime_delivery` 同步告警。
+- **发布侧**（build-agent-docker `0112482`）：`slim_publish.py` 打包/dry-run 终检"凭据 `image_id` ==
+  现网 `:latest` index digest"（已实测拦截 0.0.96 形态）+ SKILL §5 时序约束（索引修复先于凭据采集）。
+- **复测**：.45 与 .41（两台都是 Docker 29 + containerd snapshotter，§3.4 的推断已实测）在修复前双双
+  拒绝；`7144ea0` 后 .45 复测 🔀×2 告警继续、`17 pulled / 2 drifted`、17/17 ready。
+- 基线现在是 **555 passed / 4 skipped**。
+
+### 8.2 §1/§5 环境事实修正
+
+- `.41` **key 免密已可用**（本文"免密被拒"已过时）；两台机**都是** containerd 快照存储（§5.4 的
+  overlay2/containerd 分法不再成立）。`.41` 上有一套在跑的 nuwax 栈（`~/nuwax_deploy`，compose
+  project `docker`，版本账 0.0.135，18 服务全 healthy）和无关项目 `docker-userapp-computer-test`，勿动。
+- **测试纪律补充**：`registry-deploy` 测试必须带**独立 `--project`**（默认 project=`docker` 会与机上
+  既有栈同名交互，.45 的 mysql 曾被 recreate 一次）；compose 的 bridge 名 `agent-bridge` 也是硬编码，
+  同机并行第二套装不起来（网络冲突）。
+- 测试残留：两台机各一个 `~/slim-test-1026/`（500MB zip + 日志），删不删由发布方定。
+
+### 8.3 队列现状
+
+| 项 | 状态 |
+|---|---|
+| P0 | ✅ 已解决（本节） |
+| P1 `--force-full` | 未动（同版本跨通道 NoUpgrade 依旧；升级路径测试等 >0.0.96 的下一版瘦包） |
+| P2 文案 | ✅ 已随 `7144ea0` 完成（拒绝文案已升级为可核实成因 + 自查命令 + 漂移告警） |
+| P3 通道记账复核 | 未动 |
+| P4 docs/SLIM_*.md 注记 | 未动 |
+
+### 8.4 转交 build-agent-docker 会话的审查结论（2026-10-26 下午）
+
+那边工作树有一份**未提交的"六镜像凭据覆盖"改动**（`component_delivery.py` + `slim_publish.py`）。
+审查发现两处会断发布链的 P0（详见发给那边 agent 的总结）：① slim(6 组件)/FAT(2 组件) 的
+DELIVERY_MANIFEST 字节不一致会炸 `verify_zip_files`；② FAT 打包路径（`make prepare-package-*` 同走
+`component_delivery.prepare`）在 push-prod **之前** live 查询生产 `:latest`，登记的是上一版 digest。
+另有两处 P2：`slim_publish.py` "refused by containerd-image-store" 文案已过时（客户端改告警了）；
+`registry_manifest_digest` 裸调 skopeo 未透传 `SKOPEO_OPTS`。
