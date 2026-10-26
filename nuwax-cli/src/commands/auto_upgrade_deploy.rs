@@ -998,6 +998,37 @@ fn channel_to_record(
     }
 }
 
+/// 按候选包自身判定镜像交付通道：`docker/images/` 里带镜像 tar → 离线全量通道，
+/// 否则为瘦（registry）通道。
+///
+/// 判定对象是**包的固有内容**而不是机器历史状态，不违反"通道必须显式记录、不许
+/// 靠 `docker/images` 目录嗅探"的约束（那约束针对的是已部署机器的目录）。offline
+/// 包可能是任一通道的交付物，记账必须跟包走：瘦包被记成 images 后，下次
+/// `auto-upgrade-deploy run` 会选 full 清单并按离线 tar 加载，报
+/// `No image files found`（2026-10-26 beta slim 0.0.136 发布实测踩中）。
+///
+/// 归档读不开时保守回退 images（与既有行为一致）；调用点在预检之后，包必然可读。
+fn offline_package_channel(archive_path: &Path) -> client_core::config::DockerChannel {
+    use client_core::config::DockerChannel;
+    let has_offline_tar = std::fs::File::open(archive_path)
+        .ok()
+        .and_then(|file| zip::ZipArchive::new(file).ok())
+        .is_some_and(|mut zip| {
+            (0..zip.len()).any(|index| {
+                zip.by_index(index).is_ok_and(|entry| {
+                    !entry.is_dir()
+                        && entry.name().starts_with("docker/images/")
+                        && entry.name().ends_with(".tar")
+                })
+            })
+        });
+    if has_offline_tar {
+        DockerChannel::Images
+    } else {
+        DockerChannel::Registry
+    }
+}
+
 /// 执行自动升级部署流程（离线全量通道：包内自带 docker/images/*.tar）
 pub async fn run_auto_upgrade_deploy(
     app: &mut CliApp,
@@ -1986,7 +2017,8 @@ pub async fn run_offline_deploy(
     let mut staged = StagedDeployment {
         had_existing_compose,
         target_version: &target_version,
-        channel: client_core::config::DockerChannel::Images,
+        // 记账跟包走：瘦包过 offline-deploy 也必须记 registry，否则下次 run 选错清单。
+        channel: offline_package_channel(&archive_path),
         database_starting: false,
         replacement: Some(&mut replacement),
     };
@@ -2005,10 +2037,55 @@ pub async fn run_offline_deploy(
 
 #[cfg(test)]
 mod tests {
-    use super::{OnlineEnvPreserve, UpgradeStrategy, validate_offline_archive_sql};
+    use super::{
+        OnlineEnvPreserve, UpgradeStrategy, offline_package_channel, validate_offline_archive_sql,
+    };
     use anyhow::{Context, Result};
+    use client_core::config::DockerChannel;
     use flate2::{Compression, write::GzEncoder};
     use std::{fs::File, io::Write, path::Path, sync::Arc};
+
+    /// 记账跟包走（2026-10-26 beta slim 0.0.136 实测教训）：带离线 tar 的包记 images，
+    /// 瘦包记 registry——否则瘦包过 offline-deploy 后，下次 run 选 full 清单并按
+    /// tar 加载，报 `No image files found`。
+    #[test]
+    fn offline_channel_follows_the_package_contents() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let write_zip = |name: &str, entries: &[&str]| -> Result<std::path::PathBuf> {
+            let path = temp.path().join(name);
+            let mut zip = zip::ZipWriter::new(File::create(&path)?);
+            for entry in entries {
+                zip.start_file(*entry, zip::write::SimpleFileOptions::default())
+                    .context("start zip entry")?;
+                zip.write_all(b"x").context("write zip entry")?;
+            }
+            zip.finish().context("finish zip")?;
+            Ok(path)
+        };
+
+        let fat = write_zip(
+            "fat.zip",
+            &["docker/docker-compose.yml", "docker/images/mysql.tar"],
+        )?;
+        assert_eq!(offline_package_channel(&fat), DockerChannel::Images);
+
+        let slim = write_zip(
+            "slim.zip",
+            &["docker/docker-compose.yml", "docker/DELIVERY_MANIFEST.json"],
+        )?;
+        assert_eq!(offline_package_channel(&slim), DockerChannel::Registry);
+
+        // 空目录条目不算离线镜像：只有目录占位、没有 tar 文件仍是瘦包。
+        let empty_images = write_zip(
+            "empty-images.zip",
+            &["docker/images/", "docker/docker-compose.yml"],
+        )?;
+        assert_eq!(
+            offline_package_channel(&empty_images),
+            DockerChannel::Registry
+        );
+        Ok(())
+    }
 
     fn valid_platform_sql() -> &'static str {
         "CREATE DATABASE IF NOT EXISTS agent_platform;\n\
