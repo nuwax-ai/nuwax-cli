@@ -291,7 +291,6 @@ init_cmd:
   step3_start: "   3️⃣  运行 'nuwax-cli docker-service start' 启动Docker服务"
   shortcut_title: "🚀 快捷方式 - 自动升级部署:"
   shortcut_auto: "   • 运行 'nuwax-cli auto-upgrade-deploy run' 自动执行完整的升级部署流程"
-  shortcut_delay: "   • 运行 'nuwax-cli auto-upgrade-deploy delay-time-deploy 2 --unit hours' 延时2小时后自动部署"
   tips_title: "💡 提示:"
   tip_config: "   - 配置文件: config.toml (可手动编辑修改配置)"
   tip_db: "   - 数据库文件: %{path} (存储操作历史和备份记录)"
@@ -551,22 +550,8 @@ auto_upgrade_deploy:
   detailed_status_check: "📊 详细状态检查:"
   final_check_failed: "🔍 最终检查失败: %{error}"
 
-  # 延迟部署
-  unsupported_time_unit: "不支持的时间单位: %{unit}"
-  unsupported_time_unit_error: "不支持的时间单位: %{unit}，支持的单位: hours, minutes, days"
-  delayed_scheduled: "⏰ 已安排延迟执行自动升级部署"
   task_id: "   任务ID: %{id}"
-  delay_time: "   延迟时间: %{time} %{unit}"
-  estimated_exec_time: "预计执行时间: %{duration} 后"
-  scheduled_exec_time: "   计划执行时间: %{time}"
-  delayed_deploy_scheduled: "安排延迟执行自动升级部署: %{time} %{unit}，任务ID: %{task_id}"
   waiting: "⏳ 等待中..."
-  delay_time_reached: "🔔 延迟时间到，开始执行自动升级部署"
-  delayed_deploy_starting: "延迟时间到，开始执行自动升级部署，任务ID: %{task_id}"
-  delayed_task_completed: "✅ 延迟升级部署任务完成"
-  delayed_task_failed: "延迟升级部署任务失败: %{error}"
-
-  # 状态显示
   status_title: "📊 自动升级部署状态信息:"
   feature_status: "   功能状态: 已实现"
   process_desc: "   流程说明: 下载最新版本 -> 智能备份 -> 部署服务 -> 启动服务"
