@@ -164,13 +164,15 @@ impl DockerManager {
     /// 判定对这类漂移免疫。
     ///
     /// 返回 `Ok(None)` 表示解析不出（引用不是多平台 index、平台子 manifest 不唯一、
-    /// 或 `buildx imagetools` 不可用/查询失败），调用方应维持原判定；任何失败都不
-    /// 放行镜像。
+    /// 或 `buildx imagetools` 不可用/查询失败），调用方降级为普通漂移告警 —— 本查询
+    /// 只负责把告警写准，成败都不影响部署是否继续。
     pub async fn index_config_digest(&self, reference: &str, arch: &str) -> Result<Option<String>> {
         let index_raw = self
             .run_docker_command_with_timeout(
                 &["buildx", "imagetools", "inspect", "--raw", reference],
-                std::time::Duration::from_secs(crate::constants::timeout::REGISTRY_PROBE_TIMEOUT),
+                std::time::Duration::from_secs(
+                    crate::constants::timeout::REGISTRY_INDEX_PROBE_TIMEOUT,
+                ),
             )
             .await
             .with_context(|| format!("Failed to inspect registry index for {reference}"))?;
@@ -215,7 +217,9 @@ impl DockerManager {
                     "--raw",
                     &format!("{repo}@{child_digest}"),
                 ],
-                std::time::Duration::from_secs(crate::constants::timeout::REGISTRY_PROBE_TIMEOUT),
+                std::time::Duration::from_secs(
+                    crate::constants::timeout::REGISTRY_INDEX_PROBE_TIMEOUT,
+                ),
             )
             .await
             .with_context(|| format!("Failed to inspect manifest {repo}@{child_digest}"))?;

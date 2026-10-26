@@ -593,6 +593,11 @@ pub mod timeout {
 
     /// 瘦通道停服前的仓库可达性预检超时时间
     pub const REGISTRY_PROBE_TIMEOUT: u64 = 60;
+
+    /// 身份漂移告警的内容判定查询（index + 平台子 manifest，各一次小 JSON GET）。
+    /// 只用于把告警写准，不是部署前置——慢网/挂死连接时快速放弃，降级为普通告警，
+    /// 不让每张漂移镜像最多拖 2 分钟。
+    pub const REGISTRY_INDEX_PROBE_TIMEOUT: u64 = 20;
 }
 
 /// SQL 相关常量
