@@ -1,5 +1,9 @@
 # 需求：把 **beta** 的上传与发版收进 `build-agent-docker`（prod 继续手动）—— 请进仓库勘察后给出实施方案
 
+> **结局（2026-10-26 注记，需求已实现，本文仅存档）**：beta 发布自动化已在 build-agent-docker 落地：
+> `makefiles/27-compose-release.mk` + `scripts/registry/beta_release.py`（EXECUTE 默认 dry，只到
+> "可审阅 JSON"，人工 commit/tag，CI `docker-version-beta.yml` 翻公网指针）。beta 瘦通道首发 0.0.136
+> （tag `docker-registry-version-beta/v0.0.136`）。权威流程见那边 `skills/compose-release/SKILL.md` §4。
 给你（codex）的任务是**先勘察、再出方案**，不是直接改代码。请读 `/Volumes/zhitai/git_workspace/build-agent-docker`
 的真实 Make/脚本定义，回答 §5 的每个问题，然后按 §6 交付一份实施计划。
 

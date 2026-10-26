@@ -1,5 +1,11 @@
 # 给 build-agent-docker 执行 agent：瘦包交付凭据的三处调整（附实测证据与只读复现命令）
 
+> **结局（2026-10-26 注记，§1 的三处调整均已落地，本文仅存档；后续演进见下）**：image_id 语义已按
+> §1 修复（`component_delivery.py` 对完整 index 原始字节取 digest）。之后契约又演进了三轮：① 六镜像
+> 覆盖（slim manifest 登记全部六张第一方镜像，含 source/artifacts 字段——build-agent-docker
+> `fa31a23`/`f7a6595`）；② 双腿一律取现网（image_id=index digest、config_id=对应架构 config digest，
+> 打包时 re-pin + 终检）；③ 客户端身份不匹配改为**告警并继续**、imagetools 内容判定已删除
+> （nuwax-cli `7144ea0`/`e07497a`）——凭据漂移的防线在发布侧 fail fast，客户端只告警。
 结论先说：**瘦包本身做得没问题**（包内 0 个镜像 tar、`docker/images/` 目录项保留、40 个产物哈希自洽、
 `release_sha256` 用独立实现复算一致，客户端预检已实测通过）。要调整的是**凭据（identity）的语义、覆盖面和
 出凭据的时序**这三点，否则瘦通道在客户机上要么静默装旧构建，要么永远拒绝部署。

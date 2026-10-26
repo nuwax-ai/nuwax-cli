@@ -1,5 +1,10 @@
 # 瘦（registry）通道发布侧改造工单 —— 交给 build-agent-docker 的执行 agent
 
+> **结局（2026-10-26 注记，工单已由 build-agent-docker 完成，本文仅存档）**：瘦包路径、`registry.json`
+> schema（`packages.full` 回退槽位与 x86_64 一致）、OSS 严格上传协议均已在那边落地。**分工已变更**：
+> 清单真相源迁至 `build-agent-docker/docker-versions/`（见其 `migration.json`，source_commit=604b879），
+> nuwax-cli 的 `docker-versions/` 已冻结勿编辑；tag `docker-registry-version-*` 打在 build-agent-docker。
+> 客户端命令入口是 `auto-upgrade-deploy registry-deploy`（瘦通道机器的升级用这条，不是 `run`）。
 **目标一句话**：在 `/Volumes/zhitai/git_workspace/build-agent-docker` 新增一条"瘦包"打包与上传路径，产出
 `docker-slim-{x86_64,aarch64}.zip`（与今天的胖包**同一份 compose、同一份 DELIVERY_MANIFEST、同样齐全的非镜像产物，
 只少 `docker/images/*.tar`**）；现有胖包的行为、文件名、清单、上传方式**一律不改**。

@@ -1,5 +1,11 @@
 # 瘦包上传 OSS 与 beta/prod 发布规划（待拍板）
 
+> **结局（2026-10-26 注记，正文保留作决策证据，勿按本文继续执行）**：本文四项决策的落地形态——
+> D1 采用 `docker-slim/<14位时间戳>/`（prod 首发 0.0.96 即此形态）；D2 双架构同序列采用，但
+> `--force-full` 直到 nuwax-cli `46fb1ed` 才接进 CLI；D3 **未走 beta 演练**，prod 瘦通道 0.0.96 直接
+> 首发，beta 瘦通道首个版本是 0.0.136（2026-10-26）；D4 由 build-agent-docker 自己的
+> `.github/workflows/docker-version-*.yml`（tag 触发）承担，nuwax-cli 仓库不再发布 docker 清单。
+> 清单真相源在 `build-agent-docker/docker-versions/`。权威流程见那边 `skills/compose-release/SKILL.md`。
 范围：`build-agent-docker` 已在本地产出瘦包，**尚未上传**。本文只解决三件事：
 ① 瘦包放 OSS 哪个前缀；② `registry.json` 怎么发布、beta 与 prod 怎么分开；③ beta 演练怎么在
 不动生产的前提下把"成功路径"真跑通。客户端代码不动，需要你拍板的点集中在 §5。
