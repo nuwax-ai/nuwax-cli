@@ -235,12 +235,13 @@ done
 
 ### 8.1 P0 已按 (c) 落地，双机验收通过
 
-- **客户端**：`eb37bc6`（identity 双不等时解析现网 index 平台子 manifest 的 `config.digest` 内容兜底）
-  + `7144ea0`（**语义改为告警继续**）。**`7144ea0` 是用户在 (c) 之上的进一步决定**：`:latest` 浮动语义下
-  用户手动 `docker compose pull` 合法，15/17 张镜像本来就浮动不校验，部署/备份/回滚都不该因身份
-  不匹配拒绝 —— 身份不匹配 → 内容判定（🔀 索引重序列化 / ⚠️ 内容变更）→ **告警 + 继续部署**，
-  `PullReport.drifted` 进部署摘要。保留的门：pull 失败仍硬失败（可用性）、数据级恢复 schema 配套、
-  回滚可行性预检。备份侧 `backup_release::validate_runtime_delivery` 同步告警。
+- **客户端**：`eb37bc6`（内容兜底）→ `7144ea0`（**语义改为告警继续**）→ `12de14b`（判定查询短超时）
+  → **`e07497a`（删除 imagetools 兜底——用户决定：部署工具不该依赖 buildx 插件/部署时在线查
+  registry，纯内网与无插件机器行为一致）**。**最终形态**：身份不匹配 → ⚠️ 告警（含本地身份、收据
+  两条 digest 与 `docker buildx imagetools inspect` 自查命令）→ **继续部署**，`PullReport.drifted`
+  进部署摘要；客户端对镜像仓库的依赖只剩 `docker pull` / `docker image inspect` 两条原生命令。
+  保留的门：pull 失败仍硬失败（可用性）、数据级恢复 schema 配套、回滚可行性预检。
+  备份侧 `backup_release::validate_runtime_delivery` 同步告警。
 - **发布侧**（build-agent-docker `0112482`）：`slim_publish.py` 打包/dry-run 终检"凭据 `image_id` ==
   现网 `:latest` index digest"（已实测拦截 0.0.96 形态）+ SKILL §5 时序约束（索引修复先于凭据采集）。
 - **复测**：.45 与 .41（两台都是 Docker 29 + containerd snapshotter，§3.4 的推断已实测）在修复前双双
@@ -267,11 +268,16 @@ done
 | P3 通道记账复核 | 未动 |
 | P4 docs/SLIM_*.md 注记 | 未动 |
 
-### 8.4 转交 build-agent-docker 会话的审查结论（2026-10-26 下午）
+### 8.4 转交 build-agent-docker 会话的审查结论（2026-10-26 下午）——已全部修复
 
-那边工作树有一份**未提交的"六镜像凭据覆盖"改动**（`component_delivery.py` + `slim_publish.py`）。
-审查发现两处会断发布链的 P0（详见发给那边 agent 的总结）：① slim(6 组件)/FAT(2 组件) 的
-DELIVERY_MANIFEST 字节不一致会炸 `verify_zip_files`；② FAT 打包路径（`make prepare-package-*` 同走
-`component_delivery.prepare`）在 push-prod **之前** live 查询生产 `:latest`，登记的是上一版 digest。
-另有两处 P2：`slim_publish.py` "refused by containerd-image-store" 文案已过时（客户端改告警了）；
-`registry_manifest_digest` 裸调 skopeo 未透传 `SKOPEO_OPTS`。
+那边工作树当时有一份**未提交的"六镜像凭据覆盖"改动**。审查发现 P0×2 + P2×2（详见 git 历史
+`0112482` 之后的讨论）。**那边会话已按本节结论修复并提交**：
+
+- `fa31a23`：六镜像注册进 DELIVERY_MANIFEST；修复 verify 读不存在路径的 bug。
+- `f7a6595`：注册 gated 到 slim-only（FAT manifest 与 run 证据字节一致）；`verify_zip_files`
+  排除 `DELIVERY_MANIFEST.json`；verify 移到 zip 生成后、改读 slim ZIP 内 6 组件 manifest；
+  `registry_manifest_digest` 走 SKOPEO_OPTS-aware helper；错误文案对齐客户端 warn-not-reject
+  语义；`check_slim_package` 加 first_party 收据 schema 门。slim manifest 的组件 image_id
+  还 re-pin 到发布时点 live index。**已在真实 run（20261026-003723-d69f4d2a）上验证双架构。**
+
+本节保留作审查过程记录；接手方无需再处理这些项。
