@@ -1232,7 +1232,7 @@ async fn pull_candidate_images_before_stop(
     info!(
         "✅ Images ready in {}s: {} pulled, {} already matched the delivery receipt, \
          {} drifted beyond the receipt (deployed with the registry's current image; \
-         see the ⚠️/🔀 warnings above)",
+         see the ⚠️ warnings above)",
         started.elapsed().as_secs(),
         report.pulled.len(),
         report.reused.len(),

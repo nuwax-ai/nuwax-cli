@@ -222,17 +222,6 @@ pub trait RegistryDeployOps {
     /// 预检命令本身可能跑不起来（超时、daemon 异常），实现无法把这类失败压成 `false`。
     /// 预检能力缺失时实现自行降级为 `Ok(true)`。
     fn registry_reachable(&self, reference: String) -> BoxFuture<'_, Result<bool>>;
-    /// 内容兜底判定：解析该引用现网 index 中 `arch` 平台子 manifest 的 `config.digest`。
-    ///
-    /// index 被 `docker manifest create/push` 重建后 digest 必变而内容不变（2026-10-26
-    /// 双机实测：containerd 存储的 `.Id` 就是 index digest，仅按 `.Id` 比对会把内容一致
-    /// 的镜像误判成被覆盖）。解析不出时实现返回 `Ok(None)`，调用方维持原判定 —— 兜底
-    /// 只放宽"内容确实一致"的情形，任何失败都不放行。
-    fn index_config_digest(
-        &self,
-        reference: String,
-        arch: String,
-    ) -> BoxFuture<'_, Result<Option<String>>>;
     /// 停服。镜像就绪之前禁止调用。
     ///
     /// 生产部署走 `docker_service::stop_docker_services_and_wait`（带等待与超时），本模块
@@ -252,14 +241,6 @@ impl RegistryDeployOps for DockerManager {
 
     fn registry_reachable(&self, reference: String) -> BoxFuture<'_, Result<bool>> {
         Box::pin(async move { DockerManager::registry_reachable(self, &reference).await })
-    }
-
-    fn index_config_digest(
-        &self,
-        reference: String,
-        arch: String,
-    ) -> BoxFuture<'_, Result<Option<String>>> {
-        Box::pin(async move { DockerManager::index_config_digest(self, &reference, &arch).await })
     }
 
     fn stop_services(&self) -> BoxFuture<'_, Result<()>> {
@@ -299,9 +280,8 @@ pub struct PullReport {
 
 /// 在停服之前把计划里的镜像全部拉到本地并校验身份。
 ///
-/// 全程只调用 `registry_reachable` / `image_identity` / `pull_image` /
-/// `index_config_digest`。`arch` 是 docker 词汇（amd64/arm64），供身份不匹配时的
-/// 内容兜底查询挑平台子 manifest 用。
+/// 全程只调用 `registry_reachable` / `image_identity` / `pull_image`。`arch` 是
+/// docker 词汇（amd64/arm64），只用于漂移告警的自查指引措辞。
 pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
     ops: &O,
     plan: &[RegistryImage],
@@ -417,52 +397,20 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
             // 身份与凭据不一致：**告警并继续**（2026-10-26 用户决定）。compose 引用的
             // `:latest` 是浮动 tag（既定产品语义，用户手动 `docker compose pull` 取新
             // 构建是被接受的用法），另外 15 张无凭据镜像本来就是浮动拉的，部署不该比
-            // 用户手动操作更严格。兜底查询用于把告警写准：index 重建（`docker manifest
-            // create/push`）会换掉 index digest 而镜像内容不变 —— containerd 存储
-            // （Docker 28+ 默认）的 `.Id` 恰是 index digest，2026-10-26 双机实测全部
-            // 命中这种情形；内容判定（平台子 manifest 的 config.digest）对索引重序列
-            // 化免疫，能把"仅索引漂移"和"内容真的变了"区分开。两种情况都不拦部署。
-            match ops
-                .index_config_digest(image.reference.clone(), arch.to_string())
-                .await
-            {
-                Ok(Some(config_digest)) if config_digest == receipt.config_id => {
-                    warn!(
-                        "🔀 {position} {} identity {identity} differs from the delivery \
-                         receipt (expected config {} or index {}), but its {arch} manifest \
-                         config digest matches the receipt config_id: the index was \
-                         re-serialized without changing image content. Deploying with the \
-                         registry's current image",
-                        image.reference, receipt.config_id, receipt.image_id
-                    );
-                }
-                fallback => {
-                    warn!(
-                        "⚠️ {position} {} identity {identity} differs from the delivery \
-                         receipt (expected config {} or index {}); {}. The image is NOT the \
-                         build this package was made with — deploying it anyway because \
-                         `:latest` follows the registry (verify with `docker buildx imagetools \
-                         inspect {}` and compare the {arch} child manifest's config.digest \
-                         with the receipt config_id). Likely causes: the tag was overwritten \
-                         by a different build after packaging, or the receipt predates the \
-                         last push",
-                        image.reference,
-                        receipt.config_id,
-                        receipt.image_id,
-                        match &fallback {
-                            Ok(Some(config_digest)) => format!(
-                                "the registry {arch} manifest config digest is {config_digest}"
-                            ),
-                            Ok(None) => format!(
-                                "the registry index could not be resolved to a single {arch} \
-                                 manifest config digest"
-                            ),
-                            Err(error) => format!("the fallback registry query failed: {error:#}"),
-                        },
-                        image.reference
-                    );
-                }
-            }
+            // 用户手动操作更严格。不代查 registry 区分"索引重序列化/内容变更"——那需要
+            // `docker buildx imagetools` 插件和部署时在线请求，对一个部署工具是不该有
+            // 的依赖；告警给出全部 digest 与自查命令，核查交给有工具的人。
+            warn!(
+                "⚠️ {position} {} identity {identity} differs from the delivery receipt \
+                 (expected config {} or index {}); deploying with the registry's current \
+                 image because `:latest` follows the registry. To verify which case this \
+                 is, run `docker buildx imagetools inspect {}` and compare the {arch} child \
+                 manifest's config.digest with the receipt config_id — a changed index with \
+                 identical config means the index was only re-serialized. Likely causes: \
+                 the index was rebuilt after packaging, the tag was overwritten by a \
+                 different build, or the receipt predates the last push",
+                image.reference, receipt.config_id, receipt.image_id, image.reference
+            );
             report.drifted.push(image.reference.clone());
         }
         info!("✅ {position} {} ready at {identity}", image.reference);
@@ -474,7 +422,7 @@ pub async fn pull_candidate_images<O: RegistryDeployOps + ?Sized>(
 /// 本地镜像身份是否与交付凭据一致。
 ///
 /// 经典 image store 暴露 config digest，containerd store 可能暴露 OCI index digest，
-/// 发布侧两个都记，所以任一命中即通过。不一致不再是部署失败，而是带内容判定的告警
+/// 发布侧两个都记，所以任一命中即通过。不一致不再是部署失败，而是告警
 /// （`backup_release::validate_runtime_delivery` 的备份/回滚校验同一方向：告警不拦）。
 ///
 /// 参数是凭据本身而不是 `RegistryImage`：没有凭据的引用不参与身份判定，把 `None ⇒ 通过`
@@ -514,9 +462,6 @@ mod tests {
         probe_err: AtomicBool,
         /// 这台机器能不能真的把镜像拉下来。
         net_ok: AtomicBool,
-        /// 内容兜底查询（`index_config_digest`）的返回。默认 `Ok(None)`：不影响旧用例。
-        /// 错误存 `String`（`anyhow::Error` 不可 Clone）。
-        index_config: Mutex<Result<Option<String>, String>>,
     }
 
     impl MockOps {
@@ -529,7 +474,6 @@ mod tests {
                 probe_ok: AtomicBool::new(true),
                 probe_err: AtomicBool::new(false),
                 net_ok: AtomicBool::new(true),
-                index_config: Mutex::new(Ok(None)),
             }
         }
 
@@ -570,13 +514,6 @@ mod tests {
         /// 预检命令本身跑不起来：仓库被防火墙静默丢包直到超时，或 daemon 异常。
         fn probe_error(self) -> Self {
             self.probe_err.store(true, Ordering::SeqCst);
-            self
-        }
-
-        /// 设置内容兜底查询的结果：`Some(digest)` = index 解析出的平台 config digest，
-        /// `None` = 不是 index/解析不出，`Err` = 查询本身失败。
-        fn with_index_config(self, outcome: Result<Option<String>, String>) -> Self {
-            *self.index_config.lock().unwrap() = outcome;
             self
         }
 
@@ -646,16 +583,6 @@ mod tests {
                     Ok(probe_ok)
                 }
             })
-        }
-
-        fn index_config_digest(
-            &self,
-            reference: String,
-            arch: String,
-        ) -> BoxFuture<'_, Result<Option<String>>> {
-            self.record(format!("index-config {reference}/{arch}"));
-            let outcome = self.index_config.lock().unwrap().clone();
-            Box::pin(async move { outcome.map_err(|message| anyhow!(message)) })
         }
 
         fn stop_services(&self) -> BoxFuture<'_, Result<()>> {
@@ -929,67 +856,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.pulled, vec![RECEIPTED.to_string()]);
-    }
-
-    /// 2026-10-26 双机实测的主场景：index 被 `docker manifest create/push` 重建，
-    /// containerd 存储的 `.Id`（index digest）与收据两条都不等，但平台 config.digest
-    /// 与收据 config_id 一致 —— 内容就是那一版，正常部署。
-    #[tokio::test]
-    async fn deploys_when_the_index_drifts_but_the_config_digest_still_matches() {
-        let ops = MockOps::new()
-            .set_pulled_identity(Some(OTHER_ID))
-            .with_index_config(Ok(Some(CONFIG_ID.to_string())));
-        let plan = plan_of(&[RECEIPTED]);
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
-            .await
-            .unwrap();
-        assert_eq!(report.pulled, vec![RECEIPTED.to_string()]);
-        assert!(
-            ops.calls()
-                .iter()
-                .any(|call| call.starts_with("index-config "))
-        );
-    }
-
-    /// 内容与凭据也不一致（不是索引重序列化）：告警继续，镜像以仓库当前为准 ——
-    /// `:latest` 浮动语义下部署不比用户手动 `docker compose pull` 更严格。
-    #[tokio::test]
-    async fn deploys_with_a_drift_warning_when_the_fallback_config_digest_also_differs() {
-        let ops = MockOps::new()
-            .set_pulled_identity(Some(OTHER_ID))
-            .with_index_config(Ok(Some(OTHER_ID.to_string())));
-        let plan = plan_of(&[RECEIPTED]);
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
-            .await
-            .unwrap();
-        assert_eq!(report.pulled, vec![RECEIPTED.to_string()]);
-        assert_eq!(report.drifted, vec![RECEIPTED.to_string()]);
-    }
-
-    #[tokio::test]
-    async fn deploys_with_a_drift_warning_when_the_fallback_cannot_resolve_the_index() {
-        let ops = MockOps::new()
-            .set_pulled_identity(Some(OTHER_ID))
-            .with_index_config(Ok(None));
-        let plan = plan_of(&[RECEIPTED]);
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
-            .await
-            .unwrap();
-        assert_eq!(report.pulled, vec![RECEIPTED.to_string()]);
-        assert_eq!(report.drifted, vec![RECEIPTED.to_string()]);
-    }
-
-    #[tokio::test]
-    async fn deploys_with_a_drift_warning_when_the_fallback_query_itself_fails() {
-        let ops = MockOps::new()
-            .set_pulled_identity(Some(OTHER_ID))
-            .with_index_config(Err("registry unreachable".to_string()));
-        let plan = plan_of(&[RECEIPTED]);
-        let report = pull_candidate_images(&ops, &plan, &PullPolicy::default(), "amd64")
-            .await
-            .unwrap();
-        assert_eq!(report.pulled, vec![RECEIPTED.to_string()]);
-        assert_eq!(report.drifted, vec![RECEIPTED.to_string()]);
     }
 
     #[tokio::test]
