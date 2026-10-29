@@ -487,182 +487,48 @@ update:
 auto_upgrade_deploy:
   # 配置更新
   save_config_failed: "保存配置文件失败"
-  config_version_updated: "✅ 配置文件版本号已更新并保存"
 
   # 命令入口
-  start_process: "🚀 开始自动升级部署流程..."
-  show_status: "显示自动升级部署状态"
 
   # 升级部署流程
-  custom_frontend_port: "🔌 自定义frontend端口: %{port}"
-  custom_compose_file: "📄 自定义docker-compose配置文件: %{path}"
-  cli_check_done: "✅ CLI 版本已完成预检查，开始执行升级部署流程"
-  downloading_latest: "📥 正在下载最新的Docker服务版本..."
 
   # 版本检测
-  version_detected: "📋 检测到版本信息"
-  version_fetch_failed: "⚠️ 获取版本信息失败，使用配置版本"
 
   # 部署类型检测
-  first_deployment_detected: "🆕 检测到第一次部署，使用全新初始化"
-  upgrade_deployment_detected: "🔄 检测到升级部署，需要先停止服务"
 
   # 挂载目录检查
-  check_mount_dirs: "🔍 检查并创建挂载目录..."
-  windows_podman_detected: "⚠️ 检测到 Windows Podman Desktop 环境，提前创建挂载目录"
-  env_info: "   环境信息: %{env}"
-  podman_no_auto_create: "   Podman Desktop 不会自动创建挂载目录，需要手动创建"
-  mount_dir_check_failed: "⚠️ 挂载目录检查/创建失败: %{error}"
-  mount_dir_check_failed_hint: "   继续执行，但可能会遇到容器启动失败"
-  mount_dir_check_done: "✅ 挂载目录检查完成"
-  current_env: "ℹ️ 当前环境: %{env} (无需特殊处理)"
 
   # Docker服务包解压
-  extracting_docker_package: "📦 正在解压Docker服务包..."
-  clean_files_success: "✅ 清理文件/目录成功: %{files}"
-  clean_files_failed: "⚠️ 清理文件/目录失败: %{error}, 尝试继续解压"
-  cleaning_docker_dir: "🧹 清理现有docker目录以避免文件冲突..."
-  docker_dir_cleaned: "✅ docker目录清理完成"
-  clean_docker_dir_failed: "⚠️ 清理docker目录失败: %{error}, 尝试继续解压"
-  clean_docker_dir_error: "清理docker目录失败: %{error}"
-  version_unchanged: "版本一致,无需升级更新"
-  docker_extract_done: "✅ Docker服务包解压完成"
-  updating_docker_version: "📝 更新Docker服务版本"
-  version_no_update: "📝 版本号无需更新（已是最新版本）"
-  docker_extract_failed: "❌ Docker服务包解压失败: %{error}"
 
   # 服务部署和启动
-  deploying_services: "🔄 正在部署Docker服务..."
-  starting_services: "▶️ 正在启动Docker服务..."
 
   # 分阶段等待服务
-  phase1_wait_mysql: "⏳ 阶段 1/2: 等待 MySQL 服务就绪..."
-  mysql_ready: "✅ MySQL 服务已就绪"
-  mysql_wait_timeout: "⚠️ 等待 MySQL 服务超时，仍尝试执行 SQL 升级..."
-  executing_db_upgrade: "🔄 执行数据库升级..."
-  waiting_all_services: "⏳ 等待所有服务完全启动..."
-  phase2_wait_all: "⏳ 阶段 2/2: 等待所有服务完全启动..."
-  deploy_complete_services_started: "✅ 自动升级部署完成，服务已成功启动"
-  deploy_success: "🎉 自动升级部署流程成功完成"
-  wait_timeout: "⚠️ 等待服务启动超时，请手动检查服务状态"
-  final_check_running: "🔍 最终检查：服务似乎已正常启动"
-  final_check_not_running: "🔍 最终检查：服务可能未正常启动"
-  detailed_status_check: "📊 详细状态检查:"
-  final_check_failed: "🔍 最终检查失败: %{error}"
 
-  status_title: "📊 自动升级部署状态信息:"
-  feature_status: "   功能状态: 已实现"
-  process_desc: "   流程说明: 下载最新版本 -> 智能备份 -> 部署服务 -> 启动服务"
-  no_pending_tasks: "📋 升级任务: 当前没有待执行的升级任务"
-  pending_tasks_title: "📋 待执行的升级任务:"
-  task_id_item: "   - 任务ID: %{id}"
-  task_name_item: "     名称: %{name}"
-  task_type_item: "     类型: %{type_name}"
-  task_status_item: "     状态: %{status}"
-  task_schedule_time: "     计划执行时间: %{time}"
-  task_target_version: "     目标版本: %{version}"
-  task_progress: "     进度: %{progress}%"
-  task_error_message: "     错误信息: %{error}"
-  get_tasks_failed: "⚠️  获取升级任务信息失败: %{error}"
-  task_query_limited: "   注意: 当前版本的任务查询功能有限"
-  docker_status_title: "🐳 当前Docker服务状态:"
-  recent_backups_title: "📝 最近的备份:"
 
   # Docker服务状态检查
-  compose_not_exists: "📝 docker-compose.yml文件不存在，服务未运行"
-  found_running_services: "🔍 发现 %{count} 个运行中的服务"
-  no_running_services: "🔍 没有发现运行中的服务"
 
   # 时间格式化
 
   # 首次部署检测
-  compose_not_found_first_deploy: "📝 未找到docker-compose.yml文件，视为首次部署"
 
   # 安全删除目录
-  safe_delete_failed: "⚠️ 安全删除目录失败 (尝试 %{attempts}/%{max}): %{error}"
-  safe_delete_max_attempts: "在 %{max} 次尝试后，目录 %{path} 仍无法删除: %{error}"
-  safe_delete_success: "✅ 成功安全删除目录: %{path}"
 
   # 强制清理目录
-  trying_force_cleanup: "🧹 尝试强制清理目录内容"
-  skipping_protected_dir: "📁 跳过保护目录"
-  delete_subdir_failed: "📁 删除子目录失败"
-  delete_empty_dir_failed: "📁 删除空目录失败"
-  delete_file_failed: "📄 删除文件失败"
-  read_dir_failed: "📂 读取目录内容失败"
-  dir_cleanup_partial: "⚠️ 目录清理完成，但有部分失败"
-  more_failed_items: "  ... 还有 %{count} 个失败项"
-  dir_cleanup_success: "✅ 目录清理成功"
 
   # 归档差异SQL文件
   diff_sql_executed: "已执行"
   diff_sql_failed: "执行失败"
   diff_sql_no_exec: "未执行"
   diff_sql_archived: "已归档"
-  diff_sql_file_status: "📝 %{status} 差异SQL文件: %{path}"
-  archive_diff_sql_failed: "⚠️ 归档差异SQL文件失败: %{error}"
 
   # SQL差异升级
-  create_history_sql_dir: "📁 创建历史SQL目录: %{path}"
-  archived_temp_sql: "📦 已归档旧的temp_sql目录到: %{path}"
-  archive_temp_sql_failed: "⚠️ 归档temp_sql目录失败: %{error}, 尝试直接清理"
-  cleanup_temp_sql_failed: "⚠️ 清理temp_sql目录失败: %{error}, 继续执行"
-  cleaned_old_temp_sql: "✅ 已清理旧的temp_sql目录"
-  create_temp_sql_dir: "📁 创建临时SQL目录: %{path}"
-  deleted_old_sql_file: "🗑️ 已删除旧的SQL文件: %{path}"
   copy_sql_failed: "复制SQL文件失败: %{src} -> %{dst}"
-  sql_copy_not_found: "SQL文件复制后不存在: %{dst} (源文件: %{src})"
-  copied_new_sql_file: "📄 已复制新版本SQL文件: %{path}"
-  no_sql_file_skip: "📄 新版本没有SQL文件，跳过差异生成"
-  template_sql_not_found: "未找到模板SQL文件: %{path}"
-  schema_template_missing: "缺少库表模板文件: %{path}"
-  compose_path_to_string_failed: "无法将 docker-compose.yml 路径转换为字符串"
-  env_path_to_string_failed: "无法将 .env 文件路径转换为字符串"
-  create_mysql_config_failed: "创建 MySQL 配置失败"
-  connecting_mysql: "🔌 正在连接到MySQL数据库..."
-  db_connection_failed: "❌ 数据库连接失败"
-  ensure_mysql_running: "🏃 请确保MySQL容器正在运行并且端口 %{port} 可访问"
-  generating_sql_diff: "📊 正在基于在线架构生成SQL差异..."
   generate_live_diff_failed: "生成在线差异SQL失败"
-  diff_generation_complete: "📋 差异生成完成"
-  saved_live_schema_sql: "📄 已保存在线架构SQL文件: %{path}"
   save_diff_sql_failed: "保存差异SQL文件失败"
-  saved_diff_sql_file: "📄 差异SQL文件已保存: %{path}"
-  diff_only_deletions: "⚠️  检测到架构差异：仅包含删除操作（已跳过）"
-  deletions_need_manual: "💡 删除操作需要手动执行，请查看差异文件中的说明"
-  no_db_diff: "📄 数据库架构无差异，无需执行升级"
-  diff_no_executable_sql: "⚠️  检测到差异但没有实际可执行的SQL语句"
-  start_db_upgrade: "🔄 开始执行数据库升级"
-  diff_mixed_warnings: "⚠️  注意: 差异中同时包含可执行SQL和删除操作警告"
-  add_modify_will_execute: "   ✓ 新增/修改操作将正常执行"
-  deletions_skipped: "   ✗ 删除操作已跳过，需手动执行"
-  see_diff_file: "   📄 详情请查看: %{path}"
-  start_execute_diff_sql: "🚀 开始执行差异SQL"
-  db_upgrade_success: "✅ 数据库升级成功"
-  db_upgrade_failed: "❌ 数据库升级失败"
 
   # 脚本权限修复
-  fixing_script_permissions: "🔧 正在修复关键脚本文件权限..."
-  fixing_permission: "🔒 修复权限: %{path} (当前: %{current} -> 目标: 755)"
-  fix_permission_failed: "⚠️ 修复权限失败 %{path}: %{error}"
-  permission_fixed: "✅ 权限修复成功: %{path}"
-  permission_ok: "✓ 权限正常: %{path} (%{mode})"
-  non_unix_skip_permission: "ℹ️ 非Unix系统，跳过权限修复: %{path}"
-  read_metadata_failed: "⚠️ 无法读取文件元数据 %{path}: %{error}"
-  script_not_exists_skip: "📄 脚本文件不存在，跳过: %{path}"
-  permission_fix_complete: "🔧 权限修复完成: %{fixed}/%{total} 个脚本文件已修复"
-  no_scripts_to_fix: "📄 未找到需要修复权限的脚本文件"
 
   # CLI更新检查
-  priority_cli_version_check: "🔍 优先检查 nuwax-cli 版本更新（在任何数据库初始化之前）..."
-  version_check_complete: "✅ 版本检查完成: 当前=%{current}, 最新=%{latest}"
-  version_check_failed: "❌ 检查更新失败: %{error}"
-  new_cli_version_found: "🚀 发现 nuwax-cli 新版本: %{current} -> %{latest}"
-  start_auto_install: "📥 开始自动安装更新..."
-  cli_update_success: "✅ nuwax-cli 更新成功！程序将重启以使用新版本"
-  cli_auto_update_failed: "❌ nuwax-cli 自动更新失败: %{error}"
-  manual_check_update_hint: "请检查网络连接或手动运行: nuwax-cli check-update install"
-  cli_already_latest: "✅ nuwax-cli 已是最新版本，无需更新"
 
 # auto_backup.rs 日志消息
 auto_backup:
