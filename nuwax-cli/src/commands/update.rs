@@ -32,6 +32,7 @@ async fn handle_service_download(
     download_dir: PathBuf,
     version_directory: &str,
     download_directory: &str,
+    print_next_step_hint: bool,
 ) -> Result<()> {
     let directory =
         create_version_download_dir(download_dir, version_directory, download_directory)?;
@@ -46,7 +47,9 @@ async fn handle_service_download(
         "   Current deployed version: {}",
         app.config.get_docker_versions()
     );
-    info!("📝 Next step: Run 'nuwax-cli docker-service deploy' to deploy services");
+    if print_next_step_hint {
+        info!("📝 Next step: Run 'nuwax-cli docker-service deploy' to deploy services");
+    }
     Ok(())
 }
 
@@ -54,10 +57,14 @@ async fn handle_service_download(
 ///
 /// `channel` 由命令决定，不由本机配置决定：`auto-upgrade-deploy run` 和 `upgrade`
 /// 走离线全量清单，瘦部署命令走 registry 清单。
+///
+/// `print_next_step_hint`：独立 `upgrade` 命令下载完即止，提示用户手动 deploy；
+/// `auto-upgrade-deploy run/registry-deploy` 下载后自动继续部署，提示不成立。
 pub async fn run_upgrade(
     app: &mut CliApp,
     args: UpgradeArgs,
     channel: DockerChannel,
+    print_next_step_hint: bool,
 ) -> Result<UpgradeStrategy> {
     if args.check {
         info!("🔍 Checking Docker service upgrade versions");
@@ -128,6 +135,7 @@ pub async fn run_upgrade(
                 download_dir,
                 &version_str,
                 &download_type_str,
+                print_next_step_hint,
             )
             .await?;
         }
@@ -159,8 +167,15 @@ pub async fn run_upgrade(
                 &patch_info.url,
                 patch_info.hash.as_deref(),
             )?;
-            handle_service_download(app, &identity, download_dir, &base_version, &version_str)
-                .await?;
+            handle_service_download(
+                app,
+                &identity,
+                download_dir,
+                &base_version,
+                &version_str,
+                print_next_step_hint,
+            )
+            .await?;
         }
         UpgradeStrategy::NoUpgrade { target_version } => {
             info!(

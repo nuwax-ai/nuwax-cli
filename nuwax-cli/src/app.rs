@@ -137,6 +137,7 @@ impl CliApp {
                             self,
                             args,
                             client_core::config::DockerChannel::Images,
+                            true,
                         )
                         .await
                         .map_err(|e| {
@@ -150,6 +151,7 @@ impl CliApp {
                             self,
                             args,
                             client_core::config::DockerChannel::Images,
+                            true,
                         )
                         .await
                         .map_err(|e| {

@@ -1115,7 +1115,7 @@ async fn run_channel_deployment(
         force: force_full,
         check: false,
     };
-    let upgrade_strategy = update::run_upgrade(app, upgrade_args, channel).await?;
+    let upgrade_strategy = update::run_upgrade(app, upgrade_args, channel, false).await?;
     let target_version =
         deployment_target_version(&upgrade_strategy, &app.config.get_docker_versions());
 
@@ -1137,17 +1137,26 @@ async fn run_channel_deployment(
     // Stage and probe affected managed directories before stopping services.
     // Neither the docker root nor any existing persistent tree is moved.
     let mut replacement = match package_path.as_deref() {
-        Some(path) => Some(
-            crate::utils::package_replace::PackageReplacement::prepare_async(
-                path,
-                &upgrade_strategy,
-                &context.package_root,
-                docker_manager.get_env_file(),
-                true,
+        Some(path) => {
+            // 大包（full 通道 14GB 级）的解压+全量哈希是十分钟级的静默工作，
+            // 不打日志会被当成卡死（2026-10-28 用户部署实测反馈）。
+            info!(
+                "📦 Staging candidate package (extracting archive, hashing managed \
+                 files and probing directories; this can take several minutes for \
+                 full-channel packages)..."
+            );
+            Some(
+                crate::utils::package_replace::PackageReplacement::prepare_async(
+                    path,
+                    &upgrade_strategy,
+                    &context.package_root,
+                    docker_manager.get_env_file(),
+                    true,
+                )
+                .await
+                .context("Package replacement preflight failed before stopping services")?,
             )
-            .await
-            .context("Package replacement preflight failed before stopping services")?,
-        ),
+        }
         None => None,
     };
     if channel == client_core::config::DockerChannel::Registry {
@@ -1871,6 +1880,10 @@ pub async fn run_offline_deploy(
         target_version: version.clone(),
         download_type: client_core::upgrade_strategy::DownloadType::Full,
     };
+    info!(
+        "📦 Staging candidate package (extracting archive, hashing managed files and \
+         probing directories; this can take several minutes for full-channel packages)..."
+    );
     let mut replacement = crate::utils::package_replace::PackageReplacement::prepare_async(
         &archive_path,
         &upgrade_strategy,
