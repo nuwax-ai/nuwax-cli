@@ -349,7 +349,14 @@ impl PackageReplacement {
             for chunk in paths.chunks(paths.len().div_ceil(workers)) {
                 scope.spawn(move || {
                     for path in chunk {
-                        if failure.lock().unwrap().is_some() {
+                        // PoisonError 只在工作线程 panic 后出现（那时 scope 自身会传播
+                        // panic）；从 poison 恢复 guard 是为了把首个 IO 错误带出去，
+                        // 不在这里叠加第二次 panic。
+                        if failure
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .is_some()
+                        {
                             return;
                         }
                         // 必须带写权限打开：Windows 只读句柄不允许 FlushFileBuffers
@@ -360,14 +367,20 @@ impl PackageReplacement {
                             .open(path)
                             .and_then(|file| file.sync_all());
                         if let Err(error) = flushed {
-                            *failure.lock().unwrap() = Some(error);
+                            *failure
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
                             return;
                         }
                     }
                 });
             }
         });
-        if let Some(error) = failure.lock().unwrap().take() {
+        if let Some(error) = failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
             return Err(error).context("Cannot flush staged package files to disk");
         }
         Ok(())
