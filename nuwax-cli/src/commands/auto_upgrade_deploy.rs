@@ -1012,6 +1012,8 @@ fn channel_to_record(
 /// 归档读不开时保守回退 images（与既有行为一致）；调用点在预检之后，包必然可读。
 fn offline_package_channel(archive_path: &Path) -> client_core::config::DockerChannel {
     use client_core::config::DockerChannel;
+    use client_core::constants::docker::{DOCKER_DIR_NAME, IMAGES_DIR_NAME};
+    let offline_prefix = format!("{DOCKER_DIR_NAME}/{IMAGES_DIR_NAME}/");
     let has_offline_tar = std::fs::File::open(archive_path)
         .ok()
         .and_then(|file| zip::ZipArchive::new(file).ok())
@@ -1019,7 +1021,7 @@ fn offline_package_channel(archive_path: &Path) -> client_core::config::DockerCh
             (0..zip.len()).any(|index| {
                 zip.by_index(index).is_ok_and(|entry| {
                     !entry.is_dir()
-                        && entry.name().starts_with("docker/images/")
+                        && entry.name().starts_with(&offline_prefix)
                         && entry.name().ends_with(".tar")
                 })
             })
@@ -1269,14 +1271,21 @@ async fn pull_candidate_images_before_stop(
     )
     .await
     .context("Registry images were not ready; services were left running on the old version")?;
+    let drift_note = if report.drifted.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ", {} drifted beyond the receipt (deployed with the registry's current \
+             image; see the ⚠️ warnings above)",
+            report.drifted.len()
+        )
+    };
     info!(
-        "✅ Images ready in {}s: {} pulled, {} already matched the delivery receipt, \
-         {} drifted beyond the receipt (deployed with the registry's current image; \
-         see the ⚠️ warnings above)",
+        "✅ Images ready in {}s: {} pulled, {} already matched the delivery receipt{}",
         started.elapsed().as_secs(),
         report.pulled.len(),
         report.reused.len(),
-        report.drifted.len()
+        drift_note
     );
     Ok(())
 }
