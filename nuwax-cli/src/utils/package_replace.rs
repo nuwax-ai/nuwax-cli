@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use client_core::upgrade_strategy::UpgradeStrategy;
 use client_core::utils::archive::{self, ArchiveFormat};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -352,7 +352,14 @@ impl PackageReplacement {
                         if failure.lock().unwrap().is_some() {
                             return;
                         }
-                        if let Err(error) = File::open(path).and_then(|file| file.sync_all()) {
+                        // 必须带写权限打开：Windows 只读句柄不允许 FlushFileBuffers
+                        // （os error 5 Access is denied），Unix 上则两种模式皆可。
+                        let flushed = OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(path)
+                            .and_then(|file| file.sync_all());
+                        if let Err(error) = flushed {
                             *failure.lock().unwrap() = Some(error);
                             return;
                         }
@@ -1380,6 +1387,32 @@ mod tests {
     use super::*;
     use client_core::upgrade_strategy::DownloadType;
     use std::io::Write;
+
+    /// staged 数据落盘必须带写权限打开：Windows 只读句柄不允许 fsync
+    /// （os error 5 Access is denied，2026-10-29 windows 指纹检查实测挂在这里），
+    /// Unix 上两种模式皆可——这里锁住 Windows 的特殊性不回归。
+    #[test]
+    fn staged_flush_opens_files_writable_for_windows_fsync() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("staged.bin");
+        fs::write(&path, b"staged-bytes")?;
+
+        #[cfg(windows)]
+        {
+            let read_only = File::open(&path).and_then(|file| file.sync_all());
+            assert!(
+                read_only.is_err(),
+                "Windows 只读句柄的 fsync 预期失败；若开始成功说明行为已变，可简化 flush"
+            );
+        }
+        let writable = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.sync_all());
+        assert!(writable.is_ok(), "读写打开必须能 fsync: {writable:?}");
+        Ok(())
+    }
 
     #[test]
     fn archive_names_remain_valid_after_native_path_conversion() -> Result<()> {
