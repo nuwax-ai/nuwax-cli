@@ -322,8 +322,48 @@ impl PackageReplacement {
             &serde_json::to_vec_pretty(&recovery_metadata)?,
             client_core::atomic_file::PermissionsPolicy::Private,
         )?;
+        plan.flush_staged_files()?;
         plan.record_phase("prepared")?;
         Ok(plan)
+    }
+
+    /// staged 数据落盘：apply 用 rename 把 staged 文件装入受管树，一旦崩溃重启，
+    /// journal 重放要求这些字节已在盘上。fsync 是纯 IO 等待，逐文件串行会把 full
+    /// 包（数万文件）拖成十几分钟的"卡死"观感，故在收尾处并行执行。
+    fn flush_staged_files(&self) -> Result<()> {
+        if self.incoming_files.is_empty() {
+            return Ok(());
+        }
+        let paths: Vec<PathBuf> = self
+            .incoming_files
+            .iter()
+            .map(|relative| self.stage.join(relative))
+            .collect();
+        let workers = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(4)
+            .clamp(1, 8);
+        let failure = std::sync::Mutex::new(None);
+        let failure = &failure;
+        std::thread::scope(|scope| {
+            for chunk in paths.chunks(paths.len().div_ceil(workers)) {
+                scope.spawn(move || {
+                    for path in chunk {
+                        if failure.lock().unwrap().is_some() {
+                            return;
+                        }
+                        if let Err(error) = File::open(path).and_then(|file| file.sync_all()) {
+                            *failure.lock().unwrap() = Some(error);
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        if let Some(error) = failure.lock().unwrap().take() {
+            return Err(error).context("Cannot flush staged package files to disk");
+        }
+        Ok(())
     }
 
     fn is_protected(&self, relative: &Path) -> bool {
@@ -401,7 +441,10 @@ impl PackageReplacement {
                         relative.display()
                     )
                 })?;
-                file.sync_all()?;
+                // 不在此处 fsync：逐文件同步会把数万元素的 full 包变成数万次同步阻塞
+                // （2026-10-28 实测 14GB 包 staging 阶段 CPU 0.2%、耗时以十几分钟计）。
+                // staged 数据统一在 apply 之前落盘，见 flush_staged_files。
+                drop(file);
                 set_mode(&stage, mode)?;
                 self.incoming_files.insert(relative.to_path_buf());
             }
