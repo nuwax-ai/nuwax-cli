@@ -3360,6 +3360,7 @@ dependencies = [
  "nom 8.0.0",
  "num_cpus",
  "ratatui",
+ "rayon",
  "regex",
  "reqwest",
  "rust-i18n",

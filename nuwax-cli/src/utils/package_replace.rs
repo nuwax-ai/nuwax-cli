@@ -5,6 +5,7 @@
 use anyhow::{Context, Result};
 use client_core::upgrade_strategy::UpgradeStrategy;
 use client_core::utils::archive::{self, ArchiveFormat};
+use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
@@ -329,7 +330,8 @@ impl PackageReplacement {
 
     /// staged 数据落盘：apply 用 rename 把 staged 文件装入受管树，一旦崩溃重启，
     /// journal 重放要求这些字节已在盘上。fsync 是纯 IO 等待，逐文件串行会把 full
-    /// 包（数万文件）拖成十几分钟的"卡死"观感，故在收尾处并行执行。
+    /// 包（数万文件）拖成十几分钟的"卡死"观感（2026-10-28 实测 CPU 0.2%、状态 S），
+    /// 故用 rayon 并行落盘：`try_for_each` 自动短路并返回首个 IO 错误。
     fn flush_staged_files(&self) -> Result<()> {
         if self.incoming_files.is_empty() {
             return Ok(());
@@ -339,51 +341,20 @@ impl PackageReplacement {
             .iter()
             .map(|relative| self.stage.join(relative))
             .collect();
-        let workers = std::thread::available_parallelism()
-            .map(|value| value.get())
-            .unwrap_or(4)
-            .clamp(1, 8);
-        let failure = std::sync::Mutex::new(None);
-        let failure = &failure;
-        std::thread::scope(|scope| {
-            for chunk in paths.chunks(paths.len().div_ceil(workers)) {
-                scope.spawn(move || {
-                    for path in chunk {
-                        // PoisonError 只在工作线程 panic 后出现（那时 scope 自身会传播
-                        // panic）；从 poison 恢复 guard 是为了把首个 IO 错误带出去，
-                        // 不在这里叠加第二次 panic。
-                        if failure
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .is_some()
-                        {
-                            return;
-                        }
-                        // 必须带写权限打开：Windows 只读句柄不允许 FlushFileBuffers
-                        // （os error 5 Access is denied），Unix 上则两种模式皆可。
-                        let flushed = OpenOptions::new()
-                            .read(true)
-                            .write(true)
-                            .open(path)
-                            .and_then(|file| file.sync_all());
-                        if let Err(error) = flushed {
-                            *failure
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
-                            return;
-                        }
-                    }
-                });
-            }
-        });
-        if let Some(error) = failure
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            return Err(error).context("Cannot flush staged package files to disk");
-        }
-        Ok(())
+        paths
+            .par_iter()
+            // 必须带写权限打开：Windows 只读句柄不允许 FlushFileBuffers
+            // （os error 5 Access is denied），Unix 上则两种模式皆可。
+            .try_for_each(|path| {
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .and_then(|file| file.sync_all())
+            })
+            .map_err(|error| {
+                anyhow::Error::from(error).context("Cannot flush staged package files to disk")
+            })
     }
 
     fn is_protected(&self, relative: &Path) -> bool {

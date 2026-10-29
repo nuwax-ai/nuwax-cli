@@ -81,6 +81,7 @@ self-replace = { workspace = true }
 
 # 系统信息
 num_cpus = { workspace = true }
+rayon = { workspace = true }
 
 color-eyre = { workspace = true }
 ratatui = { workspace = true }
