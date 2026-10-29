@@ -1389,22 +1389,6 @@ pub async fn show_status(app: &mut CliApp) -> Result<()> {
     Ok(())
 }
 
-/// 格式化时间间隔为可读字符串
-#[allow(dead_code)]
-fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-
-    if seconds >= 86400 {
-        t!("auto_upgrade_deploy.days", count = seconds / 86400).to_string()
-    } else if seconds >= 3600 {
-        t!("auto_upgrade_deploy.hours", count = seconds / 3600).to_string()
-    } else if seconds >= 60 {
-        t!("auto_upgrade_deploy.minutes", count = seconds / 60).to_string()
-    } else {
-        t!("auto_upgrade_deploy.seconds", count = seconds).to_string()
-    }
-}
-
 /// 归档差异SQL文件
 ///
 /// # 参数

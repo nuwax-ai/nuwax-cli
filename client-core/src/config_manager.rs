@@ -663,66 +663,6 @@ impl ConfigManager {
         })
     }
 
-    /// 创建自动升级任务
-    pub async fn create_auto_upgrade_task(&self, task: &AutoUpgradeTask) -> Result<()> {
-        let _task_json = serde_json::to_value(task)?;
-
-        // 将任务存储在数据库中（使用任务表或配置表）
-        self.db.write_with_retry(|conn| {
-            conn.execute(
-                r#"INSERT OR REPLACE INTO auto_upgrade_tasks
-                   (task_id, task_name, schedule_time, upgrade_type, target_version, status, progress, error_message, created_at, updated_at)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
-                [
-                    &task.task_id,
-                    &task.task_name,
-                    &task.schedule_time.to_rfc3339(),
-                    &task.upgrade_type,
-task.target_version.as_deref().unwrap_or(""),
-                    &task.status,
-                    &task.progress.map(|p| p.to_string()).unwrap_or_default(),
-                    task.error_message.as_deref().unwrap_or(""),
-                    &task.created_at.to_rfc3339(),
-                    &task.updated_at.to_rfc3339(),
-                ]
-            )?;
-            Ok(())
-        }).await?;
-
-        debug!("Auto upgrade task {} created successfully", task.task_id);
-        Ok(())
-    }
-
-    /// 更新升级任务状态
-    pub async fn update_upgrade_task_status(
-        &self,
-        task_id: &str,
-        status: &str,
-        progress: Option<i32>,
-        error_message: Option<&str>,
-    ) -> Result<()> {
-        self.db
-            .write_with_retry(|conn| {
-                conn.execute(
-                    r#"UPDATE auto_upgrade_tasks
-                   SET status = ?1, progress = ?2, error_message = ?3, updated_at = ?4
-                   WHERE task_id = ?5"#,
-                    [
-                        status,
-                        &progress.map(|p| p.to_string()).unwrap_or_default(),
-                        error_message.unwrap_or(""),
-                        &chrono::Utc::now().to_rfc3339(),
-                        task_id,
-                    ],
-                )?;
-                Ok(())
-            })
-            .await?;
-
-        debug!("Upgrade task {} status updated to: {}", task_id, status);
-        Ok(())
-    }
-
     /// 获取待处理的升级任务
     pub async fn get_pending_upgrade_tasks(&self) -> Result<Vec<AutoUpgradeTask>> {
         self.db

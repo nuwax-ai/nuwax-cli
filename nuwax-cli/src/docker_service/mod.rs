@@ -16,7 +16,6 @@ pub mod manager;
 pub mod port_manager;
 pub mod registry_images;
 pub mod script_permissions;
-pub mod service_manager;
 
 // 公共接口导出
 pub use architecture::{Architecture, detect_architecture};
@@ -33,8 +32,6 @@ pub use image_loader::{ImageInfo, ImageLoader, ImageType, LoadResult, TagResult}
 pub use manager::DockerServiceManager;
 #[allow(unused_imports)]
 pub use port_manager::{PortConflict, PortConflictReport, PortManager, PortMapping};
-#[allow(unused_imports)]
-pub use service_manager::ServiceManager;
 
 /// Docker 服务管理的主要入口点
 pub struct DockerService;
