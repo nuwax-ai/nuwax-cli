@@ -3,7 +3,7 @@ use client_core::sql_diff::generate_schema_diff;
 use rust_i18n::t;
 use std::fs;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, warn};
 
 /// 对比两个SQL文件并生成差异SQL
 pub async fn run_diff_sql(
@@ -73,7 +73,7 @@ pub async fn run_diff_sql(
         .filter(|line| !line.trim().is_empty() && !line.trim().starts_with("--"))
         .collect();
 
-    if meaningful_lines.is_empty() {
+    if diff_sql.trim().is_empty() {
         info!("✅ No database schema changes, upgrade not needed");
         info!("📄 Generated empty diff file: {file}", file = output_file);
 
@@ -95,10 +95,14 @@ pub async fn run_diff_sql(
         })?;
 
         info!("📄 SQL diff file saved: {file}", file = output_file);
-        info!(
-            "📋 Found {count} executable SQL statements",
-            count = meaningful_lines.len()
-        );
+        if meaningful_lines.is_empty() {
+            warn!("⚠️ Schema differences require manual changes; see the diff file");
+        } else {
+            info!(
+                "📋 Found {count} executable SQL lines",
+                count = meaningful_lines.len()
+            );
+        }
 
         // 显示差异SQL内容（截取前10行）
         let diff_lines: Vec<&str> = diff_sql.lines().take(10).collect();
@@ -129,4 +133,78 @@ pub async fn run_diff_sql(
 
     info!("✅ SQL diff comparison completed");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn compare_files(old: &str, new: &str) -> Result<String> {
+        let directory = tempfile::tempdir()?;
+        let old_path = directory.path().join("old.sql");
+        let new_path = directory.path().join("new.sql");
+        let output = directory.path().join("diff.sql");
+        fs::write(&old_path, old)?;
+        fs::write(&new_path, new)?;
+        run_diff_sql(
+            old_path,
+            new_path,
+            None,
+            None,
+            output.to_string_lossy().into_owned(),
+        )
+        .await?;
+        Ok(fs::read_to_string(output)?)
+    }
+
+    #[tokio::test]
+    async fn warning_only_diff_preserves_manual_instructions() -> Result<()> {
+        for (old, new, warning) in [
+            (
+                "CREATE TABLE users (id INT, name VARCHAR(20));",
+                "CREATE TABLE users (id INT);",
+                "DROP COLUMN `name`",
+            ),
+            (
+                "CREATE TABLE users (id INT, name VARCHAR(20), KEY idx (id));",
+                "CREATE TABLE users (id INT, name VARCHAR(20), KEY idx (name));",
+                "manually drop old index",
+            ),
+            (
+                "CREATE TABLE users (id INT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+                "CREATE TABLE users (id INT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;",
+                "table option COLLATION differs",
+            ),
+        ] {
+            let output = compare_files(old, new).await?;
+            assert!(output.contains(warning), "Missing {warning}: {output}");
+            assert!(!output.contains("database schema unchanged"));
+            assert!(output.lines().all(|line| {
+                let line = line.trim();
+                line.is_empty() || line.starts_with("--")
+            }));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn identical_schema_produces_unchanged_notice() -> Result<()> {
+        let sql = "CREATE TABLE users (id INT);";
+        let output = compare_files(sql, sql).await?;
+        assert!(output.contains("database schema unchanged"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mixed_diff_keeps_executable_sql_and_manual_instructions() -> Result<()> {
+        let output = compare_files(
+            "CREATE TABLE users (id INT, old_name VARCHAR(20));",
+            "CREATE TABLE users (id INT, new_name VARCHAR(20));",
+        )
+        .await?;
+        assert!(output.contains("ALTER TABLE `users` ADD COLUMN `new_name`"));
+        assert!(output.contains("-- To delete it, run manually:"));
+        assert!(output.contains("DROP COLUMN `old_name`"));
+        Ok(())
+    }
 }

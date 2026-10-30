@@ -1,6 +1,8 @@
 use super::differ::generate_mysql_diff;
 use super::parser::parse_sql_tables;
-use super::types::{TableColumn, TableDefinition, TableIndex};
+use super::types::{
+    DbSectionResult, MultiDbDiffResult, SchemaTemplate, TableColumn, TableDefinition, TableIndex,
+};
 use crate::error::DuckError;
 use crate::mysql_executor::MySqlExecutor;
 use tracing::info;
@@ -51,7 +53,7 @@ pub fn generate_schema_diff(
             let to_tables = parse_sql_tables(to_sql)?;
 
             // 生成差异SQL
-            let (diff_sql, _stats) = generate_mysql_diff(&from_tables, &to_tables)?;
+            let (diff_sql, stats) = generate_mysql_diff(&from_tables, &to_tables)?;
 
             let description = if diff_sql.trim().is_empty() {
                 format!(
@@ -67,26 +69,32 @@ pub fn generate_schema_diff(
 
                 // 分析差异类型
                 let mut change_types = Vec::new();
-                if diff_sql.contains("CREATE TABLE") {
+                if stats.tables_added > 0 {
                     change_types.push("new tables");
                 }
-                if diff_sql.contains("DROP TABLE") {
+                if stats.tables_dropped > 0 {
                     change_types.push("dropped tables");
                 }
-                if diff_sql.contains("ALTER TABLE") && diff_sql.contains("ADD COLUMN") {
+                if stats.columns_added > 0 {
                     change_types.push("new columns");
                 }
-                if diff_sql.contains("ALTER TABLE") && diff_sql.contains("DROP COLUMN") {
+                if stats.columns_dropped > 0 {
                     change_types.push("dropped columns");
                 }
-                if diff_sql.contains("ALTER TABLE") && diff_sql.contains("MODIFY COLUMN") {
+                if stats.columns_modified > 0 {
                     change_types.push("modified columns");
                 }
-                if diff_sql.contains("ALTER TABLE") && diff_sql.contains("ADD KEY") {
+                if stats.indexes_added > 0 {
                     change_types.push("new indexes");
                 }
-                if diff_sql.contains("ALTER TABLE") && diff_sql.contains("DROP KEY") {
+                if stats.indexes_dropped > 0 {
                     change_types.push("dropped indexes");
+                }
+                if stats.indexes_modified > 0 {
+                    change_types.push("modified indexes");
+                }
+                if stats.table_options_changed > 0 {
+                    change_types.push("table option changes");
                 }
 
                 let change_summary = if change_types.is_empty() {
@@ -95,13 +103,22 @@ pub fn generate_schema_diff(
                     change_types.join(", ")
                 };
 
-                format!(
-                    "Version {} to {}: {} - generated {} lines of executable diff SQL",
-                    from_version.unwrap_or("unknown"),
-                    to_version,
-                    change_summary,
-                    lines_count
-                )
+                if !stats.has_executable_operations() && stats.has_warnings() {
+                    format!(
+                        "Version {} to {}: {} - only includes manual-change warnings, no executable SQL",
+                        from_version.unwrap_or("unknown"),
+                        to_version,
+                        change_summary
+                    )
+                } else {
+                    format!(
+                        "Version {} to {}: {} - generated {} lines of executable diff SQL",
+                        from_version.unwrap_or("unknown"),
+                        to_version,
+                        change_summary,
+                        lines_count
+                    )
+                }
             };
 
             info!("Diff generation completed: {}", description);
@@ -110,62 +127,112 @@ pub fn generate_schema_diff(
     }
 }
 
-/// 基于在线数据库架构与模板SQL生成差异（Live Diff）
-/// 返回：SchemaDiffResult 结构体，包含差异SQL、描述、在线架构SQL和执行标记
-pub async fn generate_live_schema_diff(
+/// 多库 Live Diff：逐个模板抓取在线库架构并生成差异，组装为单份 diff SQL。
+///
+/// 每库独立处理：库不存在或为空库时 `fetch_live_schema_with_sql` 返回空表集，
+/// 自然生成"建库 + 全量建表"——即存量机器的自动补建路径。
+/// 执行连接须为 root 管理连接（建库/授权/跨库 DDL 均超出应用账号权限）。
+///
+/// 返回 `MultiDbDiffResult`：sections 逐库明细，diff_sql 为组装结果（执行顺序
+/// 与模板清单一致），描述汇总各库。
+pub async fn generate_live_schema_diff_multi(
     executor: &MySqlExecutor,
-    to_sql: &str,
+    templates: &[SchemaTemplate],
     to_version: &str,
-) -> Result<super::types::SchemaDiffResult, DuckError> {
+) -> Result<MultiDbDiffResult, DuckError> {
     info!(
-        "Starting to generate online schema to {} SQL diff",
-        to_version
+        databases = ?templates.iter().map(|t| t.database.as_str()).collect::<Vec<_>>(),
+        to_version,
+        "Starting multi-database live schema diff"
     );
 
-    // 解析目标模板
-    let to_tables = parse_sql_tables(to_sql)?;
+    let mut sections = Vec::with_capacity(templates.len());
+    for template in templates {
+        let database = template.database.as_str();
+        info!(
+            database,
+            to_version, "Generating live schema diff for database"
+        );
 
-    // 抓取在线架构并生成差异（同时获取原始 SQL）
-    let (live_tables, live_sql) = executor
-        .fetch_live_schema_with_sql()
-        .await
-        .map_err(|e| DuckError::custom(format!("Failed to fetch online schema: {e}")))?;
+        let (live_tables, live_sql) = executor
+            .fetch_live_schema_with_sql(database)
+            .await
+            .map_err(|e| {
+                DuckError::custom(format!(
+                    "Failed to fetch online schema for database `{database}`: {e}"
+                ))
+            })?;
 
-    let (diff_sql, stats) = generate_mysql_diff(&live_tables, &to_tables)?;
+        let (diff_sql, stats) = generate_mysql_diff(&live_tables, &template.tables)?;
+        sections.push(DbSectionResult {
+            database: database.to_string(),
+            diff_sql,
+            stats,
+            live_sql,
+        });
+    }
 
-    // 使用统计信息判断是否有可执行SQL和警告
-    let has_executable_sql = stats.has_executable_operations();
-    let has_warnings = stats.has_dangerous_operations();
+    Ok(assemble_multi_db_diff(templates, sections, to_version))
+}
 
-    let description = if !stats.has_changes() {
-        format!("Online schema to {to_version}: no actual schema differences")
-    } else if !has_executable_sql && has_warnings {
-        format!(
-            "Online schema to {to_version}: only includes delete operation warnings, no executable SQL"
-        )
+/// 组装多库结果（纯函数，无 IO，便于单测）：
+/// 汇总各库开关与描述，并仅对"有可执行变更"或"仅警告"的库输出段。
+/// `templates` 与 `sections` 按同序一一对应（由调用方保证）。
+pub(super) fn assemble_multi_db_diff(
+    templates: &[SchemaTemplate],
+    sections: Vec<DbSectionResult>,
+    to_version: &str,
+) -> MultiDbDiffResult {
+    let mut diff_parts = Vec::new();
+    let mut descriptions = Vec::new();
+    let mut has_executable_sql = false;
+    let mut has_warnings = false;
+
+    for (template, section) in templates.iter().zip(sections.iter()) {
+        let executable = section.stats.has_executable_operations();
+        let warnings = section.stats.has_warnings();
+        has_executable_sql |= executable;
+        has_warnings |= warnings;
+        descriptions.push(format!("{}: {}", section.database, section.stats.summary()));
+
+        if executable || warnings {
+            diff_parts.push(render_db_section(template, &section.diff_sql, executable));
+        }
+    }
+
+    let diff_sql = if diff_parts.is_empty() {
+        String::new()
     } else {
-        let executable_lines = diff_sql
-            .lines()
-            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with("--"))
-            .count();
-
-        format!(
-            "Online schema to {}: {} - generated {} lines of executable diff SQL",
-            to_version,
-            stats.summary(),
-            executable_lines
-        )
+        diff_parts.join("\n")
     };
+    let description = format!("Online schema to {to_version}: {}", descriptions.join("; "));
 
-    info!("Live Diff completed: {}", description);
-
-    Ok(super::types::SchemaDiffResult {
+    info!(description = %description, has_executable_sql, has_warnings, "Multi-database live diff completed");
+    MultiDbDiffResult {
+        sections,
         diff_sql,
         description,
-        live_sql: Some(live_sql),
         has_executable_sql,
         has_warnings,
-    })
+    }
+}
+
+/// 渲染单个库段。
+///
+/// `executable == true` 时段结构：注释头 → 建库/授权原句 → `USE` → 该库 DDL，
+/// 会真正执行；`executable == false`（仅警告）时只输出注释头与警告注释，
+/// 不带 preamble/USE，确保不会有任何语句被执行。
+fn render_db_section(template: &SchemaTemplate, diff_sql: &str, executable: bool) -> String {
+    let mut section = format!("-- ===== Database: `{}` =====\n", template.database);
+    if executable {
+        for stmt in &template.preamble_stmts {
+            section.push_str(stmt);
+            section.push('\n');
+        }
+        section.push_str(&format!("USE `{}`;\n", template.database));
+    }
+    section.push_str(diff_sql);
+    section
 }
 
 /// 格式化默认值用于SQL输出，正确处理不同类型的值
@@ -234,6 +301,9 @@ pub fn generate_create_table_sql(table: &TableDefinition) -> String {
     if let Some(charset) = &table.charset {
         sql.push_str(&format!(" DEFAULT CHARSET={charset}"));
     }
+    if let Some(collation) = &table.collation {
+        sql.push_str(&format!(" COLLATE={collation}"));
+    }
 
     sql.push(';');
     sql
@@ -247,11 +317,26 @@ pub fn generate_column_sql(column: &TableColumn) -> String {
         sql.push_str(" NOT NULL");
     }
 
-    if let Some(default) = &column.default_value {
-        sql.push_str(&format!(
-            " DEFAULT {}",
-            format_default_value_for_sql(default)
-        ));
+    if let Some(generated) = &column.generated {
+        // 生成列：MySQL 不允许 DEFAULT / ON UPDATE，直接渲染生成子句。
+        // 统一用 GENERATED ALWAYS 全写（模板里 `AS (expr)` 简写在解析时已归一）。
+        let mode = if generated.stored {
+            "STORED"
+        } else {
+            "VIRTUAL"
+        };
+        sql.push_str(&format!(" GENERATED ALWAYS AS ({}) {mode}", generated.expr));
+    } else {
+        if let Some(default) = &column.default_value {
+            sql.push_str(&format!(
+                " DEFAULT {}",
+                format_default_value_for_sql(default)
+            ));
+        }
+
+        if let Some(on_update) = &column.on_update {
+            sql.push_str(&format!(" ON UPDATE {on_update}"));
+        }
     }
 
     if column.auto_increment {
@@ -273,7 +358,35 @@ pub fn generate_index_sql(index: &TableIndex) -> String {
             index
                 .columns
                 .iter()
-                .map(|c| format!("`{c}`"))
+                .map(|c| c.render())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else if index.is_fulltext {
+        let parser_clause = index
+            .parser
+            .as_ref()
+            .map(|p| format!(" WITH PARSER {p}"))
+            .unwrap_or_default();
+        format!(
+            "FULLTEXT KEY `{}` ({}){}",
+            index.name,
+            index
+                .columns
+                .iter()
+                .map(|c| c.render())
+                .collect::<Vec<_>>()
+                .join(", "),
+            parser_clause
+        )
+    } else if index.is_spatial {
+        format!(
+            "SPATIAL KEY `{}` ({})",
+            index.name,
+            index
+                .columns
+                .iter()
+                .map(|c| c.render())
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -284,7 +397,7 @@ pub fn generate_index_sql(index: &TableIndex) -> String {
             index
                 .columns
                 .iter()
-                .map(|c| format!("`{c}`"))
+                .map(|c| c.render())
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -295,7 +408,7 @@ pub fn generate_index_sql(index: &TableIndex) -> String {
             index
                 .columns
                 .iter()
-                .map(|c| format!("`{c}`"))
+                .map(|c| c.render())
                 .collect::<Vec<_>>()
                 .join(", ")
         )

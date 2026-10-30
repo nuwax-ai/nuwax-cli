@@ -70,6 +70,7 @@ impl From<PackageInfo> for PlatformPackageInfo {
         PlatformPackageInfo {
             url: package_info.url,
             signature: package_info.signature,
+            hash: Some(package_info.hash),
         }
     }
 }
@@ -111,6 +112,9 @@ pub struct PlatformPackages {
 pub struct PlatformPackageInfo {
     pub signature: String,
     pub url: String,
+    /// Optional published archive SHA-256; `external` remains a legacy sentinel.
+    #[serde(default)]
+    pub hash: Option<String>,
 }
 
 /// 增量升级信息
@@ -409,6 +413,20 @@ impl PlatformPackages {
 }
 
 impl PlatformPackageInfo {
+    /// Normalize sentinels before considering a legacy digest, and bind that
+    /// fallback to the same URL so another platform's package is never used.
+    pub fn published_sha256(&self, legacy: Option<&PackageInfo>) -> Result<Option<String>> {
+        let selected = crate::package_cache::normalize_sha256(self.hash.as_deref())?;
+        if selected.is_some() {
+            return Ok(selected);
+        }
+        crate::package_cache::normalize_sha256(
+            legacy
+                .filter(|package| package.url == self.url)
+                .map(|package| package.hash.as_str()),
+        )
+    }
+
     /// 验证平台包信息
     pub fn validate(&self) -> Result<()> {
         if self.url.is_empty() {
@@ -802,6 +820,7 @@ mod tests {
     #[test]
     fn test_platform_package_validation() {
         let valid_platform_pkg = PlatformPackageInfo {
+            hash: None,
             signature: "valid_signature".to_string(),
             url: "https://example.com/package.zip".to_string(),
         };
@@ -811,6 +830,7 @@ mod tests {
             .expect("有效的平台包信息应该通过验证");
 
         let invalid_platform_pkg = PlatformPackageInfo {
+            hash: None,
             signature: "signature".to_string(),
             url: "".to_string(), // 空URL
         };

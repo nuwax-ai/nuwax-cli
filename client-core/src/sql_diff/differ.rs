@@ -66,6 +66,7 @@ pub fn generate_mysql_diff(
                     || table_stats.indexes_added > 0
                     || table_stats.indexes_dropped > 0
                     || table_stats.indexes_modified > 0
+                    || table_stats.table_options_changed > 0
                 {
                     stats.tables_modified += 1;
                 }
@@ -75,6 +76,7 @@ pub fn generate_mysql_diff(
                 stats.indexes_added += table_stats.indexes_added;
                 stats.indexes_dropped += table_stats.indexes_dropped;
                 stats.indexes_modified += table_stats.indexes_modified;
+                stats.table_options_changed += table_stats.table_options_changed;
             }
         }
     }
@@ -86,10 +88,8 @@ pub fn generate_mysql_diff(
         return Ok((String::new(), stats));
     }
 
-    if !stats.has_executable_operations() && stats.has_dangerous_operations() {
-        info!(
-            "Schema differences detected but only includes delete operation warnings, no executable SQL"
-        );
+    if !stats.has_executable_operations() && stats.has_warnings() {
+        info!("Schema differences require manual changes, no executable SQL");
     }
 
     Ok((result, stats))
@@ -116,6 +116,34 @@ pub fn generate_table_diff(
     stats.indexes_added = index_stats.indexes_added;
     stats.indexes_dropped = index_stats.indexes_dropped;
     stats.indexes_modified = index_stats.indexes_modified;
+
+    // 比较表选项（ENGINE/CHARSET/COLLATE）：仅当两侧都显式声明时才比较，
+    // 一侧省略视为依赖默认值，不产生差异（手写模板常省略 COLLATE，
+    // 而 SHOW CREATE TABLE 恒显式输出，单侧比较会产生噪音）。
+    // 变更只输出人工处理警告，不自动生成 SQL：ENGINE/CHARSET/COLLATE 变更
+    // 需要 ALTER ... ENGINE / CONVERT TO CHARACTER SET，会重写数据或重建表。
+    // 单独统计为人工处理提示，避免 Live Diff 把纯选项差异误报为无变化。
+    for (label, old_value, new_value) in [
+        ("ENGINE", &old_table.engine, &new_table.engine),
+        ("CHARSET", &old_table.charset, &new_table.charset),
+        ("COLLATION", &old_table.collation, &new_table.collation),
+    ] {
+        if let (Some(old_v), Some(new_v)) = (old_value, new_value)
+            && !old_v.eq_ignore_ascii_case(new_v)
+        {
+            tracing::warn!(
+                "⚠️  Table option {} for table `{}` differs (current: {}, target: {}); manual ALTER required, no SQL generated",
+                label,
+                new_table.name,
+                old_v,
+                new_v
+            );
+            diffs.push(format!(
+                "-- ⚠️  Warning: table option {label} differs (current: {old_v}, target: {new_v}); ENGINE/CHARSET/COLLATE changes need manual ALTER (CONVERT TO), no SQL generated for data safety"
+            ));
+            stats.table_options_changed += 1;
+        }
+    }
 
     (diffs, stats)
 }
@@ -213,6 +241,8 @@ fn generate_index_diffs(
     let indexes_semantically_equal = |idx1: &TableIndex, idx2: &TableIndex| -> bool {
         idx1.is_primary == idx2.is_primary
             && idx1.is_unique == idx2.is_unique
+            && idx1.is_fulltext == idx2.is_fulltext
+            && idx1.is_spatial == idx2.is_spatial
             && idx1.columns == idx2.columns
     };
 
@@ -252,7 +282,39 @@ fn generate_index_diffs(
                 idx_def
                     .columns
                     .iter()
-                    .map(|c| format!("`{c}`"))
+                    .map(|c| c.render())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            stats.indexes_added += 1;
+        } else if idx_def.is_fulltext {
+            let parser_clause = idx_def
+                .parser
+                .as_ref()
+                .map(|p| format!(" WITH PARSER {p}"))
+                .unwrap_or_default();
+            diffs.push(format!(
+                "ALTER TABLE `{}` ADD FULLTEXT KEY `{}` ({}){};",
+                table_name,
+                idx_name,
+                idx_def
+                    .columns
+                    .iter()
+                    .map(|c| c.render())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                parser_clause
+            ));
+            stats.indexes_added += 1;
+        } else if idx_def.is_spatial {
+            diffs.push(format!(
+                "ALTER TABLE `{}` ADD SPATIAL KEY `{}` ({});",
+                table_name,
+                idx_name,
+                idx_def
+                    .columns
+                    .iter()
+                    .map(|c| c.render())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -265,7 +327,7 @@ fn generate_index_diffs(
                 idx_def
                     .columns
                     .iter()
-                    .map(|c| format!("`{c}`"))
+                    .map(|c| c.render())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -278,7 +340,7 @@ fn generate_index_diffs(
                 idx_def
                     .columns
                     .iter()
-                    .map(|c| format!("`{c}`"))
+                    .map(|c| c.render())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -340,7 +402,7 @@ fn generate_index_diffs(
         }
     }
 
-    // 检查修改的索引（先警告删除，再添加新的）
+    // 同名索引的定义变化需要先删除旧索引；升级时仅给出人工处理提示。
     for (idx_name, new_idx) in &new_indexes {
         if let Some(old_idx) = old_indexes.get(idx_name)
             && old_idx != new_idx
@@ -370,43 +432,10 @@ fn generate_index_diffs(
             }
             stats.indexes_modified += 1;
 
-            // 再添加新索引
-            if new_idx.is_primary {
-                diffs.push(format!(
-                    "ALTER TABLE `{}` ADD PRIMARY KEY ({});",
-                    table_name,
-                    new_idx
-                        .columns
-                        .iter()
-                        .map(|c| format!("`{c}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            } else if new_idx.is_unique {
-                diffs.push(format!(
-                    "ALTER TABLE `{}` ADD UNIQUE KEY `{}` ({});",
-                    table_name,
-                    idx_name,
-                    new_idx
-                        .columns
-                        .iter()
-                        .map(|c| format!("`{c}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            } else {
-                diffs.push(format!(
-                    "ALTER TABLE `{}` ADD KEY `{}` ({});",
-                    table_name,
-                    idx_name,
-                    new_idx
-                        .columns
-                        .iter()
-                        .map(|c| format!("`{c}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
+            diffs.push(format!(
+                "-- After reviewing the old index, apply the new definition of `{}` manually",
+                new_idx.name
+            ));
         }
     }
 

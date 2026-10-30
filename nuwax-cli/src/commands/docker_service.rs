@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use client_core::container::DockerManager;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::app::CliApp;
 use crate::cli::DockerServiceCommand;
@@ -69,47 +71,57 @@ pub async fn run_docker_service_command(app: &CliApp, cmd: DockerServiceCommand)
     }
 }
 
-/// 部署 Docker 服务
-pub async fn deploy_docker_services(
+/// Apply command overrides while retaining the configured environment file.
+pub(super) fn select_docker_manager(
+    configured: &Arc<DockerManager>,
+    compose_override: Option<PathBuf>,
+    project_override: Option<String>,
+) -> Result<Arc<DockerManager>> {
+    if compose_override.is_none() && project_override.is_none() {
+        return Ok(configured.clone());
+    }
+    let compose_path =
+        compose_override.unwrap_or_else(|| configured.get_compose_file().to_path_buf());
+    Ok(Arc::new(DockerManager::with_project(
+        compose_path,
+        configured.get_env_file().to_path_buf(),
+        project_override,
+    )?))
+}
+
+fn inject_device_env(manager: &DockerManager) -> Result<()> {
+    crate::utils::device_env::ensure_device_env_with_paths(
+        manager.get_env_file(),
+        manager.get_compose_file(),
+        &client_core::constants::device_info::get_fingerprint_file_path(),
+        false,
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "{}",
+            t!("device_info_cmd.inject_failed", error = error.to_string())
+        )
+    })?;
+    manager.invalidate_compose_config_cache();
+    Ok(())
+}
+
+/// 准备 Docker 服务环境和镜像，但不启动容器。
+pub async fn prepare_docker_services(
     app: &CliApp,
     frontend_port: Option<u16>,
     config_file: Option<PathBuf>,
     project_name: Option<String>,
 ) -> Result<()> {
-    info!("🚀 Starting Docker service deployment...");
+    info!("🚀 Preparing Docker service deployment...");
 
-    // 如果指定了端口，先设置端口配置
+    let manager = select_docker_manager(&app.docker_manager, config_file, project_name)?;
     if let Some(port) = frontend_port {
-        info!("🔧 Configuring frontend port: {port}", port = port);
-        set_frontend_port(port).await?;
+        info!("🔧 Configuring frontend port: {port}");
+        set_frontend_port(manager.get_env_file(), port).await?;
     }
-
-    // 创建 Docker 服务管理器
-    let mut docker_service_manager = if let Some(compose_path) = config_file {
-        // 使用自定义的compose文件路径创建DockerManager
-        let env_path = client_core::constants::docker::get_env_file_path();
-        let custom_docker_manager =
-            std::sync::Arc::new(client_core::container::DockerManager::with_project(
-                &compose_path,
-                &env_path,
-                project_name,
-            )?);
-        DockerService::new(app.config.clone(), custom_docker_manager)?
-    } else {
-        // 如果没有指定config文件，但有project name，创建带project name的DockerManager
-        if let Some(project_name) = project_name {
-            let custom_docker_manager =
-                std::sync::Arc::new(client_core::container::DockerManager::with_project(
-                    client_core::constants::docker::get_compose_file_path(),
-                    client_core::constants::docker::get_env_file_path(),
-                    Some(project_name),
-                )?);
-            DockerService::new(app.config.clone(), custom_docker_manager)?
-        } else {
-            // 使用默认的DockerManager
-            DockerService::new(app.config.clone(), app.docker_manager.clone())?
-        }
-    };
+    inject_device_env(&manager)?;
+    let mut docker_service_manager = DockerService::new(app.config.clone(), manager)?;
 
     // 显示系统信息
     let arch = docker_service_manager.get_architecture();
@@ -122,40 +134,12 @@ pub async fn deploy_docker_services(
         path = docker_service_manager.get_work_dir().display()
     );
 
-    // 执行完整的部署流程
-    match docker_service_manager.deploy_services().await {
-        Ok(_) => {
-            info!("✅ Docker services deployed successfully!");
-
-            // 显示服务状态
-            if let Ok(report) = docker_service_manager.health_check().await {
-                info!("📊 Service status overview:");
-                info!(
-                    "  • Overall status: {status}",
-                    status = report.finalize().display_name()
-                );
-                info!(
-                    "  • Running containers: {running}/{total}",
-                    running = report.get_running_count(),
-                    total = report.get_total_count()
-                );
-
-                if !report.containers.is_empty() {
-                    info!("  • Container details:");
-                    for container in &report.containers {
-                        info!(
-                            "    - {name} ({image}) - {status}",
-                            name = container.name,
-                            image = container.image,
-                            status = container.status.display_name()
-                        );
-                    }
-                }
-            }
-        }
+    // 只执行准备阶段；数据库迁移前不能等待全部服务健康。
+    match docker_service_manager.prepare_services().await {
+        Ok(_) => info!("✅ Docker services prepared successfully!"),
         Err(e) => {
             error!(
-                "❌ Docker service deployment failed: {error}",
+                "❌ Docker service preparation failed: {error}",
                 error = format!("{:?}", e)
             );
             return Err(anyhow::anyhow!(t!(
@@ -176,31 +160,9 @@ pub async fn start_docker_services(
 ) -> Result<()> {
     info!("▶️ Starting Docker services...");
 
-    let mut docker_service_manager = if let Some(compose_path) = config_file {
-        // 使用自定义的compose文件路径创建DockerManager
-        let env_path = client_core::constants::docker::get_env_file_path();
-        let custom_docker_manager =
-            std::sync::Arc::new(client_core::container::DockerManager::with_project(
-                &compose_path,
-                &env_path,
-                project_name,
-            )?);
-        DockerService::new(app.config.clone(), custom_docker_manager)?
-    } else {
-        // 如果没有指定config文件，但有project name，创建带project name的DockerManager
-        if let Some(project_name) = project_name {
-            let custom_docker_manager =
-                std::sync::Arc::new(client_core::container::DockerManager::with_project(
-                    client_core::constants::docker::get_compose_file_path(),
-                    client_core::constants::docker::get_env_file_path(),
-                    Some(project_name),
-                )?);
-            DockerService::new(app.config.clone(), custom_docker_manager)?
-        } else {
-            // 使用默认的DockerManager
-            DockerService::new(app.config.clone(), app.docker_manager.clone())?
-        }
-    };
+    let manager = select_docker_manager(&app.docker_manager, config_file, project_name)?;
+    inject_device_env(&manager)?;
+    let mut docker_service_manager = DockerService::new(app.config.clone(), manager)?;
 
     match docker_service_manager.start_services().await {
         Ok(_) => {
@@ -224,31 +186,8 @@ pub async fn stop_docker_services(
     config_file: Option<PathBuf>,
     project_name: Option<String>,
 ) -> Result<()> {
-    let docker_service_manager = if let Some(compose_path) = config_file {
-        // 使用自定义的compose文件路径创建DockerManager
-        let env_path = client_core::constants::docker::get_env_file_path();
-        let custom_docker_manager =
-            std::sync::Arc::new(client_core::container::DockerManager::with_project(
-                &compose_path,
-                &env_path,
-                project_name,
-            )?);
-        DockerService::new(app.config.clone(), custom_docker_manager)?
-    } else {
-        // 如果没有指定config文件，但有project name，创建带project name的DockerManager
-        if let Some(project_name) = project_name {
-            let custom_docker_manager =
-                std::sync::Arc::new(client_core::container::DockerManager::with_project(
-                    client_core::constants::docker::get_compose_file_path(),
-                    client_core::constants::docker::get_env_file_path(),
-                    Some(project_name),
-                )?);
-            DockerService::new(app.config.clone(), custom_docker_manager)?
-        } else {
-            // 使用默认的DockerManager
-            DockerService::new(app.config.clone(), app.docker_manager.clone())?
-        }
-    };
+    let manager = select_docker_manager(&app.docker_manager, config_file, project_name)?;
+    let docker_service_manager = DockerService::new(app.config.clone(), manager)?;
 
     match docker_service_manager.stop_services().await {
         Ok(_) => {
@@ -293,23 +232,11 @@ pub async fn stop_docker_services_and_wait(
 
     info!("🔍 Checking Docker service status...");
 
-    // 1. 创建 DockerManager（用于 HealthChecker）
-    let docker_manager = if let Some(ref compose_path) = config_file {
-        let env_path = client_core::constants::docker::get_env_file_path();
-        std::sync::Arc::new(client_core::container::DockerManager::with_project(
-            compose_path,
-            &env_path,
-            project_name.clone(),
-        )?)
-    } else if let Some(ref proj_name) = project_name {
-        std::sync::Arc::new(client_core::container::DockerManager::with_project(
-            client_core::constants::docker::get_compose_file_path(),
-            client_core::constants::docker::get_env_file_path(),
-            Some(proj_name.clone()),
-        )?)
-    } else {
-        app.docker_manager.clone()
-    };
+    let docker_manager = select_docker_manager(
+        &app.docker_manager,
+        config_file.clone(),
+        project_name.clone(),
+    )?;
 
     // 2. 检查服务是否在运行
     let health_checker = HealthChecker::new(docker_manager);
@@ -384,31 +311,8 @@ pub async fn restart_docker_services(
 ) -> Result<()> {
     info!("🔄 Restarting Docker services...");
 
-    let mut docker_service_manager = if let Some(compose_path) = config_file {
-        // 使用自定义的compose文件路径创建DockerManager
-        let env_path = client_core::constants::docker::get_env_file_path();
-        let custom_docker_manager =
-            std::sync::Arc::new(client_core::container::DockerManager::with_project(
-                &compose_path,
-                &env_path,
-                project_name,
-            )?);
-        DockerService::new(app.config.clone(), custom_docker_manager)?
-    } else {
-        // 如果没有指定config文件，但有project name，创建带project name的DockerManager
-        if let Some(project_name) = project_name {
-            let custom_docker_manager =
-                std::sync::Arc::new(client_core::container::DockerManager::with_project(
-                    client_core::constants::docker::get_compose_file_path(),
-                    client_core::constants::docker::get_env_file_path(),
-                    Some(project_name),
-                )?);
-            DockerService::new(app.config.clone(), custom_docker_manager)?
-        } else {
-            // 使用默认的DockerManager
-            DockerService::new(app.config.clone(), app.docker_manager.clone())?
-        }
-    };
+    let manager = select_docker_manager(&app.docker_manager, config_file, project_name)?;
+    let mut docker_service_manager = DockerService::new(app.config.clone(), manager)?;
 
     match docker_service_manager.restart_services().await {
         Ok(_) => {
@@ -468,18 +372,8 @@ pub async fn check_docker_services_status_with_project(
 ) -> Result<()> {
     info!("📊 Checking Docker service status...");
 
-    // 创建支持项目名称的 DockerService
-    let docker_service_manager = if let Some(project_name) = project_name {
-        let custom_docker_manager =
-            std::sync::Arc::new(client_core::container::DockerManager::with_project(
-                client_core::constants::docker::get_compose_file_path(),
-                client_core::constants::docker::get_env_file_path(),
-                Some(project_name),
-            )?);
-        DockerService::new(app.config.clone(), custom_docker_manager)?
-    } else {
-        DockerService::new(app.config.clone(), app.docker_manager.clone())?
-    };
+    let manager = select_docker_manager(&app.docker_manager, None, project_name)?;
+    let docker_service_manager = DockerService::new(app.config.clone(), manager)?;
 
     match docker_service_manager.health_check().await {
         Ok(report) => {
@@ -677,56 +571,54 @@ pub async fn setup_image_tags(app: &CliApp) -> Result<()> {
     Ok(())
 }
 
-/// 解压Docker服务包, 并根据升级策略进行处理
-pub async fn extract_docker_service_with_upgrade_strategy(
+/// 按升级策略解析已下载包的本地路径（不触发下载）。
+/// `NoUpgrade` 返回 `None`。供停服务前的候选包预检读取少量条目使用。
+pub fn package_path_for_strategy(
     app: &CliApp,
-    upgrade_strategy: UpgradeStrategy,
-) -> Result<()> {
-    //区分升级策略,来进行解压
-    let file_zip: PathBuf = match &upgrade_strategy {
+    upgrade_strategy: &UpgradeStrategy,
+) -> Result<Option<PathBuf>> {
+    use client_core::package_cache::{PackageIdentity, resolve_cached_package};
+    let architecture = client_core::architecture::Architecture::detect();
+    let (directory, identity) = match upgrade_strategy {
         UpgradeStrategy::FullUpgrade {
             target_version,
             download_type,
+            url,
+            hash,
             ..
-        } => {
-            // 强制升级策略，直接解压并覆盖现有文件
-            info!("📦 Starting Docker service package extraction...");
-
-            let base_version = target_version.base_version_string();
-
-            app.config.get_version_download_file_path(
-                &base_version,
+        } => (
+            app.config.get_version_download_dir(
+                &target_version.base_version_string(),
                 &download_type.to_string(),
-                None,
-            )?
-        }
-        UpgradeStrategy::PatchUpgrade { target_version, .. } => {
-            //增量升级
-            let base_version = target_version.base_version_string();
-            let full_version = target_version.to_string();
-
-            app.config.get_version_download_file_path(
-                &base_version,
-                &full_version.to_string(),
-                None,
-            )?
-        }
-        UpgradeStrategy::NoUpgrade { .. } => {
-            // 无需升级
-            return Ok(());
-        }
+            ),
+            PackageIdentity::new(
+                &target_version.to_string(),
+                architecture.as_str(),
+                &download_type.to_string(),
+                url,
+                Some(hash),
+            )?,
+        ),
+        UpgradeStrategy::PatchUpgrade {
+            target_version,
+            patch_info,
+            ..
+        } => (
+            app.config.get_version_download_dir(
+                &target_version.base_version_string(),
+                &target_version.to_string(),
+            ),
+            PackageIdentity::new(
+                &target_version.to_string(),
+                architecture.as_str(),
+                "patch",
+                &patch_info.url,
+                patch_info.hash.as_deref(),
+            )?,
+        ),
+        UpgradeStrategy::NoUpgrade { .. } => return Ok(None),
     };
-
-    info!(
-        "📦 Found Docker service package: {path}",
-        path = file_zip.display()
-    );
-
-    // 使用utils中的解压函数
-    crate::utils::extract_docker_service(&file_zip, &upgrade_strategy).await?;
-
-    info!("✅ Docker service package extraction complete");
-    Ok(())
+    Ok(Some(resolve_cached_package(&directory, &identity)?))
 }
 
 /// 获取系统架构信息
@@ -745,11 +637,8 @@ pub async fn show_architecture_info(_app: &CliApp) -> Result<()> {
 }
 
 /// 设置frontend服务端口（使用新的环境变量管理器）
-async fn set_frontend_port(port: u16) -> Result<()> {
+async fn set_frontend_port(env_file_path: &Path, port: u16) -> Result<()> {
     use crate::utils::env_manager::update_frontend_port;
-    use client_core::constants::docker::get_env_file_path;
-
-    let env_file_path = get_env_file_path();
     if !env_file_path.exists() {
         info!("   .env file not found, no need to update port");
         return Ok(());
@@ -759,7 +648,7 @@ async fn set_frontend_port(port: u16) -> Result<()> {
     info!("   .env file path: {path}", path = env_file_path.display());
 
     // 使用新的环境变量管理器进行智能更新
-    if let Err(e) = update_frontend_port(&env_file_path, port) {
+    if let Err(e) = update_frontend_port(env_file_path, port) {
         error!(
             "❌ Port configuration update failed: {error}",
             error = e.to_string()
@@ -772,4 +661,54 @@ async fn set_frontend_port(port: u16) -> Result<()> {
 
     info!("✅ Port configuration updated successfully!");
     Ok(())
+}
+
+#[cfg(test)]
+mod custom_deployment_paths_tests {
+    use super::*;
+
+    #[test]
+    fn command_overrides_retain_the_configured_environment_file() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("deploy/prod.yml");
+        let env_path = directory.path().join("secrets/prod.env");
+        let configured = Arc::new(DockerManager::with_project(
+            compose.clone(),
+            env_path.clone(),
+            None,
+        )?);
+        assert!(Arc::ptr_eq(
+            &select_docker_manager(&configured, None, None)?,
+            &configured
+        ));
+        let override_path = directory.path().join("override.yml");
+        let selected = select_docker_manager(
+            &configured,
+            Some(override_path.clone()),
+            Some("isolated-project".to_string()),
+        )?;
+        assert_eq!(selected.get_compose_file(), override_path);
+        assert_eq!(selected.get_env_file(), env_path);
+        let project_only =
+            select_docker_manager(&configured, None, Some("project-only".to_string()))?;
+        assert_eq!(project_only.get_compose_file(), compose);
+        assert_eq!(project_only.get_env_file(), env_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn frontend_port_updates_the_selected_custom_file() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("prod.env");
+        std::fs::write(
+            &path,
+            "FRONTEND_HOST_PORT=80 # keep comment\nMYSQL_PASSWORD=\"synthetic\\$value\"\n",
+        )?;
+        set_frontend_port(&path, 8090).await?;
+        assert_eq!(
+            std::fs::read_to_string(&path)?,
+            "FRONTEND_HOST_PORT=8090 # keep comment\nMYSQL_PASSWORD=\"synthetic\\$value\"\n"
+        );
+        Ok(())
+    }
 }

@@ -105,9 +105,6 @@ pub async fn run_init(force: bool) -> Result<()> {
     info!("");
     info!("🚀 Shortcut - Auto upgrade deploy:");
     info!("   • Run 'nuwax-cli auto-upgrade-deploy run' for complete upgrade deployment");
-    info!(
-        "   • Run 'nuwax-cli auto-upgrade-deploy delay-time-deploy 2 --unit hours' to delay 2 hours"
-    );
     info!("");
     info!("💡 Tips:");
     info!("   - Configuration file: config.toml (can be manually edited)");

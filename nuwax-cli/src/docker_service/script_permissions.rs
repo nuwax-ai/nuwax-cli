@@ -678,7 +678,10 @@ impl ScriptPermissionManager {
     /// 预检查常见问题脚本
     #[allow(dead_code)]
     pub async fn precheck_common_script_issues(&self) -> DockerServiceResult<Vec<String>> {
+        #[cfg(unix)]
         let mut issues = Vec::new();
+        #[cfg(not(unix))]
+        let issues = Vec::new();
 
         // 检查docker-entrypoint.sh权限
         let entrypoint_script = self.work_dir.join("config/docker-entrypoint.sh");

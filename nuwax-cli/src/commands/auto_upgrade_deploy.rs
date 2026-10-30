@@ -2,28 +2,22 @@ use crate::app::CliApp;
 use crate::cli::AutoUpgradeDeployCommand;
 use crate::commands::{backup, docker_service, update};
 use crate::docker_service::health_check::HealthChecker;
-use crate::docker_utils;
 use anyhow::{Context, Result};
 use client_core::constants::sql;
 use client_core::container::DockerManager;
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
-use client_core::sql_diff::generate_live_schema_diff;
+use client_core::sql_diff::generate_live_schema_diff_multi;
+use client_core::sql_diff::parse_schema_template;
 use client_core::upgrade_strategy::UpgradeStrategy;
+use client_core::utils::archive::{self, ArchiveFormat};
 use rust_i18n::t;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
-
-/// 获取docker-compose文件路径
-fn get_compose_file_path(config_file: &Option<PathBuf>) -> PathBuf {
-    match config_file {
-        Some(path) => path.clone(),
-        None => client_core::constants::docker::get_compose_file_path(),
-    }
-}
+use tracing::{debug, error, info, warn};
 
 /// 创建 DockerManager（统一处理 config_file 和 project_name）
 ///
@@ -34,26 +28,227 @@ fn get_compose_file_path(config_file: &Option<PathBuf>) -> PathBuf {
 /// # 返回
 /// 返回配置好的 DockerManager Arc 引用
 fn create_docker_manager(
+    configured: &Arc<DockerManager>,
     config_file: &Option<PathBuf>,
     project_name: &Option<String>,
 ) -> Result<Arc<DockerManager>> {
-    let compose_path = get_compose_file_path(config_file);
-    let env_path = client_core::constants::docker::get_env_file_path();
-
-    Ok(Arc::new(DockerManager::with_project(
-        compose_path,
-        env_path,
-        project_name.clone(),
-    )?))
+    docker_service::select_docker_manager(configured, config_file.clone(), project_name.clone())
 }
 
-/// 更新配置文件中的版本号并持久化
+/// A package root is independent of the location of the operator's secrets file.
+/// Archive extraction currently supports the canonical package compose only;
+/// reject unsupported overrides before stopping or replacing any deployment.
+struct DeploymentContext {
+    manager: Arc<DockerManager>,
+    package_root: PathBuf,
+}
+
+impl DeploymentContext {
+    fn new(
+        configured: &Arc<DockerManager>,
+        config_file: &Option<PathBuf>,
+        project_name: &Option<String>,
+    ) -> Result<Self> {
+        let manager = create_docker_manager(configured, config_file, project_name)?;
+        let package_root = absolute_deployment_path(Path::new("docker"))?;
+        Self::validate_paths(
+            manager.get_compose_file(),
+            manager.get_env_file(),
+            &package_root,
+        )?;
+        Ok(Self {
+            manager,
+            package_root,
+        })
+    }
+
+    fn validate_paths(compose: &Path, env: &Path, package_root: &Path) -> Result<()> {
+        if absolute_deployment_path(compose)? != package_root.join("docker-compose.yml") {
+            anyhow::bail!(
+                "Automatic package deployment only supports {}/docker-compose.yml; custom Compose overrides cannot safely be applied by this package extractor",
+                package_root.display()
+            );
+        }
+        if absolute_deployment_path(env)? == package_root.join("docker-compose.yml") {
+            anyhow::bail!("The selected environment file must not be the package Compose file");
+        }
+        Ok(())
+    }
+}
+
+fn absolute_deployment_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+/// All selected environment aliases must resolve before stopping services.
+/// The shared transaction protects both the alias and its target in place.
+fn validate_offline_env_aliases(env_path: &Path, _package_root: &Path) -> Result<()> {
+    let selected = absolute_deployment_path(env_path)?;
+    for ancestor in selected.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                fs::canonicalize(ancestor).with_context(|| {
+                    format!(
+                        "Offline environment alias must resolve before stopping services: {}",
+                        ancestor.display(),
+                    )
+                })?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).context("Failed to inspect the selected environment path");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn read_package_env_defaults(path: &Path) -> Result<String> {
+    crate::utils::read_archive_entries(path, &[".env"])?
+        .remove(".env")
+        .map(String::from_utf8)
+        .transpose()
+        .context("Package .env is not valid UTF-8")
+        .map(|value| value.unwrap_or_default())
+}
+
+/// 离线完整包在停止旧服务前必须能提供全部库表模板（多库清单，Fail Fast）。
+/// 每个清单文件恰好一份、内容通过 parse_schema_template 校验（唯一 USE + 非空表集）。
+fn validate_offline_archive_sql(archive_path: &Path) -> Result<()> {
+    let manifest_bytes =
+        crate::utils::read_archive_entries(archive_path, &["config/mysql-schema-manifest.json"])?
+            .remove("config/mysql-schema-manifest.json");
+    let manifest = manifest_bytes
+        .map(|bytes| -> Result<_> {
+            let text =
+                String::from_utf8(bytes).context("Offline schema manifest is not valid UTF-8")?;
+            client_core::mysql_manifest::parse_schema_manifest(&text)
+        })
+        .transpose()?;
+    let expected: Vec<PathBuf> = match manifest.as_ref() {
+        Some(manifest) => manifest
+            .schemas
+            .iter()
+            .map(|schema| PathBuf::from(&schema.path))
+            .collect(),
+        None => {
+            let mut names = vec!["docker-compose.yml"];
+            names.extend(sql::OPTIONAL_SCHEMA_SQL_FILES.iter().copied());
+            let entries = crate::utils::read_archive_entries(archive_path, &names)?;
+            let compose = entries
+                .get("docker-compose.yml")
+                .map(|bytes| std::str::from_utf8(bytes))
+                .transpose()
+                .context("Offline Compose file is not valid UTF-8")?;
+            crate::utils::legacy_schema::schema_paths(compose, |path| entries.contains_key(path))?
+                .into_iter()
+                .map(PathBuf::from)
+                .collect()
+        }
+    };
+    let is_target = |path: &Path| -> Option<usize> { expected.iter().position(|e| e == path) };
+
+    let mut found: Vec<Option<String>> = vec![None; expected.len()];
+    let mut record = |path: &Path, content: String| -> Result<()> {
+        if let Some(index) = is_target(path) {
+            if found[index].is_some() {
+                return Err(anyhow::anyhow!(
+                    "Duplicate {} in offline archive",
+                    expected[index].display()
+                ));
+            }
+            found[index] = Some(content);
+        }
+        Ok(())
+    };
+
+    match archive::detect_format_by_magic(archive_path)? {
+        ArchiveFormat::Zip => {
+            let file = fs::File::open(archive_path)?;
+            let mut zip = zip::ZipArchive::new(file)?;
+            for idx in 0..zip.len() {
+                let mut entry = zip.by_index(idx)?;
+                let raw_path = entry
+                    .enclosed_name()
+                    .ok_or_else(|| anyhow::anyhow!("Unsafe archive entry: {}", entry.name()))?;
+                let path = raw_path
+                    .strip_prefix("docker")
+                    .unwrap_or(raw_path.as_ref())
+                    .to_path_buf();
+                if is_target(&path).is_some() {
+                    let mut content = String::new();
+                    entry.read_to_string(&mut content)?;
+                    record(&path, content)?;
+                }
+            }
+        }
+        ArchiveFormat::TarGz => {
+            let file = fs::File::open(archive_path)?;
+            let decoder = flate2::read::GzDecoder::new(file);
+            let mut tar = tar::Archive::new(decoder);
+            for entry in tar.entries()? {
+                let mut entry = entry?;
+                let raw_path = entry.path()?.to_path_buf();
+                let path = raw_path
+                    .strip_prefix("docker")
+                    .unwrap_or(raw_path.as_ref())
+                    .to_path_buf();
+                if is_target(&path).is_some() {
+                    let mut content = String::new();
+                    entry.read_to_string(&mut content)?;
+                    record(&path, content)?;
+                }
+            }
+        }
+    }
+
+    for (template_path, content) in expected.iter().zip(found) {
+        let content = content.ok_or_else(|| {
+            anyhow::anyhow!("Offline archive is missing {}", template_path.display())
+        })?;
+        let template = parse_schema_template(&content)
+            .with_context(|| format!("Invalid schema template {}", template_path.display()))?;
+        if let Some(manifest) = manifest.as_ref()
+            && let Some(schema) = manifest
+                .schemas
+                .iter()
+                .find(|schema| Path::new(&schema.path) == template_path.as_path())
+            && template.database != schema.database
+        {
+            anyhow::bail!(
+                "Offline schema {} USE does not match its manifest database",
+                template_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 更新配置文件中的版本号与镜像交付通道并持久化
 ///
 /// 使用 Arc::make_mut 来获取可变引用，如果 Arc 有多个引用会自动克隆
 ///
 /// # 参数
 /// - `config`: 应用配置的可变 Arc 引用
 /// - `version`: 新的版本号字符串
+/// - `channel`: 刚刚成功部署所用的镜像交付通道
 ///
 /// # 错误
 /// 如果保存配置文件失败会返回错误
@@ -61,9 +256,13 @@ fn update_config_version(
     config: &mut Arc<client_core::config::AppConfig>,
     config_path: &Path,
     version: &str,
+    channel: client_core::config::DockerChannel,
 ) -> Result<()> {
     let config_mut = Arc::make_mut(config);
     config_mut.write_docker_versions(version.to_string());
+    // 版本与通道必须一起落盘：只记版本会让下一次 `prepare_services` 沿用上一条命令的通道，
+    // 而两条通道对"镜像从哪来"的要求相反。
+    config_mut.write_docker_channel(channel);
 
     config_mut
         .save_to_file(config_path)
@@ -71,66 +270,666 @@ fn update_config_version(
 
     info!(
         version = version,
+        channel = channel.as_str(),
         "✅ Updated and saved the version in configuration file"
     );
     Ok(())
 }
 
-fn create_docker_backup_path() -> PathBuf {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    PathBuf::from(format!(
-        ".docker.offline-backup-{}-{timestamp}",
-        std::process::id()
-    ))
-}
-
-fn restore_docker_backup(backup_dir: &Path, docker_dir: &Path) -> Result<()> {
-    if docker_dir.exists() {
-        fs::remove_dir_all(docker_dir).context("Failed to remove partial docker directory")?;
-    }
-
-    if backup_dir.exists() {
-        fs::rename(backup_dir, docker_dir)
-            .context("Failed to restore previous docker directory")?;
-    }
-
+/// 把本次命令的镜像交付通道写进配置（内存与磁盘），供紧随其后的 `prepare_services` 读取。
+///
+/// 必须停在停服/替包之前：`prepare_services` 用配置状态决定"加载包内 tar"还是"按 Compose
+/// 引用从仓库取镜像"，沿用上一条命令的记录会让本次命令自带的包被无视（胖包的 tar 不加载，
+/// 瘦包则去找并不存在的 tar）。版本号不在这里写 —— 部署失败回滚后机器跑的还是旧版本。
+fn record_deployment_channel(
+    app: &mut CliApp,
+    channel: client_core::config::DockerChannel,
+) -> Result<()> {
+    let config_mut = Arc::make_mut(&mut app.config);
+    config_mut.write_docker_channel(channel);
+    config_mut
+        .save_to_file(&app.config_path)
+        .context(t!("auto_upgrade_deploy.save_config_failed"))?;
+    info!(
+        "📡 Image delivery channel for this deployment: {channel}",
+        channel = channel.as_str()
+    );
     Ok(())
 }
 
-fn restore_preserved_docker_dirs(backup_dir: &Path, docker_dir: &Path) -> Result<()> {
-    if !backup_dir.exists() {
-        return Ok(());
+async fn wait_for_mysql_connection(compose_path: &Path, env_path: &Path) -> Result<MySqlExecutor> {
+    let compose = compose_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Compose path is not valid UTF-8"))?;
+    let env = env_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Compose env path is not valid UTF-8"))?;
+    // root 管理连接：多库 Live Diff 需要建库/授权与跨库 DDL 权限（应用账号不具备）
+    let config = MySqlConfig::for_container_admin(Some(compose), Some(env))
+        .await
+        .context("Failed to resolve MySQL admin connection from Compose")?;
+    let executor = MySqlExecutor::new(config);
+    let timeout = Duration::from_secs(sql::MYSQL_READY_TIMEOUT);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_error = "no connection attempt completed".to_string();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow::anyhow!(
+                "MySQL was not connectable within {}s: {last_error}",
+                timeout.as_secs()
+            ));
+        }
+        let attempt_timeout = remaining.min(Duration::from_secs(10));
+        match tokio::time::timeout(attempt_timeout, executor.test_connection()).await {
+            Ok(Ok(())) => return Ok(executor),
+            Ok(Err(error)) => {
+                last_error = crate::format_error_with_env(&anyhow::Error::new(error), env_path)
+            }
+            Err(_) => last_error = "connection attempt timed out".to_string(),
+        }
+        debug!(error = %last_error, "Waiting for MySQL to accept SQL connections");
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        sleep(remaining.min(Duration::from_secs(2))).await;
+    }
+}
+
+struct StagedDeployment<'a> {
+    had_existing_compose: bool,
+    target_version: &'a str,
+    /// 本次部署用的镜像交付通道；成功后与版本号一起写回配置（§5.1：这是必须持久化的部署事实，
+    /// 不能让 `prepare_services` 靠 `docker/images` 目录是否存在来猜）。
+    channel: client_core::config::DockerChannel,
+    database_starting: bool,
+    replacement: Option<&'a mut crate::utils::package_replace::PackageReplacement>,
+}
+
+async fn run_staged_deployment(
+    app: &mut CliApp,
+    frontend_port: Option<u16>,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+    context: &DeploymentContext,
+    staged: &mut StagedDeployment<'_>,
+) -> Result<()> {
+    // 部署前校验迁移计划：manifest v1（解析+结构+文件校验）或 legacy 固定清单
+    // （缺文件/解析失败即 Fail Fast）；顺带收集库名供配置预检校验应用连接目标
+    let migration_plan = resolve_migration_plan(&context.package_root)?;
+    let (manifest, template_databases) = match &migration_plan {
+        MigrationPlan::Manifest(manifest) => (Some(manifest), manifest.database_names()),
+        MigrationPlan::Legacy => (
+            None,
+            crate::utils::legacy_schema::disk_templates(
+                &context.package_root,
+                context.manager.get_compose_file(),
+            )?
+            .into_iter()
+            .map(|template| template.database)
+            .collect(),
+        ),
+    };
+
+    let docker_manager = &context.manager;
+    docker_manager.invalidate_compose_config_cache();
+
+    // C01/C03/C04: 候选 Compose + 合并后 .env 的预检（启动 mysql、修改数据库之前的最后一道闸）：
+    // 必填键非空、应用连接与 manifest 逐条映射一致（legacy 则按约定键）、
+    // 宿主产物完整 + 交付清单 hash（失败只报键名/库名/路径，不含任何凭据）
+    let delivery = load_delivery_manifest(&context.package_root)?;
+    client_core::container::preflight::preflight_deploy_config_at(
+        docker_manager.get_compose_file(),
+        docker_manager.get_env_file(),
+        &context.package_root,
+        &template_databases,
+        manifest.map(std::convert::AsRef::as_ref),
+        delivery.as_ref(),
+    )
+    .context("Deployment configuration preflight failed")?;
+    if let Some(manifest) = manifest {
+        client_core::container::preflight::validate_initdb_mount_contract_at(
+            docker_manager.get_compose_file(),
+            &context.package_root,
+            manifest,
+        )
+        .context("Candidate compose violates the initdb mount contract")?;
     }
 
-    fs::create_dir_all(docker_dir).context("Failed to create docker directory")?;
+    if staged.had_existing_compose {
+        // stop_docker_services_and_wait 在没有运行容器时可能跳过 down；这里清理旧的已停止容器。
+        docker_manager
+            .stop_services()
+            .await
+            .context("Failed to remove stopped containers from the previous deployment")?;
+    }
+    docker_service::prepare_docker_services(app, frontend_port, config_file.clone(), project_name)
+        .await?;
+    // prepare_docker_services may update .env (frontend port).
+    docker_manager.invalidate_compose_config_cache();
 
-    for dir_name in client_core::constants::docker::EXCLUDE_DIRS {
-        let old_path = backup_dir.join(dir_name);
-        if !old_path.exists() {
-            continue;
+    let mysql_stage = docker_manager.get_service_dependency_closure("mysql")?;
+    let all_services = docker_manager.get_compose_service_names().await?;
+    info!("▶️ Starting MySQL and its Compose dependencies...");
+    // MySQL initdb can alter data before Live Diff; from this boundary onward
+    // retain package recovery files instead of automatically rolling files back.
+    if let Some(replacement) = staged.replacement.as_deref_mut() {
+        replacement.mark_database_starting()?;
+    }
+    staged.database_starting = true;
+    docker_manager
+        .up_services(&["mysql".to_string()], false)
+        .await?;
+    let mysql_id_before = docker_manager.get_service_container_id("mysql").await?;
+    let executor = wait_for_mysql_connection(
+        docker_manager.get_compose_file(),
+        docker_manager.get_env_file(),
+    )
+    .await?;
+
+    // MySQL decides whether initdb/seeds apply from the actual data volume.
+    // Once it is connectable, always perform idempotent bootstrap/Live Diff:
+    // an empty host directory or a custom data mount cannot justify skipping it.
+    info!("🔄 MySQL is connectable; applying live schema differences before applications start");
+    execute_sql_diff_upgrade(&executor, &context.package_root).await?;
+
+    let startup_layers = docker_manager.get_compose_startup_layers(&mysql_stage)?;
+    for layer in startup_layers {
+        info!(services = %layer.join(", "), "▶️ Starting next Compose dependency layer...");
+        docker_manager
+            .up_services_without_dependencies(&layer, true)
+            .await?;
+        docker_manager
+            .wait_for_compose_services_ready(
+                &layer,
+                Duration::from_secs(client_core::constants::timeout::HEALTH_CHECK_TIMEOUT),
+            )
+            .await?;
+    }
+
+    let mysql_id_after = docker_manager.get_service_container_id("mysql").await?;
+    if mysql_id_before != mysql_id_after {
+        return Err(anyhow::anyhow!(
+            "MySQL container changed while starting application services; refusing to mark deployment successful"
+        ));
+    }
+
+    let mut all_service_names: Vec<String> = all_services.into_iter().collect();
+    all_service_names.sort();
+    docker_manager
+        .wait_for_compose_services_ready(
+            &all_service_names,
+            Duration::from_secs(client_core::constants::timeout::HEALTH_CHECK_TIMEOUT),
+        )
+        .await?;
+    let health_checker = HealthChecker::new(docker_manager.clone());
+    health_checker
+        .wait_for_services_ready(Duration::from_secs(
+            client_core::constants::timeout::HEALTH_CHECK_INTERVAL,
+        ))
+        .await
+        .context("Docker services did not become healthy after MySQL migration")?;
+
+    let app_config_path = app.config_path.clone();
+    update_config_version(
+        &mut app.config,
+        &app_config_path,
+        staged.target_version,
+        staged.channel,
+    )?;
+    info!("✅ Deployment completed after MySQL migration and service health checks");
+    Ok(())
+}
+
+/// 迁移计划：包内 mysql-schema-manifest.json（v1 契约）或 legacy 固定清单
+enum MigrationPlan {
+    Manifest(Box<client_core::mysql_manifest::SchemaManifest>),
+    Legacy,
+}
+
+/// 解析迁移计划：manifest 存在 → 解析 + 结构校验 + 文件校验（Fail Fast，
+/// 不降级到扫描 SQL）；不存在 → legacy。`docker_root` 为包内 docker/ 目录。
+fn resolve_migration_plan(docker_root: &Path) -> Result<MigrationPlan> {
+    let manifest_relative = Path::new(sql::SCHEMA_MANIFEST_PATH)
+        .strip_prefix("docker")
+        .unwrap_or(Path::new(sql::SCHEMA_MANIFEST_PATH));
+    let manifest_path = docker_root.join(manifest_relative);
+    if !manifest_path.exists() {
+        info!("📦 No mysql-schema-manifest.json in package; using legacy fixed schema list");
+        return Ok(MigrationPlan::Legacy);
+    }
+    let text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let manifest = client_core::mysql_manifest::parse_schema_manifest(&text)
+        .with_context(|| format!("Invalid {}", manifest_path.display()))?;
+    client_core::mysql_manifest::validate_manifest_files(&manifest, docker_root)
+        .context("mysql-schema-manifest references invalid files")?;
+    info!(
+        databases = ?manifest.database_names(),
+        schemas = manifest.schemas.len(),
+        "📦 mysql-schema-manifest v1 loaded"
+    );
+    Ok(MigrationPlan::Manifest(Box::new(manifest)))
+}
+
+/// 读取包内交付清单（DELIVERY_MANIFEST.json v1）。
+/// 文件不存在 → None（legacy 包）；存在但损坏/不支持 → Fail Fast。
+fn load_delivery_manifest(
+    docker_root: &Path,
+) -> Result<Option<client_core::container::preflight::DeliveryManifest>> {
+    let relative = Path::new(sql::DELIVERY_MANIFEST_PATH)
+        .strip_prefix("docker")
+        .unwrap_or(Path::new(sql::DELIVERY_MANIFEST_PATH));
+    let path = docker_root.join(relative);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let delivery = client_core::container::preflight::parse_delivery_manifest(&text)
+        .with_context(|| format!("Invalid {}", path.display()))?;
+    Ok(Some(delivery))
+}
+
+/// 停止旧服务前的候选包预检（P1#3）：直接读取已下载/本地归档的少量条目
+/// （compose / .env / schema manifest / 交付清单 / 关键 schema / 组件产物），
+/// 不重复下载大包、不整包预解压。新增必填键缺失、坏清单、patch 缺关键
+/// schema、连接映射错误都在停止旧服务之前失败（旧服务保持运行）。
+fn preflight_candidate_package_at(
+    archive_path: &Path,
+    is_patch: bool,
+    user_env_path: &Path,
+) -> Result<()> {
+    preflight_candidate_package_with_compose_at(archive_path, is_patch, user_env_path, None, &[])
+}
+
+fn preflight_candidate_package_with_compose_at(
+    archive_path: &Path,
+    is_patch: bool,
+    user_env_path: &Path,
+    current_compose: Option<&Path>,
+    changed_paths: &[String],
+) -> Result<()> {
+    crate::utils::legacy_schema::validate_changed_paths(changed_paths)?;
+    if is_patch && archive::detect_format_by_magic(archive_path)? != ArchiveFormat::Zip {
+        anyhow::bail!(
+            "Incremental package application requires ZIP; use a full package for TAR.GZ archives"
+        );
+    }
+    let base_names = [
+        "docker-compose.yml",
+        ".env",
+        "config/mysql-schema-manifest.json",
+        "DELIVERY_MANIFEST.json",
+    ];
+    let entries =
+        crate::utils::read_archive_entries(archive_path, &base_names).with_context(|| {
+            format!(
+                "Failed to read candidate package entries from {}",
+                archive_path.display()
+            )
+        })?;
+
+    let legacy_patch = is_patch
+        && !entries.contains_key("config/mysql-schema-manifest.json")
+        && !entries.contains_key("DELIVERY_MANIFEST.json");
+    let compose_text = match entries.get("docker-compose.yml") {
+        Some(bytes) => String::from_utf8(bytes.clone())
+            .context("candidate package docker-compose.yml is not valid UTF-8")?,
+        None if legacy_patch => {
+            if !crate::utils::legacy_schema::can_retain("docker-compose.yml", changed_paths) {
+                anyhow::bail!("Legacy patch changes Compose but does not include its replacement");
+            }
+            let path = current_compose.context(
+                "Legacy patch without Compose requires the selected current Compose file",
+            )?;
+            fs::read_to_string(path)
+                .with_context(|| format!("Failed to read current Compose {}", path.display()))?
         }
+        None => anyhow::bail!("candidate package has no docker-compose.yml"),
+    };
 
-        let new_path = docker_dir.join(dir_name);
-        if new_path.exists() {
-            if new_path.is_dir() {
-                fs::remove_dir_all(&new_path).with_context(|| {
-                    format!("Failed to replace preserved directory: {dir_name}")
+    // 合并 env：用户现值完全保留 + 包内默认补键；解析走与运行时相同的
+    // Compose env-file 解析器（引号/行内注释/插值-未定义为空/优先级，F03）
+    let user_env = match fs::read_to_string(user_env_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to read selected environment file {}",
+                    user_env_path.display()
+                )
+            });
+        }
+    };
+    let package_env = entries
+        .get(".env")
+        .map(|bytes| String::from_utf8(bytes.clone()))
+        .transpose()
+        .context("Candidate package .env is not valid UTF-8")?
+        .unwrap_or_default();
+    let values = client_core::container::preflight::compose_env_values_from_text(
+        &crate::utils::env_merge::merge_env_contents(&user_env, &package_env)?,
+    )?;
+
+    let missing =
+        client_core::container::preflight::missing_required_env_keys(&compose_text, &values)?;
+    if !missing.is_empty() {
+        return Err(anyhow::anyhow!(
+            "candidate package requires environment keys that are missing or empty: {missing:?}; \
+             define them in the selected environment file before upgrading"
+        ));
+    }
+
+    // schema manifest：存在即必须可解析且引用文件都在归档内（不降级、不扫描 SQL）
+    let manifest = match entries.get("config/mysql-schema-manifest.json") {
+        Some(bytes) => {
+            let text = String::from_utf8(bytes.clone())
+                .context("mysql-schema-manifest.json is not valid UTF-8")?;
+            let manifest = client_core::mysql_manifest::parse_schema_manifest(&text)
+                .context("candidate package carries an invalid mysql-schema-manifest")?;
+            let referenced = manifest.referenced_paths();
+            let refs: Vec<&str> = referenced.iter().map(String::as_str).collect();
+            let ref_entries = crate::utils::read_archive_entries(archive_path, &refs)?;
+            for path in &refs {
+                let bytes = ref_entries.get(*path).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "mysql-schema-manifest references {path}, missing from the package"
+                    )
                 })?;
-            } else {
-                fs::remove_file(&new_path)
-                    .with_context(|| format!("Failed to replace preserved file: {dir_name}"))?;
+                if bytes.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "mysql-schema-manifest references {path}, but the package entry is empty"
+                    ));
+                }
+            }
+            client_core::container::preflight::validate_application_connections(
+                &compose_text,
+                &values,
+                &manifest,
+            )
+            .context("candidate package connection mapping does not match the migration targets")?;
+            client_core::container::preflight::validate_initdb_mount_contract(
+                &compose_text,
+                &manifest,
+            )
+            .context("candidate package initdb mount contract is violated")?;
+            Some(manifest)
+        }
+        None => {
+            let optional =
+                crate::utils::read_archive_entries(archive_path, sql::OPTIONAL_SCHEMA_SQL_FILES)?;
+            let paths = crate::utils::legacy_schema::schema_paths(Some(&compose_text), |path| {
+                optional.contains_key(path)
+                    || (legacy_patch
+                        && current_compose
+                            .and_then(Path::parent)
+                            .is_some_and(|root| root.join(path).exists()))
+            })?;
+            let names: Vec<&str> = paths.iter().map(String::as_str).collect();
+            let schemas = crate::utils::read_archive_entries(archive_path, &names)?;
+            // A legacy patch may retain Compose, but never retain a stale schema.
+            let templates = crate::utils::legacy_schema::parse_templates(&paths, |path| {
+                let bytes = schemas.get(path).ok_or_else(|| {
+                    anyhow::anyhow!("candidate package is missing required schema file {path}")
+                })?;
+                String::from_utf8(bytes.clone()).map_err(Into::into)
+            })?;
+            let databases = templates
+                .into_iter()
+                .map(|template| template.database)
+                .collect::<Vec<_>>();
+            client_core::container::preflight::validate_local_db_targets(&values, &databases)?;
+            None
+        }
+    };
+    let _ = manifest;
+
+    // 交付清单：存在即校验（hash + release 身份 + 架构一致）
+    let mut delivery = None;
+    if let Some(bytes) = entries.get("DELIVERY_MANIFEST.json") {
+        let text = String::from_utf8(bytes.clone())
+            .context("DELIVERY_MANIFEST.json is not valid UTF-8")?;
+        let parsed = client_core::container::preflight::parse_delivery_manifest(&text)
+            .context("candidate package carries an invalid DELIVERY_MANIFEST")?;
+        let mut needed: Vec<String> = parsed.mysql.files.keys().cloned().collect();
+        needed.extend(
+            parsed
+                .components
+                .values()
+                .flat_map(|component| component.artifacts.keys().cloned()),
+        );
+        needed.push(parsed.compose.path.clone());
+        let refs: Vec<&str> = needed.iter().map(String::as_str).collect();
+        let delivery_entries = crate::utils::read_archive_entries(archive_path, &refs)?;
+        client_core::container::preflight::verify_delivery_against_entries(
+            &parsed,
+            &delivery_entries,
+            Some(crate::docker_service::get_system_architecture().as_str()),
+        )
+        .context("candidate package contents do not match its DELIVERY_MANIFEST")?;
+        delivery = Some(parsed);
+    }
+
+    // 组件产物挂载存在性：候选 compose 挂载引用的组件路径必须在归档内
+    let component_roots: Vec<String> = delivery
+        .as_ref()
+        .map(|parsed| {
+            let mut roots: Vec<String> = parsed
+                .components
+                .values()
+                .flat_map(|component| {
+                    component
+                        .artifacts
+                        .keys()
+                        .map(|path| path.split('/').next().unwrap_or(path).to_string())
+                })
+                .collect();
+            roots.sort();
+            roots.dedup();
+            roots
+        })
+        .unwrap_or_else(|| vec!["im-app".to_string(), "repo-collab-app".to_string()]);
+    let mounts = client_core::container::preflight::collect_bind_mount_sources(&compose_text)?;
+    let component_mounts: Vec<String> = mounts
+        .into_iter()
+        .filter(|source| {
+            component_roots
+                .iter()
+                .any(|root| source == root || source.starts_with(&format!("{root}/")))
+        })
+        .collect();
+    if !component_mounts.is_empty() {
+        let refs: Vec<&str> = component_mounts.iter().map(String::as_str).collect();
+        let mount_entries = crate::utils::read_archive_entries(archive_path, &refs)?;
+        for source in &component_mounts {
+            // 文件形态（叶子含扩展名）要求精确条目；目录形态允许 files-only 归档
+            //（无显式目录条目，仅有 prefix/file 后代）
+            let looks_like_file = source
+                .rsplit('/')
+                .next()
+                .is_some_and(|leaf| leaf.contains('.'));
+            let present = mount_entries.contains_key(source.as_str())
+                || (!looks_like_file && crate::utils::archive_contains(archive_path, source)?);
+            let retained = legacy_patch
+                && crate::utils::legacy_schema::can_retain(source, changed_paths)
+                && current_compose
+                    .and_then(Path::parent)
+                    .is_some_and(|root| root.join(source).exists());
+            if !present && !retained {
+                return Err(anyhow::anyhow!(
+                    "candidate compose mounts '{source}' but the candidate deployment does not contain it"
+                ));
             }
         }
-
-        fs::rename(&old_path, &new_path)
-            .with_context(|| format!("Failed to restore preserved directory: {dir_name}"))?;
-        info!("🛡️ Restored preserved docker directory: {dir_name}");
     }
 
+    if legacy_patch {
+        // Directory presence alone is insufficient: operations may remove a
+        // required child while leaving siblings available in the patch.
+        let required = crate::utils::legacy_schema::component_entrypoints(&compose_text)?;
+        let entries = crate::utils::read_archive_entries(archive_path, &required)?;
+        for path in required {
+            if entries.get(path).is_some_and(Vec::is_empty) {
+                anyhow::bail!("Legacy patch supplies an empty component file {path}");
+            }
+            let supplied = entries.contains_key(path);
+            let retained = crate::utils::legacy_schema::can_retain(path, changed_paths)
+                && current_compose.and_then(Path::parent).is_some_and(|root| {
+                    fs::metadata(root.join(path))
+                        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+                });
+            if !supplied && !retained {
+                anyhow::bail!("Legacy patch candidate is missing required component file {path}");
+            }
+        }
+    }
+
+    info!(
+        archive = %archive_path.display(),
+        "✅ Candidate package preflight passed (required keys, schema manifest, connections, delivery, artifacts)"
+    );
     Ok(())
+}
+
+/// 在线升级的候选包预检包装：解析策略对应本地包路径并执行归档预检
+fn preflight_candidate_package(
+    app: &CliApp,
+    strategy: &UpgradeStrategy,
+    user_env_path: &Path,
+    current_compose: &Path,
+) -> Result<()> {
+    let Some(path) = docker_service::package_path_for_strategy(app, strategy)? else {
+        return Ok(());
+    };
+    if !path.exists() {
+        return Err(anyhow::anyhow!(
+            "upgrade package is not available after download: {}",
+            path.display()
+        ));
+    }
+    let changed_paths = match strategy {
+        UpgradeStrategy::PatchUpgrade { patch_info, .. } => patch_info.get_changed_files(),
+        _ => Vec::new(),
+    };
+    let is_patch = matches!(strategy, UpgradeStrategy::PatchUpgrade { .. });
+    preflight_candidate_package_with_compose_at(
+        &path,
+        is_patch,
+        user_env_path,
+        Some(current_compose),
+        &changed_paths,
+    )
+}
+
+/// 停止旧服务前的当前配置预检（C01）：必填键、库目标/连接映射、宿主产物完整性。
+/// 路径来自最终选定的 DockerManager（--config / 项目配置覆盖生效，F06）。
+/// 候选新包的同一预检在解压后、修改数据库前由 `run_staged_deployment` 再执行一次。
+fn preflight_current_config(
+    compose_path: &Path,
+    env_path: &Path,
+    docker_root: &Path,
+) -> Result<()> {
+    if !compose_path.is_file() {
+        return Ok(());
+    }
+    let plan = resolve_migration_plan(docker_root)?;
+    let (manifest, template_databases) = match &plan {
+        MigrationPlan::Manifest(manifest) => (Some(manifest), manifest.database_names()),
+        MigrationPlan::Legacy => (
+            None,
+            crate::utils::legacy_schema::disk_templates(docker_root, compose_path)?
+                .into_iter()
+                .map(|template| template.database)
+                .collect(),
+        ),
+    };
+    let delivery = load_delivery_manifest(docker_root)?;
+    client_core::container::preflight::preflight_deploy_config_at(
+        compose_path,
+        env_path,
+        docker_root,
+        &template_databases,
+        manifest.map(std::convert::AsRef::as_ref),
+        delivery.as_ref(),
+    )
+    .context("Configuration preflight failed before stopping services")
+}
+
+/// Immutable in-memory snapshot of the selected operator environment.
+/// Capture before stopping services; apply package defaults or restore the
+/// original contents atomically to the same file, without secrets backup files.
+#[cfg(test)]
+struct OnlineEnvPreserve {
+    env_path: PathBuf,
+    preserved: Option<String>,
+    permissions: Option<fs::Permissions>,
+}
+
+#[cfg(test)]
+impl OnlineEnvPreserve {
+    fn capture(env_path: &Path) -> Result<Self> {
+        let preserved = match fs::read_to_string(env_path) {
+            Ok(contents) => Some(contents),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && fs::symlink_metadata(env_path).is_err() =>
+            {
+                None
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Failed to preserve selected environment file {}",
+                        env_path.display()
+                    )
+                });
+            }
+        };
+        let permissions = if preserved.is_some() {
+            Some(fs::metadata(env_path)?.permissions())
+        } else {
+            None
+        };
+        Ok(Self {
+            env_path: env_path.to_path_buf(),
+            preserved,
+            permissions,
+        })
+    }
+
+    fn merge_defaults(&self, defaults: &str) -> Result<()> {
+        let merged = crate::utils::env_merge::merge_env_contents(
+            self.preserved.as_deref().unwrap_or_default(),
+            defaults,
+        )?;
+        crate::utils::env_merge::write_env_contents(
+            &self.env_path,
+            &merged,
+            self.permissions.clone(),
+        )
+    }
+
+    fn restore(&self) -> Result<()> {
+        if let Some(contents) = self.preserved.as_ref() {
+            crate::utils::env_merge::write_env_contents(
+                &self.env_path,
+                contents,
+                self.permissions.clone(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn env_snapshot_for_strategy(
+    strategy: &UpgradeStrategy,
+    env_path: &Path,
+) -> Result<Option<OnlineEnvPreserve>> {
+    match strategy {
+        UpgradeStrategy::NoUpgrade { .. } => Ok(None),
+        _ => OnlineEnvPreserve::capture(env_path).map(Some),
+    }
 }
 
 /// 运行自动升级部署相关命令的统一入口
@@ -143,9 +942,19 @@ pub async fn handle_auto_upgrade_deploy_command(
             port,
             config,
             project,
+            force_full,
         } => {
             info!("🚀 Starting auto-upgrade deployment...");
-            run_auto_upgrade_deploy(app, port, config, project).await
+            run_auto_upgrade_deploy(app, port, config, project, force_full).await
+        }
+        AutoUpgradeDeployCommand::RegistryDeploy {
+            port,
+            config,
+            project,
+            force_full,
+        } => {
+            info!("🚀 Starting registry (slim) deployment...");
+            run_registry_deploy(app, port, config, project, force_full).await
         }
         AutoUpgradeDeployCommand::Status => {
             info!("Show auto-upgrade deployment status");
@@ -164,12 +973,114 @@ pub async fn handle_auto_upgrade_deploy_command(
     }
 }
 
-/// 执行自动升级部署流程
+/// Record the version of the package being deployed, rather than the version
+/// advertised by a server that may be behind the installed deployment.
+fn deployment_target_version(strategy: &UpgradeStrategy, deployed_version: &str) -> String {
+    match strategy {
+        UpgradeStrategy::FullUpgrade { target_version, .. }
+        | UpgradeStrategy::PatchUpgrade { target_version, .. } => target_version.to_string(),
+        UpgradeStrategy::NoUpgrade { .. } => deployed_version.to_owned(),
+    }
+}
+
+/// 本次部署应当记进配置的镜像交付通道。
+///
+/// 没有包可换（清单上的版本本机已经装着）时不能改成命令自带的那条通道：磁盘上的产物仍属于
+/// 本机上次部署用的通道，翻过去会让下一次部署按错误的通道取镜像。危险方向是真实的——
+/// 瘦通道换包时会清掉历史 tar，此后 `Images` 记录连 `docker/images` 目录都找不到。
+fn channel_to_record(
+    package_path: Option<&Path>,
+    requested: client_core::config::DockerChannel,
+    recorded: client_core::config::DockerChannel,
+) -> client_core::config::DockerChannel {
+    if package_path.is_some() {
+        requested
+    } else {
+        recorded
+    }
+}
+
+/// 按候选包自身判定镜像交付通道：`docker/images/` 里带镜像 tar → 离线全量通道，
+/// 否则为瘦（registry）通道。
+///
+/// 判定对象是**包的固有内容**而不是机器历史状态，不违反"通道必须显式记录、不许
+/// 靠 `docker/images` 目录嗅探"的约束（那约束针对的是已部署机器的目录）。offline
+/// 包可能是任一通道的交付物，记账必须跟包走：瘦包被记成 images 后，下次
+/// `auto-upgrade-deploy run` 会选 full 清单并按离线 tar 加载，报
+/// `No image files found`（2026-10-26 beta slim 0.0.136 发布实测踩中）。
+///
+/// 归档读不开时保守回退 images（与既有行为一致）；调用点在预检之后，包必然可读。
+fn offline_package_channel(archive_path: &Path) -> client_core::config::DockerChannel {
+    use client_core::config::DockerChannel;
+    use client_core::constants::docker::{DOCKER_DIR_NAME, IMAGES_DIR_NAME};
+    let offline_prefix = format!("{DOCKER_DIR_NAME}/{IMAGES_DIR_NAME}/");
+    let has_offline_tar = std::fs::File::open(archive_path)
+        .ok()
+        .and_then(|file| zip::ZipArchive::new(file).ok())
+        .is_some_and(|mut zip| {
+            (0..zip.len()).any(|index| {
+                zip.by_index(index).is_ok_and(|entry| {
+                    !entry.is_dir()
+                        && entry.name().starts_with(&offline_prefix)
+                        && entry.name().ends_with(".tar")
+                })
+            })
+        });
+    if has_offline_tar {
+        DockerChannel::Images
+    } else {
+        DockerChannel::Registry
+    }
+}
+
+/// 执行自动升级部署流程（离线全量通道：包内自带 docker/images/*.tar）
 pub async fn run_auto_upgrade_deploy(
     app: &mut CliApp,
     frontend_port: Option<u16>,
     config_file: Option<PathBuf>,
     project_name: Option<String>,
+    force_full: bool,
+) -> Result<()> {
+    run_channel_deployment(
+        app,
+        frontend_port,
+        config_file,
+        project_name,
+        client_core::config::DockerChannel::Images,
+        force_full,
+    )
+    .await
+}
+
+/// 执行瘦通道部署：清单取自 registry.json，包内没有离线镜像 tar，
+/// 镜像在**停服之前**按候选包 Compose 的引用从仓库拉取。
+pub async fn run_registry_deploy(
+    app: &mut CliApp,
+    frontend_port: Option<u16>,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+    force_full: bool,
+) -> Result<()> {
+    run_channel_deployment(
+        app,
+        frontend_port,
+        config_file,
+        project_name,
+        client_core::config::DockerChannel::Registry,
+        force_full,
+    )
+    .await
+}
+
+/// 两条通道共用同一条部署时序：换文件、回滚、MySQL 边界这些危险部分只有一份实现，
+/// 差异只有三处——读哪份清单、停服前是否先拉镜像、成功后把 `docker_channel` 记成什么。
+async fn run_channel_deployment(
+    app: &mut CliApp,
+    frontend_port: Option<u16>,
+    config_file: Option<PathBuf>,
+    project_name: Option<String>,
+    channel: client_core::config::DockerChannel,
+    force_full: bool,
 ) -> Result<()> {
     info!("🚀 Starting auto-upgrade deployment...");
 
@@ -189,51 +1100,102 @@ pub async fn run_auto_upgrade_deploy(
     // 注意：CLI版本检查已经在 main.rs 中优先处理，这里不再重复检查
     info!("✅ CLI version pre-check complete, starting upgrade deployment");
 
+    let context = DeploymentContext::new(&app.docker_manager, &config_file, &project_name)?;
+    let docker_manager = &context.manager;
+
     // 1. 获取最新版本信息并下载
     info!("📥 Downloading the latest Docker service version...");
 
-    // 获取最新版本信息
-    let latest_version = match app.api_client.get_enhanced_service_manifest().await {
-        Ok(enhanced_service_manifest) => {
-            let latest_version = enhanced_service_manifest.version.to_string();
-
-            info!(current_version = %app.config.get_docker_versions(), target_version = %latest_version, "📋 Version information detected");
-            latest_version
-        }
-        Err(e) => {
-            warn!(error = %e, fallback_version = %app.config.get_docker_versions(), "⚠️ Failed to fetch version info, falling back to configured version");
-            app.config.get_docker_versions()
-        }
-    };
-
-    // 下载服务包，但先不解压
+    // 下载策略只读取一次 manifest；替包时记录策略目标，无替包时保留当前部署版本。
+    // 清单来源由命令决定，而不是由本机上次用哪条通道部署决定：同一台机器可以在两条
+    // 通道之间切换，读错清单会拿到与本命令语义不符的包。
+    // force_full 是"同版本跨通道换包/强制重下"的唯一入口：默认 false 时同版本仍判
+    // NoUpgrade（行为不变），置位后策略层走 FullUpgrade 并按本命令的通道取清单。
     let upgrade_args = crate::cli::UpgradeArgs {
-        force: false,
+        force: force_full,
         check: false,
     };
-    let upgrade_strategy = update::run_upgrade(app, upgrade_args).await?;
+    let upgrade_strategy = update::run_upgrade(app, upgrade_args, channel, false).await?;
+    let target_version =
+        deployment_target_version(&upgrade_strategy, &app.config.get_docker_versions());
 
-    // 2. 🔍 检查部署类型：第一次部署 vs 升级部署
-    let is_first_deployment = is_first_deployment().await;
-
-    if is_first_deployment {
-        info!("🆕 First deployment detected, using fresh initialization");
+    let had_existing_compose = docker_manager.get_compose_file().is_file();
+    preflight_current_config(
+        docker_manager.get_compose_file(),
+        docker_manager.get_env_file(),
+        &context.package_root,
+    )?;
+    // Initial installations also validate the candidate before extraction.
+    preflight_candidate_package(
+        app,
+        &upgrade_strategy,
+        docker_manager.get_env_file(),
+        docker_manager.get_compose_file(),
+    )
+    .context("Candidate package preflight failed before stopping services")?;
+    let package_path = docker_service::package_path_for_strategy(app, &upgrade_strategy)?;
+    // Stage and probe affected managed directories before stopping services.
+    // Neither the docker root nor any existing persistent tree is moved.
+    let mut replacement = match package_path.as_deref() {
+        Some(path) => {
+            // 大包（full 通道 14GB 级）的解压+全量哈希是十分钟级的静默工作，
+            // 不打日志会被当成卡死（2026-10-28 用户部署实测反馈）。
+            info!(
+                "📦 Staging candidate package (extracting archive, hashing managed \
+                 files and probing directories; this can take several minutes for \
+                 full-channel packages)..."
+            );
+            Some(
+                crate::utils::package_replace::PackageReplacement::prepare_async(
+                    path,
+                    &upgrade_strategy,
+                    &context.package_root,
+                    docker_manager.get_env_file(),
+                    true,
+                )
+                .await
+                .context("Package replacement preflight failed before stopping services")?,
+            )
+        }
+        None => None,
+    };
+    if channel == client_core::config::DockerChannel::Registry {
+        // 6. 瘦通道：镜像必须在停服**之前**全部就绪。放在停服之后就把停机窗口拉长成
+        //    "传镜像 + 起服务"，而且传输失败时服务已经全停了。
+        if let Some(path) = package_path.as_deref() {
+            pull_candidate_images_before_stop(docker_manager, path, docker_manager.get_env_file())
+                .await?;
+        }
+    }
+    // 通道必须在 `prepare_services` 读到它之前落定，两条通道对"镜像从哪来"的要求相反。
+    let deployed_channel = channel_to_record(
+        package_path.as_deref(),
+        channel,
+        app.config.get_docker_channel(),
+    );
+    if package_path.is_some() {
+        record_deployment_channel(app, deployed_channel)?;
     } else {
-        info!("🔄 Upgrade deployment detected, services will be stopped first");
-
+        info!("ℹ️ Nothing new to deploy; the recorded image delivery channel is unchanged");
+    }
+    if had_existing_compose {
         // 3. 🛑 停止服务并等待（使用统一的公共方法）
-        docker_service::stop_docker_services_and_wait(
+        let stopped = docker_service::stop_docker_services_and_wait(
             app,
             config_file.clone(),
             project_name.clone(),
         )
         .await?;
+        if !stopped {
+            return Err(anyhow::anyhow!(
+                "Timed out stopping old services; refusing to upgrade MySQL"
+            ));
+        }
     }
 
     // 5. 🔍 提前检查并创建挂载目录（重要：Windows Podman Desktop 需要）
     info!("🔍 Checking and creating mount directories...");
-
-    let docker_manager = create_docker_manager(&config_file, &project_name)?;
+    // DockerManager 已在停服前创建并用于预检（见上方 F06 注释），此处直接复用
 
     // 使用新的环境检测机制
     let runtime_env = docker_manager.get_runtime_environment();
@@ -246,7 +1208,7 @@ pub async fn run_auto_upgrade_deploy(
         if let Err(e) = docker_manager.ensure_host_volumes_exist().await {
             warn!(
                 "⚠️ Mount directory check/creation failed: {error}",
-                error = e.to_string()
+                error = crate::format_error_with_env(&e, docker_manager.get_env_file())
             );
             warn!("Continuing execution, but container startup may fail");
         } else {
@@ -259,274 +1221,115 @@ pub async fn run_auto_upgrade_deploy(
         );
     }
 
-    // 6. 📦 解压新的Docker服务包（在服务停止后）
-    info!("📦 Extracting Docker service package...");
-
-    // 清理现有的docker目录以避免路径冲突
-    let docker_dir = std::path::Path::new("docker");
-    if docker_dir.exists() {
-        // 增量升级/全量升级
-        match upgrade_strategy.clone() {
-            UpgradeStrategy::PatchUpgrade { patch_info, .. } => {
-                // 增量升级逻辑
-                let changed_files = patch_info.get_changed_files();
-                //基于 docker_dir 目录下, 清理 changed_files 的相对路径的文件/目录
-
-                let remove_file_or_dir = changed_files
-                    .iter()
-                    .map(|path| PathBuf::from(docker_dir).join(path))
-                    .collect::<Vec<_>>();
-
-                let remove_file_or_dir: Vec<&Path> =
-                    remove_file_or_dir.iter().map(|p| p.as_path()).collect();
-                match safe_remove_file_or_dir(&remove_file_or_dir).await {
-                    Ok(_) => info!(
-                        "✅ Cleaned files/directories successfully: {files}",
-                        files = &remove_file_or_dir
-                            .iter()
-                            .map(|p| p.to_string_lossy())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    Err(e) => warn!(
-                        "⚠️ Failed to clean files/directories: {error}; continuing extraction",
-                        error = e.to_string()
-                    ),
-                }
-            }
-            UpgradeStrategy::FullUpgrade { .. } => {
-                // 全量升级逻辑
-                info!("🧹 Cleaning existing docker directory to avoid file conflicts...");
-                match safe_remove_docker_directory(docker_dir).await {
-                    Ok(_) => info!("✅ Docker directory cleanup completed"),
-                    Err(e) => {
-                        warn!(
-                            "⚠️ Failed to clean docker directory: {error}; continuing extraction",
-                            error = e.to_string()
-                        );
-                        return Err(anyhow::anyhow!(t!(
-                            "auto_upgrade_deploy.clean_docker_dir_error",
-                            error = e.to_string()
-                        )));
-                    }
-                }
-            }
-            UpgradeStrategy::NoUpgrade { .. } => {
-                //do nothing
-                info!("Version unchanged, no upgrade required")
-            }
+    if let Some(replacement) = replacement.as_mut() {
+        replacement.apply()?;
+        if let Err(error) = fix_script_permissions().await {
+            return replacement.recover_error(error);
         }
     }
-
-    // 解压新的Docker服务包（使用最新版本）
-    match docker_service::extract_docker_service_with_upgrade_strategy(app, upgrade_strategy).await
-    {
-        Ok(_) => {
-            info!("✅ Docker service package extracted");
-
-            // 🔧 自动修复关键脚本文件权限
-            fix_script_permissions().await?;
-
-            // 📝 更新配置文件中的Docker服务版本
-            if latest_version != app.config.get_docker_versions() {
-                info!(from_version = %app.config.get_docker_versions(), to_version = %latest_version, "📝 Updating Docker service version");
-
-                // 更新版本号并保存到配置文件
-                let app_config_path = app.config_path.clone();
-                update_config_version(&mut app.config, &app_config_path, &latest_version)?;
-            } else {
-                info!(version = %latest_version, "📝 Version is already latest; no update needed");
-            }
-
-            // 📊 SQL差异将在服务启动后通过 Live Diff 生成和执行
-        }
-        Err(e) => {
-            error!(
-                "❌ Failed to extract Docker service package: {error}",
-                error = e.to_string()
-            );
-            return Err(e);
-        }
-    }
-
-    // 6. 🔄 自动部署服务
-    info!("🔄 Deploying Docker services...");
-    docker_service::deploy_docker_services(
+    let mut staged = StagedDeployment {
+        had_existing_compose,
+        target_version: &target_version,
+        channel: deployed_channel,
+        database_starting: false,
+        replacement: replacement.as_mut(),
+    };
+    let deployment = run_staged_deployment(
         app,
         frontend_port,
-        config_file.clone(),
-        project_name.clone(),
+        config_file,
+        project_name,
+        &context,
+        &mut staged,
     )
-    .await?;
+    .await;
+    let database_starting = staged.database_starting;
+    finish_package_deployment(replacement, deployment, database_starting)
+}
 
-    // 7. ▶️ 启动服务
-    info!("▶️ Starting Docker services...");
-    docker_service::start_docker_services(app, config_file.clone(), project_name.clone()).await?;
-
-    // 获取 compose 文件路径
-    let compose_path = get_compose_file_path(&config_file);
-
-    // 🔄 分阶段等待服务启动（解决 MySQL-Java 死锁问题）
-    // 死锁原因：Java 容器健康检查依赖 MySQL 表结构升级，但 SQL 升级要等所有服务就绪后才执行
-    // 解决方案：先等待 MySQL → 执行 SQL 升级 → 再等待其他服务
-    if !is_first_deployment {
-        // 阶段 1/2: 仅等待 MySQL 容器就绪
-        info!("⏳ Phase 1/2: Waiting for MySQL service readiness...");
-        let mysql_ready =
-            docker_utils::wait_for_mysql_ready(&compose_path, sql::MYSQL_READY_TIMEOUT).await?;
-
-        if mysql_ready {
-            info!("✅ MySQL service is ready");
-        } else {
-            warn!("⚠️ Timed out waiting for MySQL; still attempting SQL upgrade...");
-        }
-
-        // 阶段 2/2（前半部分）: 执行 SQL 升级
-        info!("🔄 Executing database upgrade...");
-        execute_sql_diff_upgrade(&config_file).await?;
-    }
-
-    // 等待所有服务完全启动（Java 等现在可以正常启动）
-    if is_first_deployment {
-        info!("⏳ Waiting for all services to fully start...");
+/// 停服之前把候选包 Compose 引用的镜像全部拉到本地并按交付清单校验身份。
+///
+/// 幂等：交付凭据已命中的引用只做 inspect、不重新传输；没有凭据的引用（含浮动 `:latest`）
+/// 每次都执行 pull，否则"取最新"就变成"复用上次拉的那份"。断点重跑不会重复下载上 GB 的
+/// 镜像层 —— registry 内容没变时 Docker 自己只解析 manifest。失败一定发生在停服之前，
+/// 服务照旧跑在旧版本上。
+async fn pull_candidate_images_before_stop(
+    docker_manager: &DockerManager,
+    package_path: &Path,
+    env_path: &Path,
+) -> Result<()> {
+    use crate::docker_service::registry_images::{
+        PullPolicy, plan_from_candidate_package, pull_candidate_images,
+    };
+    // 清单里的 architecture 用的是 docker 的词汇（amd64/arm64），与交付清单预检走的
+    // `get_system_architecture` 同一个入口；client_core::architecture 那套是
+    // x86_64/aarch64，喂进来会每次都判成不匹配。
+    let architecture = crate::docker_service::get_system_architecture();
+    let plan = plan_from_candidate_package(package_path, env_path, architecture.as_str())
+        .context("Cannot plan registry images from the candidate package")?;
+    info!(
+        "🧭 Registry deployment must ensure {} image(s) for {architecture} before stopping services",
+        plan.len()
+    );
+    let started = std::time::Instant::now();
+    let report = pull_candidate_images(
+        docker_manager,
+        &plan,
+        &PullPolicy::default(),
+        architecture.as_str(),
+    )
+    .await
+    .context("Registry images were not ready; services were left running on the old version")?;
+    let drift_note = if report.drifted.is_empty() {
+        String::new()
     } else {
-        info!("⏳ Phase 2/2: Wait for all services to fully start...");
-    }
-    if docker_utils::wait_for_compose_services_started(&compose_path, sql::OTHER_SERVICES_TIMEOUT)
-        .await?
-    {
-        info!("✅ Auto-upgrade deployment completed; services started successfully");
-        info!("🎉 Auto-upgrade deployment completed successfully");
-    } else {
-        warn!("⚠️ Timed out waiting for services to start; please check status manually");
-
-        // 最后再检查一次状态
-        match check_docker_service_status(app, &config_file, &project_name).await {
-            Ok(true) => {
-                info!("🔍 Final check: services appear to be running normally");
-            }
-            Ok(false) => {
-                info!("🔍 Final check: services may not be running properly");
-                info!("📊 Detailed status check:");
-                let _ = docker_service::check_docker_services_status(app).await;
-            }
-            Err(e) => warn!("🔍 Final check failed: {error}", error = e.to_string()),
-        }
-    }
-
+        format!(
+            ", {} drifted beyond the receipt (deployed with the registry's current \
+             image; see the ⚠️ warnings above)",
+            report.drifted.len()
+        )
+    };
+    info!(
+        "✅ Images ready in {}s: {} pulled, {} already matched the delivery receipt{}",
+        started.elapsed().as_secs(),
+        report.pulled.len(),
+        report.reused.len(),
+        drift_note
+    );
     Ok(())
+}
+
+/// Recover only managed release files before MySQL starts. From MySQL startup
+/// (which includes initdb) onward, never restore database files or switch release
+/// files underneath a running database automatically.
+fn finish_package_deployment(
+    mut replacement: Option<crate::utils::package_replace::PackageReplacement>,
+    deployment: Result<()>,
+    database_starting: bool,
+) -> Result<()> {
+    match deployment {
+        Ok(()) => match replacement {
+            Some(replacement) => replacement.finish(),
+            None => Ok(()),
+        },
+        Err(error) => {
+            if let Some(replacement) = replacement.as_mut() {
+                if !database_starting {
+                    return replacement.recover_error(error);
+                }
+                let recovery = replacement.retain_for_recovery();
+                return Err(error.context(format!(
+                    "Deployment failed after MySQL startup; managed package recovery files retained at {}; persistent data was not rolled back and deployment completion was not confirmed",
+                    recovery.display(),
+                )));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// 预约延迟执行自动升级部署
 #[allow(dead_code)]
-pub async fn schedule_delayed_deploy(app: &mut CliApp, time: u32, unit: &str) -> Result<()> {
-    // 计算延迟时间（转换为秒）
-    let delay_seconds = match unit.to_lowercase().as_str() {
-        "minutes" | "minute" | "min" => time * 60,
-        "hours" | "hour" | "h" => time * 3600,
-        "days" | "day" | "d" => time * 86400,
-        _ => {
-            error!("Unsupported time unit: {unit}", unit = unit);
-            return Err(anyhow::anyhow!(t!(
-                "auto_upgrade_deploy.unsupported_time_unit_error",
-                unit = unit
-            )));
-        }
-    };
-
-    let delay_duration = Duration::from_secs(delay_seconds as u64);
-    let scheduled_at = chrono::Utc::now() + chrono::Duration::seconds(delay_seconds as i64);
-
-    // 创建升级任务记录
-    let task = client_core::config_manager::AutoUpgradeTask {
-        task_id: uuid::Uuid::new_v4().to_string(),
-        task_name: format!("delayed_upgrade_{time}"),
-        schedule_time: scheduled_at,
-        upgrade_type: "delayed".to_string(),
-        target_version: None, // 最新版本
-        status: "pending".to_string(),
-        progress: Some(0),
-        error_message: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    };
-
-    {
-        let config_manager =
-            client_core::config_manager::ConfigManager::new_with_database(app.database.clone());
-        config_manager.create_auto_upgrade_task(&task).await?
-    };
-
-    info!("⏰ Delayed auto-upgrade deployment has been scheduled");
-    info!("Task ID: {id}", id = task.task_id);
-    info!("Delay: {time} {unit}", time = time, unit = unit);
-    println!(
-        "   {}",
-        t!(
-            "auto_upgrade_deploy.estimated_exec_time",
-            duration = format_duration(delay_duration)
-        )
-    );
-    info!(
-        "Planned execution time: {time}",
-        time = scheduled_at.format("%Y-%m-%d %H:%M:%S UTC")
-    );
-
-    info!(
-        "Scheduled delayed auto-upgrade deployment: {time} {unit}, task ID: {task_id}",
-        time = time,
-        unit = unit,
-        task_id = task.task_id
-    );
-
-    // 更新任务状态为进行中
-    {
-        let config_manager =
-            client_core::config_manager::ConfigManager::new_with_database(app.database.clone());
-        config_manager
-            .update_upgrade_task_status(&task.task_id, "in_progress", Some(0), None)
-            .await?;
-    }
-
-    // 开始延迟等待
-    info!("⏳ Waiting...");
-
-    // 这里可以优化为后台任务，避免阻塞
-    sleep(delay_duration).await;
-
-    info!("🔔 Delay reached; starting auto-upgrade deployment");
-    info!(
-        "Delay reached; auto-upgrade deployment starting, task ID: {task_id}",
-        task_id = task.task_id
-    );
-
-    // 执行自动升级部署
-    match run_auto_upgrade_deploy(app, None, None, None).await {
-        Ok(_) => {
-            let config_manager =
-                client_core::config_manager::ConfigManager::new_with_database(app.database.clone());
-            config_manager
-                .update_upgrade_task_status(&task.task_id, "completed", Some(100), None)
-                .await?;
-            info!("✅ Delayed upgrade deployment task completed");
-        }
-        Err(e) => {
-            let config_manager =
-                client_core::config_manager::ConfigManager::new_with_database(app.database.clone());
-            config_manager
-                .update_upgrade_task_status(&task.task_id, "failed", None, Some(&e.to_string()))
-                .await?;
-            error!(
-                "Delayed upgrade deployment task failed: {error}",
-                error = e.to_string()
-            );
-            return Err(e);
-        }
-    }
-
-    Ok(())
-}
-
 /// 显示自动升级部署状态
 pub async fn show_status(app: &mut CliApp) -> Result<()> {
     let config_manager =
@@ -534,6 +1337,17 @@ pub async fn show_status(app: &mut CliApp) -> Result<()> {
 
     info!("📊 Auto-upgrade deployment status:");
     info!("Feature status: implemented");
+    let channel = app.config.get_docker_channel();
+    // 两条通道对"镜像从哪来"的要求相反，所以这台机器当前是哪条必须看得见。
+    info!(
+        "Image delivery channel: {channel} ({hint})",
+        channel = channel.as_str(),
+        hint = if channel.loads_offline_images() {
+            "offline package carries docker/images/*.tar"
+        } else {
+            "slim package, images pulled from the registry"
+        }
+    );
     info!("Process: download latest version -> smart backup -> deploy services -> start services");
 
     // 显示待执行的升级任务
@@ -584,247 +1398,6 @@ pub async fn show_status(app: &mut CliApp) -> Result<()> {
     Ok(())
 }
 
-/// 检查Docker服务状态（是否有服务在运行）
-///
-/// 返回 true 表示有服务在运行，false 表示没有服务在运行
-async fn check_docker_service_status(
-    _app: &mut CliApp,
-    config_file: &Option<PathBuf>,
-    project_name: &Option<String>,
-) -> Result<bool> {
-    let compose_path = get_compose_file_path(config_file);
-
-    // 如果compose文件不存在，直接返回false（服务未运行）
-    if !compose_path.exists() {
-        info!("📝 docker-compose.yml not found; services are not running");
-        return Ok(false);
-    }
-
-    // 使用统一的 DockerManager 创建逻辑
-    let docker_manager = create_docker_manager(config_file, project_name)?;
-    let health_checker = HealthChecker::new(docker_manager);
-    let report = health_checker.health_check().await?;
-
-    // 检查是否有运行中的容器（而不是检查是否所有服务都健康）
-    let running_count = report.get_running_count();
-
-    if running_count > 0 {
-        info!("🔍 Found {count} running services", count = running_count);
-        Ok(true)
-    } else {
-        info!("🔍 No running services found");
-        Ok(false)
-    }
-}
-
-/// 格式化时间间隔为可读字符串
-#[allow(dead_code)]
-fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-
-    if seconds >= 86400 {
-        t!("auto_upgrade_deploy.days", count = seconds / 86400).to_string()
-    } else if seconds >= 3600 {
-        t!("auto_upgrade_deploy.hours", count = seconds / 3600).to_string()
-    } else if seconds >= 60 {
-        t!("auto_upgrade_deploy.minutes", count = seconds / 60).to_string()
-    } else {
-        t!("auto_upgrade_deploy.seconds", count = seconds).to_string()
-    }
-}
-
-/// 检测是否为第一次部署
-async fn is_first_deployment() -> bool {
-    let docker_dir = std::path::Path::new("docker");
-    let docker_compose_file = docker_dir.join("docker-compose.yml");
-    let docker_data_dir = docker_dir.join("data/mysql");
-
-    // 如果docker目录不存在，肯定是第一次部署
-    if !docker_dir.exists() {
-        return true;
-    }
-
-    // 🔧 关键修复：如果docker-compose.yml文件不存在，视为首次部署
-    // 因为没有compose文件就无法管理现有服务
-    if !docker_compose_file.exists() {
-        info!("📝 docker-compose.yml not found; treated as first deployment");
-        return true;
-    }
-
-    // 如果docker/data目录不存在，也是第一次部署
-    if !docker_data_dir.exists() {
-        return true;
-    }
-
-    false
-}
-
-/// 递归复制目录
-#[allow(dead_code)]
-fn copy_dir_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if !src.exists() {
-        return Ok(());
-    }
-
-    fs::create_dir_all(dst)?;
-
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursively(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
-
-    Ok(())
-}
-
-//批量删除文件,或者目录
-async fn safe_remove_file_or_dir(paths: &[&Path]) -> Result<()> {
-    for path in paths {
-        if !path.exists() {
-            continue;
-        }
-
-        if path.is_file() {
-            fs::remove_file(path)?;
-        } else if path.is_dir() {
-            safe_remove_docker_directory(path).await?;
-        }
-    }
-    Ok(())
-}
-
-/// 安全地删除目录，处理"Directory not empty"错误（保留upload目录）
-async fn safe_remove_docker_directory(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let mut attempts = 0;
-    const MAX_ATTEMPTS: usize = sql::MAX_CLEANUP_ATTEMPTS;
-
-    while attempts < MAX_ATTEMPTS {
-        attempts += 1;
-
-        // 首先尝试安全删除（保留upload目录）
-        if let Err(e) = force_cleanup_directory(path).await {
-            warn!(
-                "⚠️ Safe directory deletion failed (attempt {attempts}/{max}): {error}",
-                attempts = attempts,
-                max = MAX_ATTEMPTS,
-                error = e.to_string()
-            );
-
-            if attempts >= MAX_ATTEMPTS {
-                return Err(anyhow::anyhow!(t!(
-                    "auto_upgrade_deploy.safe_delete_max_attempts",
-                    max = MAX_ATTEMPTS,
-                    path = path.display(),
-                    error = e.to_string()
-                )));
-            }
-        } else {
-            info!("✅ Directory safely deleted: {path}", path = path.display());
-            return Ok(());
-        }
-    }
-
-    unreachable!()
-}
-
-/// 强制清理目录内容（保留upload目录）
-async fn force_cleanup_directory(path: &Path) -> Result<()> {
-    info!(path = %path.display(), "🧹 Attempting forced cleanup of directory contents");
-
-    if !path.exists() {
-        return Ok(());
-    }
-
-    // 收集清理失败的文件列表
-    let mut failed_items: Vec<(PathBuf, String)> = Vec::new();
-    let mut skipped_count = 0;
-    let mut deleted_count = 0;
-
-    // 递归遍历并删除文件
-    match std::fs::read_dir(path) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                let entry_path = entry.path();
-                let file_name = entry.file_name();
-                let file_name_str = file_name.to_string_lossy();
-
-                // 排除指定目录，不进行删除
-                if client_core::constants::docker::EXCLUDE_DIRS.contains(&file_name_str.as_ref())
-                    && entry_path.is_dir()
-                {
-                    info!(path = %entry_path.display(), "📁 Skip protected directory");
-                    skipped_count += 1;
-                    continue;
-                }
-
-                if entry_path.is_dir() {
-                    // 递归删除子目录
-                    if let Err(e) = Box::pin(force_cleanup_directory(&entry_path)).await {
-                        warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete subdirectory");
-                        failed_items.push((entry_path.clone(), e.to_string()));
-                    }
-
-                    // 尝试删除空目录
-                    if let Err(e) = std::fs::remove_dir(&entry_path) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            warn!(path = %entry_path.display(), error = %e, "📁 Failed to delete empty directory");
-                            failed_items.push((entry_path, e.to_string()));
-                        }
-                    } else {
-                        deleted_count += 1;
-                    }
-                } else if let Err(e) = std::fs::remove_file(&entry_path) {
-                    warn!(path = %entry_path.display(), error = %e, "📄 Failed to delete file");
-                    failed_items.push((entry_path, e.to_string()));
-                } else {
-                    deleted_count += 1;
-                }
-            }
-        }
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "📂 Failed to read directory content");
-            return Err(e.into());
-        }
-    }
-
-    // 报告清理结果
-    if !failed_items.is_empty() {
-        warn!(
-            failed_count = failed_items.len(),
-            deleted_count = deleted_count,
-            skipped_count = skipped_count,
-            "⚠️ Directory cleanup completed, but some parts failed"
-        );
-        for (path, error) in failed_items.iter().take(5) {
-            warn!("  - {}: {}", path.display(), error);
-        }
-        if failed_items.len() > 5 {
-            warn!(
-                "  ... and {count} more failed items",
-                count = failed_items.len() - 5
-            );
-        }
-    } else {
-        info!(
-            deleted_count = deleted_count,
-            skipped_count = skipped_count,
-            "✅ Directory cleanup successful"
-        );
-    }
-
-    Ok(())
-}
-
 /// 归档差异SQL文件
 ///
 /// # 参数
@@ -836,7 +1409,7 @@ async fn archive_diff_sql_file(diff_sql_path: &Path, status: &str) -> Result<()>
     }
 
     let parent = diff_sql_path.parent().unwrap_or(Path::new("."));
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%f");
     let new_name = format!("diff_sql_{}_{}.sql", status, timestamp);
     let new_path = parent.join(new_name);
 
@@ -865,11 +1438,47 @@ async fn archive_diff_sql_file(diff_sql_path: &Path, status: &str) -> Result<()>
     }
 }
 
-/// 连接MySQL容器并执行差异SQL（Live Diff）
-async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
+/// legacy 迁移路径（包内无 mysql-schema-manifest.json 的旧包）：
+/// 固定清单逐模板解析（建库/授权原句随模板 preamble 透传）→ 逐库 Live Diff。
+async fn legacy_live_diff(
+    temp_sql_dir: &Path,
+    executor: &MySqlExecutor,
+    package_root: &Path,
+) -> Result<client_core::sql_diff::MultiDbDiffResult> {
+    let compose = fs::read_to_string(package_root.join("docker-compose.yml"))
+        .context("Failed to read legacy Compose for schema selection")?;
+    let paths = crate::utils::legacy_schema::schema_paths(Some(&compose), |path| {
+        package_root.join(path).exists()
+    })?;
+    let templates = crate::utils::legacy_schema::parse_templates(&paths, |path| {
+        fs::read_to_string(package_root.join(path)).map_err(Into::into)
+    })?;
+    for (template_path, template) in paths.iter().zip(&templates) {
+        let source_path = package_root.join(template_path);
+        let new_sql_path = temp_sql_dir.join(format!("{}_new.sql", template.database));
+        if new_sql_path.exists() {
+            fs::remove_file(&new_sql_path)?;
+        }
+        fs::copy(&source_path, &new_sql_path).context(t!(
+            "auto_upgrade_deploy.copy_sql_failed",
+            src = source_path.display(),
+            dst = new_sql_path.display()
+        ))?;
+        info!(database = %template.database, tables = template.tables.len(),
+            path = %new_sql_path.display(), "📄 Copied schema template for database");
+    }
+
+    info!("📊 Generating SQL differences based on online schema (legacy fixed list)...");
+    let diff_result = generate_live_schema_diff_multi(executor, &templates, "target version")
+        .await
+        .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?;
+
+    Ok(diff_result)
+}
+
+async fn execute_sql_diff_upgrade(executor: &MySqlExecutor, package_root: &Path) -> Result<()> {
     let temp_sql_dir = Path::new(sql::TEMP_SQL_DIR);
     let diff_sql_path = temp_sql_dir.join(sql::DIFF_SQL_FILE);
-    let new_sql_path = temp_sql_dir.join(sql::NEW_SQL_FILE);
 
     // 如果 temp_sql 目录已存在，先归档到 history_sql
     if temp_sql_dir.exists() {
@@ -920,94 +1529,52 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
         path = temp_sql_dir.display()
     );
 
-    // 复制新版本的SQL文件（使用常量路径）
-    let current_sql_path = Path::new(sql::CURRENT_SQL_PATH);
-    if current_sql_path.exists() {
-        // 先删除目标文件（如果存在），确保复制操作成功
-        if new_sql_path.exists() {
-            fs::remove_file(&new_sql_path)?;
-            info!(
-                "🗑️Old SQL file deleted: {path}",
-                path = new_sql_path.display()
-            );
+    // 迁移计划：manifest v1（bootstrap → 授权 → 逐库 Live Diff）或 legacy 固定清单
+    let migration_plan = resolve_migration_plan(package_root)?;
+    let diff_result = match &migration_plan {
+        MigrationPlan::Manifest(manifest) => {
+            // manifest 路径：留档各库模板副本；bootstrap/授权独立于表差异执行
+            for schema in &manifest.schemas {
+                let source_path = package_root.join(&schema.path);
+                let new_sql_path = temp_sql_dir.join(format!("{}_new.sql", schema.database));
+                if new_sql_path.exists() {
+                    fs::remove_file(&new_sql_path)?;
+                }
+                fs::copy(&source_path, &new_sql_path).context(t!(
+                    "auto_upgrade_deploy.copy_sql_failed",
+                    src = source_path.display(),
+                    dst = new_sql_path.display()
+                ))?;
+                info!(
+                    database = %schema.database,
+                    path = %new_sql_path.display(),
+                    "📄 Copied schema template for database"
+                );
+            }
+            info!("📊 Manifest migration: bootstrap → permissions → per-database Live Diff...");
+            let app_user = executor.app_user().unwrap_or_default();
+            client_core::mysql_manifest::run_manifest_migration(
+                executor,
+                manifest,
+                package_root,
+                app_user,
+            )
+            .await
+            .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?
         }
-
-        fs::copy(current_sql_path, &new_sql_path).context(t!(
-            "auto_upgrade_deploy.copy_sql_failed",
-            src = current_sql_path.display(),
-            dst = new_sql_path.display()
-        ))?;
-
-        // 验证文件复制成功
-        if !new_sql_path.exists() {
-            return Err(anyhow::anyhow!(t!(
-                "auto_upgrade_deploy.sql_copy_not_found",
-                dst = new_sql_path.display(),
-                src = current_sql_path.display()
-            )));
-        }
-
-        info!(
-            "📄 Copied new version SQL file: {path}",
-            path = new_sql_path.display()
-        );
-    } else {
-        info!("📄 No SQL files in new version; skipping diff generation");
-        return Ok(());
-    }
-
-    // 读取模板SQL（严格失败策略）
-    if !new_sql_path.exists() {
-        return Err(anyhow::anyhow!(t!(
-            "auto_upgrade_deploy.template_sql_not_found",
-            path = new_sql_path.display()
-        )));
-    }
-    let new_sql_content = fs::read_to_string(&new_sql_path)?;
-
-    // 注意：parse_sql_tables 内部的 extract_create_table_statements_with_regex
-    // 会自动处理 USE 语句的查找和提取，无需手动处理
-
-    // 从App配置中动态获取MySQL端口并建立连接
-    let compose_file = get_compose_file_path(config_file);
-    let env_file = client_core::constants::docker::get_env_file_path();
-    let compose_file_str = compose_file
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!(t!("auto_upgrade_deploy.compose_path_to_string_failed")))?;
-    let env_file_str = env_file
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!(t!("auto_upgrade_deploy.env_path_to_string_failed")))?;
-
-    let config = MySqlConfig::for_container(Some(compose_file_str), Some(env_file_str))
-        .await
-        .context(t!("auto_upgrade_deploy.create_mysql_config_failed"))?;
-    let executor = MySqlExecutor::new(config);
-
-    info!("🔌 Connecting to MySQL database...");
-    if let Err(e) = executor.test_connection().await {
-        error!(error = %e, port = sql::DEFAULT_MYSQL_CONTAINER_PORT, "❌ Database connection failed");
-        error!(
-            "🏃 Please make sure the MySQL container is running and port {port} is accessible",
-            port = sql::DEFAULT_MYSQL_CONTAINER_PORT
-        );
-        return Err(e.into());
-    }
-
-    // 基于在线架构与模板生成差异SQL
-    info!("📊 Generating SQL differences based on online schema...");
-    let diff_result = generate_live_schema_diff(&executor, &new_sql_content, "target version")
-        .await
-        .context(t!("auto_upgrade_deploy.generate_live_diff_failed"))?;
+        MigrationPlan::Legacy => legacy_live_diff(temp_sql_dir, executor, package_root).await?,
+    };
 
     info!(description = %diff_result.description, has_executable_sql = diff_result.has_executable_sql, has_warnings = diff_result.has_warnings, "📋 Difference generation completed");
 
-    // 保存从 MySQL 读取的原始 CREATE TABLE 语句到 init_mysql_old.sql
-    if let Some(live_sql) = &diff_result.live_sql {
-        let old_sql_path = temp_sql_dir.join(sql::OLD_SQL_FILE);
-        fs::write(&old_sql_path, live_sql)?;
+    // 逐库保存在线架构快照（SHOW CREATE TABLE 原文）
+    for section in &diff_result.sections {
+        let old_sql_path = temp_sql_dir.join(format!("{}_old.sql", section.database));
+        fs::write(&old_sql_path, &section.live_sql)?;
         info!(
-            "📄 Saved online schema SQL file: {path}",
-            path = old_sql_path.display()
+            database = %section.database,
+            path = %old_sql_path.display(),
+            "📄 Saved online schema SQL file"
         );
     }
 
@@ -1023,9 +1590,9 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
     if !diff_result.has_executable_sql {
         // 没有可执行SQL（可能有警告，也可能完全无差异）
         if diff_result.has_warnings {
-            // 情况1：只有删除操作警告，没有可执行的新增/修改SQL
-            info!("⚠️ Schema difference detected: only deletion operations (skipped)");
-            info!("💡 Deletion operations must be executed manually; see notes in diff file");
+            // 只有人工处理提示，没有可执行的新增/修改 SQL。
+            info!("⚠️ Schema difference detected: only manual changes (skipped)");
+            info!("💡 Manual changes are listed in the diff file");
         } else {
             // 情况2：完全没有差异（既没有可执行SQL，也没有警告）
             info!("📄 No database schema differences; no upgrade required");
@@ -1062,20 +1629,14 @@ async fn execute_sql_diff_upgrade(config_file: &Option<PathBuf>) -> Result<()> {
 
     // 如果同时包含警告，提示用户注意（这是混合场景：既有新增/修改，又有删除）
     if diff_result.has_warnings {
-        warn!("⚠️ Note: diff contains executable SQL and deletion warnings");
+        warn!("⚠️ Note: diff contains executable SQL and manual-change warnings");
         warn!("✓ Add/modify operations will execute normally");
-        warn!("✗ Deletion operations were skipped and must be run manually");
+        warn!("✗ Manual changes were skipped and must be reviewed separately");
         warn!("📄 See details: {path}", path = diff_sql_path.display());
     }
 
-    info!(
-        retry_count = sql::DEFAULT_RETRY_COUNT,
-        "🚀 Starting diff SQL execution"
-    );
-    match executor
-        .execute_diff_sql_with_retry(&diff_result.diff_sql, sql::DEFAULT_RETRY_COUNT)
-        .await
-    {
+    info!("🚀 Starting one-pass diff SQL execution");
+    match executor.execute_diff_sql_once(&diff_result.diff_sql).await {
         Ok(results) => {
             info!(
                 executed_statements = results.len(),
@@ -1106,7 +1667,10 @@ async fn fix_script_permissions() -> Result<()> {
     // 需要修复权限的脚本文件列表
     let script_files = ["docker/config/docker-entrypoint.sh"];
 
+    #[cfg(unix)]
     let mut fixed_count = 0;
+    #[cfg(not(unix))]
+    let fixed_count = 0;
     let mut total_count = 0;
 
     for script_path in script_files.iter() {
@@ -1118,6 +1682,8 @@ async fn fix_script_permissions() -> Result<()> {
             // 检查当前权限
             match std::fs::metadata(path) {
                 Ok(metadata) => {
+                    #[cfg(not(unix))]
+                    let _ = metadata;
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
@@ -1267,6 +1833,10 @@ pub async fn run_offline_deploy(
         path = archive_path.display()
     );
 
+    let context = DeploymentContext::new(&app.docker_manager, &config_file, &project_name)?;
+    let docker_manager = &context.manager;
+    validate_offline_env_aliases(docker_manager.get_env_file(), &context.package_root)?;
+
     // 1. 验证文件存在
     if !archive_path.exists() {
         return Err(anyhow::anyhow!(
@@ -1277,6 +1847,8 @@ pub async fn run_offline_deploy(
 
     crate::utils::validate_archive_paths(&archive_path)
         .context("Archive package validation failed")?;
+    validate_offline_archive_sql(&archive_path)
+        .context("Offline package MySQL DDL preflight failed")?;
 
     // 2. 解析版本号
     let version: client_core::version::Version =
@@ -1287,25 +1859,56 @@ pub async fn run_offline_deploy(
         version = version.to_string()
     );
 
-    // 3. 检测是否首次部署
-    let is_first_deployment = is_first_deployment().await;
-
-    if is_first_deployment {
-        info!("🆕 First deployment detected, using fresh initialization");
-    } else {
-        info!("🔄 Upgrade deployment detected, services will be stopped first");
-
+    let had_existing_compose = docker_manager.get_compose_file().is_file();
+    preflight_current_config(
+        docker_manager.get_compose_file(),
+        docker_manager.get_env_file(),
+        &context.package_root,
+    )?;
+    preflight_candidate_package_at(&archive_path, false, docker_manager.get_env_file())
+        .context("Offline package preflight failed before stopping services")?;
+    // 通道必须在 `prepare_services` 读到它之前落定（与 run_channel_deployment 同一纪律）：
+    // offline 部署可能带上任一通道的包，而 prepare_services 按配置的旧记账决定
+    // "加载包内 tar"还是"compose pull"——胖包机器离线部署瘦包时，旧记账 images 会让
+    // 本次部署去找并不存在的 tar（2026-10-26 逻辑复查补上；成功后 update_config_version
+    // 幂等重写同一值）。
+    record_deployment_channel(app, offline_package_channel(&archive_path))?;
+    let upgrade_strategy = UpgradeStrategy::FullUpgrade {
+        url: String::new(),
+        hash: String::new(),
+        signature: String::new(),
+        target_version: version.clone(),
+        download_type: client_core::upgrade_strategy::DownloadType::Full,
+    };
+    info!(
+        "📦 Staging candidate package (extracting archive, hashing managed files and \
+         probing directories; this can take several minutes for full-channel packages)..."
+    );
+    let mut replacement = crate::utils::package_replace::PackageReplacement::prepare_async(
+        &archive_path,
+        &upgrade_strategy,
+        &context.package_root,
+        docker_manager.get_env_file(),
+        true,
+    )
+    .await
+    .context("Offline package replacement preflight failed before stopping services")?;
+    if had_existing_compose {
         // 停止服务并等待
-        docker_service::stop_docker_services_and_wait(
+        let stopped = docker_service::stop_docker_services_and_wait(
             app,
             config_file.clone(),
             project_name.clone(),
         )
         .await?;
+        if !stopped {
+            return Err(anyhow::anyhow!(
+                "Timed out stopping old services; refusing to upgrade MySQL"
+            ));
+        }
     }
 
-    // 4. 创建 DockerManager
-    let docker_manager = create_docker_manager(&config_file, &project_name)?;
+    // 4. DockerManager 已在停服前创建（用于预检），此处直接复用
 
     // 5. 环境检测（Podman Desktop 需要预先创建挂载目录）
     let runtime_env = docker_manager.get_runtime_environment();
@@ -1314,83 +1917,1694 @@ pub async fn run_offline_deploy(
         if let Err(e) = docker_manager.ensure_host_volumes_exist().await {
             warn!(
                 "⚠️ Mount directory check/creation failed: {error}",
-                error = e.to_string()
+                error = crate::format_error_with_env(&e, docker_manager.get_env_file())
             );
         }
     }
 
-    // 6. 解压（全量升级方式）
-    info!("📦 Extracting Docker service package...");
-
-    let upgrade_strategy = UpgradeStrategy::FullUpgrade {
-        url: String::new(),
-        hash: String::new(),
-        signature: String::new(),
-        target_version: version.clone(),
-        download_type: client_core::upgrade_strategy::DownloadType::Full,
+    replacement.apply()?;
+    if let Err(error) = fix_script_permissions().await {
+        return replacement.recover_error(error);
+    }
+    let target_version = version.to_string();
+    let mut staged = StagedDeployment {
+        had_existing_compose,
+        target_version: &target_version,
+        // 记账跟包走：瘦包过 offline-deploy 也必须记 registry，否则下次 run 选错清单。
+        channel: offline_package_channel(&archive_path),
+        database_starting: false,
+        replacement: Some(&mut replacement),
     };
-
-    // 直接解压本地文件。先把旧 docker 目录改名备份，解压失败时恢复。
-    let docker_dir = std::path::Path::new("docker");
-    let backup_dir = create_docker_backup_path();
-    let had_existing_docker_dir = docker_dir.exists();
-    if had_existing_docker_dir {
-        info!("🧹 Moving existing docker directory to temporary backup...");
-        fs::rename(docker_dir, &backup_dir)
-            .context("Failed to backup existing docker directory")?;
-    }
-
-    if let Err(e) = crate::utils::extract_docker_service(&archive_path, &upgrade_strategy).await {
-        warn!("⚠️ Extract failed, restoring previous docker directory");
-        restore_docker_backup(&backup_dir, docker_dir)?;
-        return Err(e);
-    }
-
-    if had_existing_docker_dir {
-        restore_preserved_docker_dirs(&backup_dir, docker_dir)?;
-        if backup_dir.exists() {
-            fs::remove_dir_all(&backup_dir).context("Failed to remove docker backup directory")?;
-        }
-    }
-    info!("✅ Docker service package extracted");
-
-    // 7. 修复脚本权限
-    fix_script_permissions().await?;
-
-    // 8. 更新配置版本
-    let app_config_path = app.config_path.clone();
-    update_config_version(&mut app.config, &app_config_path, &version.to_string())?;
-
-    // 9. 部署服务
-    info!("🔄 Deploying Docker services...");
-    docker_service::deploy_docker_services(
+    let deployment = run_staged_deployment(
         app,
         frontend_port,
-        config_file.clone(),
-        project_name.clone(),
+        config_file,
+        project_name,
+        &context,
+        &mut staged,
     )
-    .await?;
+    .await;
+    let database_starting = staged.database_starting;
+    finish_package_deployment(Some(replacement), deployment, database_starting)
+}
 
-    // 10. 启动服务
-    info!("▶️ Starting Docker services...");
-    docker_service::start_docker_services(app, config_file.clone(), project_name.clone()).await?;
+#[cfg(test)]
+mod tests {
+    use super::{
+        OnlineEnvPreserve, UpgradeStrategy, offline_package_channel, validate_offline_archive_sql,
+    };
+    use anyhow::{Context, Result};
+    use client_core::config::DockerChannel;
+    use flate2::{Compression, write::GzEncoder};
+    use std::{fs::File, io::Write, path::Path, sync::Arc};
 
-    // 11. 等待服务就绪
-    let compose_path = get_compose_file_path(&config_file);
-    if is_first_deployment {
-        info!("⏳ Waiting for all services to fully start...");
-    } else {
-        info!("⏳ Waiting for all services to fully start...");
+    /// 记账跟包走（2026-10-26 beta slim 0.0.136 实测教训）：带离线 tar 的包记 images，
+    /// 瘦包记 registry——否则瘦包过 offline-deploy 后，下次 run 选 full 清单并按
+    /// tar 加载，报 `No image files found`。
+    #[test]
+    fn offline_channel_follows_the_package_contents() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let write_zip = |name: &str, entries: &[&str]| -> Result<std::path::PathBuf> {
+            let path = temp.path().join(name);
+            let mut zip = zip::ZipWriter::new(File::create(&path)?);
+            for entry in entries {
+                zip.start_file(*entry, zip::write::SimpleFileOptions::default())
+                    .context("start zip entry")?;
+                zip.write_all(b"x").context("write zip entry")?;
+            }
+            zip.finish().context("finish zip")?;
+            Ok(path)
+        };
+
+        let fat = write_zip(
+            "fat.zip",
+            &["docker/docker-compose.yml", "docker/images/mysql.tar"],
+        )?;
+        assert_eq!(offline_package_channel(&fat), DockerChannel::Images);
+
+        let slim = write_zip(
+            "slim.zip",
+            &["docker/docker-compose.yml", "docker/DELIVERY_MANIFEST.json"],
+        )?;
+        assert_eq!(offline_package_channel(&slim), DockerChannel::Registry);
+
+        // 空目录条目不算离线镜像：只有目录占位、没有 tar 文件仍是瘦包。
+        let empty_images = write_zip(
+            "empty-images.zip",
+            &["docker/images/", "docker/docker-compose.yml"],
+        )?;
+        assert_eq!(
+            offline_package_channel(&empty_images),
+            DockerChannel::Registry
+        );
+        Ok(())
     }
 
-    if docker_utils::wait_for_compose_services_started(&compose_path, sql::OTHER_SERVICES_TIMEOUT)
-        .await?
+    fn valid_platform_sql() -> &'static str {
+        "CREATE DATABASE IF NOT EXISTS agent_platform;\n\
+         GRANT ALL PRIVILEGES ON agent_platform.* TO 'agent_platform'@'%';\n\
+         USE agent_platform;\n\
+         CREATE TABLE users (id INT);"
+    }
+
+    fn valid_im_sql() -> &'static str {
+        "CREATE DATABASE IF NOT EXISTS `nuwax_im`;\n\
+         USE `nuwax_im`;\n\
+         CREATE TABLE im_users (id INT);"
+    }
+
+    fn write_archive(path: &Path, platform: Option<&str>, im: Option<&str>) -> Result<()> {
+        let encoder = GzEncoder::new(File::create(path)?, Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (name, sql) in [
+            ("docker/config/init_mysql.sql", platform),
+            ("docker/config/init_mysql_im.sql", im),
+        ] {
+            if let Some(sql) = sql {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(sql.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive.append_data(&mut header, name, sql.as_bytes())?;
+            }
+        }
+        archive.finish()?;
+        archive.into_inner()?.finish()?.flush()?;
+        Ok(())
+    }
+
+    #[test]
+    fn tar_patch_is_rejected_during_candidate_preflight() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = directory.path().join("patch.tar.gz");
+        write_archive(&archive, Some(valid_platform_sql()), Some(valid_im_sql()))?;
+        let error =
+            super::preflight_candidate_package_at(&archive, true, &directory.path().join(".env"))
+                .err()
+                .context("TAR.GZ incremental application must fail before extraction")?;
+        assert!(error.to_string().contains("ZIP"));
+        Ok(())
+    }
+
+    /// 部署成功后版本号与镜像交付通道必须一起落盘：只记版本会让下一次
+    /// `prepare_services` 沿用上一条命令的通道，而两条通道对镜像来源的要求相反。
+    #[test]
+    fn deployment_records_the_channel_that_just_ran_alongside_the_version() -> Result<()> {
+        use client_core::config::{AppConfig, DockerChannel};
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.toml");
+        for channel in [DockerChannel::Images, DockerChannel::Registry] {
+            let mut config = Arc::new(AppConfig::default());
+            config.save_to_file(&path)?;
+            super::update_config_version(&mut config, &path, "0.0.120", channel)?;
+            let restored = AppConfig::load_from_file(&path)?;
+            assert_eq!(restored.get_docker_versions(), "0.0.120");
+            assert_eq!(
+                restored.get_docker_channel(),
+                channel,
+                "通道 {channel:?} 没有落盘"
+            );
+        }
+        Ok(())
+    }
+
+    /// 无包可换时不能把配置里的通道翻成命令自带的那条：磁盘上的产物还是上一条命令的通道
+    /// 装的，翻过去之后下一次部署会按错误的通道取镜像（瘦通道装完会删掉历史 tar）。
+    #[test]
+    fn a_deploy_without_a_package_keeps_the_recorded_channel() {
+        use client_core::config::DockerChannel;
+
+        let package = std::path::Path::new("/tmp/candidate.zip");
+        for recorded in [DockerChannel::Images, DockerChannel::Registry] {
+            let opposite = match recorded {
+                DockerChannel::Images => DockerChannel::Registry,
+                DockerChannel::Registry => DockerChannel::Images,
+            };
+            assert_eq!(
+                super::channel_to_record(Some(package), opposite, recorded),
+                opposite,
+                "换了包就要按本次命令的通道记账"
+            );
+            assert_eq!(
+                super::channel_to_record(None, opposite, recorded),
+                recorded,
+                "没换包时记录必须原样保留"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_env_defaults_and_restore_use_the_selected_file() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(docker.join("secrets"))?;
+        let selected = docker.join("secrets/operator.env");
+        let default = docker.join(".env");
+        std::fs::write(&selected, "EXISTING=operator\n")?;
+        std::fs::write(&default, "EXISTING=default\n")?;
+        let snapshot = OnlineEnvPreserve::capture(&selected)?;
+        snapshot.merge_defaults("EXISTING=package\nNEW_KEY=added\n")?;
+        assert_eq!(
+            std::fs::read_to_string(&selected)?,
+            "EXISTING=operator\nNEW_KEY=added\n"
+        );
+        assert_eq!(std::fs::read_to_string(&default)?, "EXISTING=default\n");
+        snapshot.restore()?;
+        assert_eq!(std::fs::read_to_string(&selected)?, "EXISTING=operator\n");
+        assert_eq!(
+            std::fs::read_dir(directory.path())?.count(),
+            1,
+            "no secrets backup is left on disk"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn absent_selected_env_is_created_from_defaults() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let selected = directory.path().join("secrets/operator.env");
+        let snapshot = OnlineEnvPreserve::capture(&selected)?;
+        snapshot.merge_defaults("NEW_KEY=added\n")?;
+        assert_eq!(std::fs::read_to_string(&selected)?, "NEW_KEY=added\n");
+        Ok(())
+    }
+
+    #[test]
+    fn context_rejects_custom_compose_before_package_changes() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        let env = directory.path().join("secrets/operator.env");
+        super::DeploymentContext::validate_paths(&root.join("docker-compose.yml"), &env, &root)?;
+        assert!(
+            super::DeploymentContext::validate_paths(&root.join("custom.yml"), &env, &root)
+                .is_err()
+        );
+        assert!(
+            !root.exists(),
+            "context validation must not mutate package files"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn offline_accepts_external_leaf_and_parent_aliases_into_preserved_package() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir()?;
+        let package = directory.path().join("docker");
+        std::fs::create_dir_all(package.join("secrets"))?;
+        let target = package.join("secrets/operator.env");
+        std::fs::write(&target, "OPERATOR=fixture\n")?;
+        let leaf = directory.path().join("external.env");
+        symlink(&target, &leaf)?;
+        super::validate_offline_env_aliases(&leaf, &package)?;
+
+        let parent = directory.path().join("external-secrets");
+        symlink(package.join("secrets"), &parent)?;
+        super::validate_offline_env_aliases(&parent.join("operator.env"), &package)?;
+        assert_eq!(std::fs::read_to_string(&target)?, "OPERATOR=fixture\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn offline_accepts_plain_inner_env_and_aliases_with_stable_external_targets() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir()?;
+        let package = directory.path().join("docker");
+        std::fs::create_dir_all(package.join("secrets"))?;
+        let inner = package.join("secrets/operator.env");
+        std::fs::write(&inner, "OPERATOR=fixture\n")?;
+        super::validate_offline_env_aliases(&inner, &package)?;
+
+        let external = directory.path().join("stable.env");
+        std::fs::write(&external, "OPERATOR=external-fixture\n")?;
+        let alias = directory.path().join("external-alias.env");
+        symlink(&external, &alias)?;
+        super::validate_offline_env_aliases(&alias, &package)?;
+
+        let inside_alias = package.join("inside-alias.env");
+        symlink(&external, &inside_alias)?;
+        super::validate_offline_env_aliases(&inside_alias, &package)?;
+
+        // An alias above the package root is equivalent to macOS /var or /tmp:
+        // its target is an ancestor of the root, not something moved with it.
+        let system_parent = directory.path().join("system-parent-alias");
+        symlink(directory.path(), &system_parent)?;
+        super::validate_offline_env_aliases(
+            &system_parent.join("docker/secrets/operator.env"),
+            &system_parent.join("docker"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn no_upgrade_with_older_manifest_keeps_deployed_version() -> Result<()> {
+        let strategy = UpgradeStrategy::NoUpgrade {
+            target_version: "9.71.1.0".parse()?,
+        };
+        assert_eq!(
+            super::deployment_target_version(&strategy, "9.71.2.2"),
+            "9.71.2.2"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn no_upgrade_with_equal_manifest_preserves_version_string() -> Result<()> {
+        let strategy = UpgradeStrategy::NoUpgrade {
+            target_version: "9.71.2.0".parse()?,
+        };
+        // Config versions are operator-owned strings; do not normalize a
+        // three-part version when redeploying the unchanged package.
+        assert_eq!(
+            super::deployment_target_version(&strategy, "9.71.2"),
+            "9.71.2"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn full_upgrade_records_selected_package_version() -> Result<()> {
+        let strategy = UpgradeStrategy::FullUpgrade {
+            url: String::new(),
+            hash: String::new(),
+            signature: String::new(),
+            target_version: "9.71.3.0".parse()?,
+            download_type: client_core::upgrade_strategy::DownloadType::Full,
+        };
+        assert_eq!(
+            super::deployment_target_version(&strategy, "9.71.2.2"),
+            "9.71.3.0"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn patch_upgrade_records_selected_package_version() -> Result<()> {
+        use client_core::api_types::{PatchOperations, PatchPackageInfo};
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: None,
+                    delete: None,
+                },
+            },
+            target_version: "9.71.2.3".parse()?,
+            download_type: client_core::upgrade_strategy::DownloadType::Patch,
+        };
+        assert_eq!(
+            super::deployment_target_version(&strategy, "9.71.2.2"),
+            "9.71.2.3"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn no_upgrade_has_no_env_snapshot_to_restore_or_consume() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let env = directory.path().join("operator.env");
+        std::fs::write(&env, "EXISTING=operator\n")?;
+        let strategy = client_core::upgrade_strategy::UpgradeStrategy::NoUpgrade {
+            target_version: "0.0.92.0".parse()?,
+        };
+        assert!(super::env_snapshot_for_strategy(&strategy, &env)?.is_none());
+        assert_eq!(std::fs::read_to_string(&env)?, "EXISTING=operator\n");
+        assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn full_extraction_preserves_nested_selected_env_then_merges_new_keys() -> Result<()> {
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(docker.join("secrets"))?;
+        let selected = docker.join("secrets/operator.env");
+        std::fs::write(&selected, "EXISTING=operator\n")?;
+        std::fs::write(docker.join("secrets/obsolete.conf"), "old")?;
+        std::fs::write(docker.join(".env"), "EXISTING=default\n")?;
+        let archive = directory.path().join("full.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive)?);
+        for (path, contents) in [
+            ("docker/.env", "EXISTING=package\nNEW_KEY=added\n"),
+            (
+                "docker/secrets/operator.env",
+                "package-must-not-replace-operator",
+            ),
+            ("docker/secrets/new.conf", "new"),
+        ] {
+            zip.start_file(path, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(contents.as_bytes())?;
+        }
+        zip.finish()?;
+        let snapshot = OnlineEnvPreserve::capture(&selected)?;
+        let strategy = UpgradeStrategy::FullUpgrade {
+            url: String::new(),
+            hash: String::new(),
+            signature: String::new(),
+            target_version: "0.0.92.0".parse()?,
+            download_type: DownloadType::Full,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extracted =
+            crate::utils::extract_docker_service_with_env(&archive, &strategy, &selected).await;
+        std::env::set_current_dir(cwd)?;
+        extracted?;
+        assert_eq!(std::fs::read_to_string(&selected)?, "EXISTING=operator\n");
+        assert!(!docker.join("secrets/obsolete.conf").exists());
+        assert_eq!(
+            std::fs::read_to_string(docker.join("secrets/new.conf"))?,
+            "new"
+        );
+        snapshot.merge_defaults(&super::read_package_env_defaults(&archive)?)?;
+        assert_eq!(
+            std::fs::read_to_string(&selected)?,
+            "EXISTING=operator\nNEW_KEY=added\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(docker.join(".env"))?,
+            "EXISTING=default\nNEW_KEY=added\n"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn full_tar_preserves_nested_selected_env_and_merges_unselected_defaults() -> Result<()> {
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(docker.join("secrets"))?;
+        let selected = docker.join("secrets/operator.env");
+        std::fs::write(&selected, "EXISTING=operator\n")?;
+        std::fs::write(docker.join("secrets/obsolete.conf"), "old")?;
+        std::fs::write(docker.join(".env"), "EXISTING=default\n")?;
+        let archive = directory.path().join("full.tar.gz");
+        let encoder = GzEncoder::new(File::create(&archive)?, Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        for (path, contents) in [
+            ("docker/.env", "EXISTING=package\nNEW_KEY=added\n"),
+            (
+                "docker/secrets/operator.env",
+                "package-must-not-replace-operator",
+            ),
+            ("docker/secrets/new.conf", "new"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            tar.append_data(&mut header, path, contents.as_bytes())?;
+        }
+        tar.into_inner()?.finish()?;
+        let snapshot = OnlineEnvPreserve::capture(&selected)?;
+        let strategy = UpgradeStrategy::FullUpgrade {
+            url: String::new(),
+            hash: String::new(),
+            signature: String::new(),
+            target_version: "0.0.92.0".parse()?,
+            download_type: DownloadType::Full,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extracted =
+            crate::utils::extract_docker_service_with_env(&archive, &strategy, &selected).await;
+        std::env::set_current_dir(cwd)?;
+        extracted?;
+        assert_eq!(std::fs::read_to_string(&selected)?, "EXISTING=operator\n");
+        assert!(!docker.join("secrets/obsolete.conf").exists());
+        assert_eq!(
+            std::fs::read_to_string(docker.join("secrets/new.conf"))?,
+            "new"
+        );
+        snapshot.merge_defaults(&super::read_package_env_defaults(&archive)?)?;
+        assert_eq!(
+            std::fs::read_to_string(&selected)?,
+            "EXISTING=operator\nNEW_KEY=added\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(docker.join(".env"))?,
+            "EXISTING=default\nNEW_KEY=added\n"
+        );
+        Ok(())
+    }
+
+    /// P1#2 回归：真实 ZIP patch 提取器必须把包内新 .env 键合并进用户旧值
+    /// （旧缺陷：解压器跳过已存在的 .env，最后旧文件与自己合并，新键永不落地）
+    #[tokio::test]
+    async fn patch_extraction_merges_package_env_into_user_values() -> Result<()> {
+        use anyhow::Context as _;
+        use client_core::api_types::{PatchOperations, PatchPackageInfo, ReplaceOperations};
+        use client_core::upgrade_strategy::DownloadType;
+        use client_core::upgrade_strategy::UpgradeStrategy;
+
+        let directory = tempfile::tempdir()?;
+        let docker_dir = directory.path().join("docker");
+        std::fs::create_dir_all(docker_dir.join("config"))?;
+        std::fs::write(
+            docker_dir.join(".env"),
+            "MYSQL_PASSWORD=user-secret\nPORT=8080\n",
+        )?;
+
+        let archive_path = directory.path().join("patch.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"MYSQL_PASSWORD=package-default\nNEW_REQUIRED=package-value\n")?;
+        zip.start_file(
+            "docker/config/app.conf",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(b"content\n")?;
+        // C04 契约：patch 必须携带全部关键 schema（缺文件会被提取器硬拒绝）
+        for critical in client_core::constants::sql::CRITICAL_UPGRADE_FILES {
+            zip.start_file(
+                format!("docker/{critical}"),
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            zip.write_all(
+                b"USE agent_platform;\nCREATE TABLE `t` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n",
+            )?;
+        }
+        zip.finish()?;
+
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: Some(ReplaceOperations {
+                        files: vec![".env".to_string(), "config/app.conf".to_string()],
+                        directories: Vec::new(),
+                    }),
+                    delete: None,
+                },
+            },
+            target_version: "0.0.90.0".parse().context("version")?,
+            download_type: DownloadType::Patch,
+        };
+
+        // 提取器按相对 CWD 的 docker/ 工作；nextest 每测试独立进程，chdir 安全
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extraction = crate::utils::extract_docker_service(&archive_path, &strategy).await;
+        std::env::set_current_dir(cwd)?;
+        extraction?;
+
+        let merged = std::fs::read_to_string(docker_dir.join(".env"))?;
+        assert!(
+            merged.contains("MYSQL_PASSWORD=user-secret"),
+            "用户值必须保留: {merged}"
+        );
+        assert!(merged.contains("PORT=8080"), "用户值必须保留: {merged}");
+        assert!(
+            merged.contains("NEW_REQUIRED=package-value"),
+            "包内新键必须补齐: {merged}"
+        );
+        assert!(
+            !merged.contains("package-default"),
+            "包内占位值不得覆盖用户密钥: {merged}"
+        );
+        Ok(())
+    }
+
+    /// F03 回归：候选 .env 里 `${UNDEFINED}` 与 `KEY= # 行内注释` 都必须按
+    /// 真实 Compose 语义解析为空 → 必填键缺失在停服前发现
+    #[test]
+    fn candidate_preflight_treats_undefined_interpolation_and_inline_comments_as_empty()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let docker_dir = directory.path().join("docker");
+        std::fs::create_dir_all(&docker_dir)?;
+
+        let archive_path = directory.path().join("full.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        zip.start_file(
+            "docker-compose.yml",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(
+            b"services:\n  backend:\n    environment:\n      - SECRET=${NEW_MUST_SET:?}\n",
+        )?;
+        // 包内 .env "定义"了该键，但值为未定义引用 / 纯行内注释——真实 Compose 均解析为空
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"NEW_MUST_SET=${UNDEFINED_FIXTURE_KEY}\n")?;
+        zip.finish()?;
+
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let result =
+            super::preflight_candidate_package_at(&archive_path, false, &docker_dir.join(".env"));
+        std::env::set_current_dir(cwd)?;
+        let error = result.expect_err("undefined interpolation must count as empty");
+        assert!(
+            error.to_string().contains("NEW_MUST_SET"),
+            "错误必须指名键: {error}"
+        );
+
+        // 行内注释形态
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        zip.start_file(
+            "docker-compose.yml",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(
+            b"services:\n  backend:\n    environment:\n      - SECRET=${NEW_MUST_SET:?}\n",
+        )?;
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"NEW_MUST_SET= # fill before upgrade\n")?;
+        zip.finish()?;
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let result =
+            super::preflight_candidate_package_at(&archive_path, false, &docker_dir.join(".env"));
+        std::env::set_current_dir(cwd)?;
+        assert!(result.is_err(), "行内注释值必须解析为空并触发必填失败");
+        Ok(())
+    }
+
+    /// F07 回归：patch 按 manifest 驱动强制更新全部关键引用文件——
+    /// 即使 operations 不包含它们，最终磁盘也是目标版本；缺引用文件则硬失败
+    #[tokio::test]
+    async fn patch_extraction_updates_manifest_referenced_files_beyond_ops() -> Result<()> {
+        use anyhow::Context as _;
+        use client_core::api_types::{PatchOperations, PatchPackageInfo, ReplaceOperations};
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+
+        let directory = tempfile::tempdir()?;
+        let docker_dir = directory.path().join("docker");
+        std::fs::create_dir_all(docker_dir.join("config"))?;
+        // 磁盘上的旧版 schema/bootstrap（将被包内新版覆盖）
+        std::fs::write(
+            docker_dir.join("config/init_mysql.sql"),
+            b"-- old platform schema\n",
+        )?;
+        std::fs::write(
+            docker_dir.join("config/init_mysql_im.sql"),
+            b"-- old im schema\n",
+        )?;
+        std::fs::write(
+            docker_dir.join("config/init_mysql_databases.sql"),
+            b"-- old bootstrap\n",
+        )?;
+
+        let manifest_json = br#"{"contract_version":1,"requires":{"cli_capability":"mysql-schema-manifest-v1"},
+"mysql_target":{"service":"mysql","internal_port":3306},"application_connections":[],
+"databases":[{"name":"agent_platform","bootstrap_only":false},{"name":"nuwax_im","bootstrap_only":false}],
+"bootstrap":{"path":"config/init_mysql_databases.sql","idempotent":true,"initdb_target":"00_init_mysql_databases.sql"},
+"permissions":{"path":"config/init_mysql_permissions.sh","user_env":"MYSQL_USER","databases":"bootstrap","initdb_target":"01_init_mysql_permissions.sh"},
+"schemas":[
+ {"database":"agent_platform","path":"config/init_mysql.sql","initdb_target":"10_init_mysql.sql"},
+ {"database":"nuwax_im","path":"config/init_mysql_im.sql","initdb_target":"20_init_mysql_im.sql"}],
+"first_install_seeds":[]}"#;
+        let new_platform = b"USE agent_platform;\nCREATE TABLE `users_new` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n";
+        let new_im = b"USE `nuwax_im`;\nCREATE TABLE `im_msg_new` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n";
+        let new_bootstrap = b"CREATE DATABASE IF NOT EXISTS `agent_platform` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\nCREATE DATABASE IF NOT EXISTS `nuwax_im` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;\n";
+        let new_permissions = b"#!/bin/sh\nexit 0\n";
+
+        let archive_path = directory.path().join("patch.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        for (name, bytes) in [
+            (
+                "docker/config/mysql-schema-manifest.json",
+                &manifest_json[..],
+            ),
+            ("docker/config/init_mysql_databases.sql", &new_bootstrap[..]),
+            (
+                "docker/config/init_mysql_permissions.sh",
+                &new_permissions[..],
+            ),
+            ("docker/config/init_mysql.sql", &new_platform[..]),
+            ("docker/config/init_mysql_im.sql", &new_im[..]),
+            ("docker/config/app.conf", b"content\n"),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(bytes)?;
+        }
+        let compose = b"services: {}\n";
+        zip.start_file(
+            "docker/docker-compose.yml",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(compose)?;
+        let delivery = test_delivery_manifest(
+            compose,
+            &[
+                ("config/mysql-schema-manifest.json", &manifest_json[..]),
+                ("config/init_mysql_databases.sql", &new_bootstrap[..]),
+                ("config/init_mysql_permissions.sh", &new_permissions[..]),
+                ("config/init_mysql.sql", &new_platform[..]),
+                ("config/init_mysql_im.sql", &new_im[..]),
+            ],
+            &[],
+        )?;
+        zip.start_file(
+            "docker/DELIVERY_MANIFEST.json",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(delivery.as_bytes())?;
+        zip.finish()?;
+
+        // ops 只声明 app.conf——schema/manifest 全不在变更清单里
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: Some(ReplaceOperations {
+                        files: vec!["config/app.conf".to_string()],
+                        directories: Vec::new(),
+                    }),
+                    delete: None,
+                },
+            },
+            target_version: "0.0.91.0".parse().context("version")?,
+            download_type: DownloadType::Patch,
+        };
+
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extraction = crate::utils::extract_docker_service(&archive_path, &strategy).await;
+        std::env::set_current_dir(cwd)?;
+        extraction.expect("patch extraction must succeed with manifest-driven criticals");
+
+        // 未进 ops 的关键文件全部更新为目标版本
+        assert_eq!(
+            std::fs::read(docker_dir.join("config/init_mysql.sql"))?,
+            &new_platform[..],
+            "平台 schema 必须被强制更新"
+        );
+        assert_eq!(
+            std::fs::read(docker_dir.join("config/init_mysql_im.sql"))?,
+            &new_im[..],
+            "IM schema 必须被强制更新"
+        );
+        assert_eq!(
+            std::fs::read(docker_dir.join("config/init_mysql_databases.sql"))?,
+            &new_bootstrap[..],
+            "bootstrap 必须被强制更新"
+        );
+        assert!(
+            std::fs::read_to_string(docker_dir.join("config/mysql-schema-manifest.json"))?
+                .contains("mysql-schema-manifest-v1")
+        );
+        Ok(())
+    }
+
+    fn test_delivery_manifest(
+        compose: &[u8],
+        mysql_files: &[(&str, &[u8])],
+        artifacts: &[(&str, &[u8])],
+    ) -> Result<String> {
+        let hash = client_core::device_info::fingerprint::sha256_hex;
+        let files: std::collections::BTreeMap<_, _> = mysql_files
+            .iter()
+            .map(|(path, bytes)| (path.to_string(), hash(bytes)))
+            .collect();
+        let artifact_hashes: std::collections::BTreeMap<_, _> = artifacts
+            .iter()
+            .map(|(path, bytes)| (path.to_string(), hash(bytes)))
+            .collect();
+        let components = if artifacts.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "fixture": {
+                "version": "fixture", "image_id": format!("sha256:{}", "1".repeat(64)), "config_id": format!("sha256:{}", "2".repeat(64)),
+                "source": "registry.fixture/im:latest", "target": "registry.fixture/im:latest", "artifacts": artifact_hashes
+            }})
+        };
+        let mut payload = serde_json::json!({"contract_version":1,"architecture":crate::docker_service::get_system_architecture().as_str(),"components":components,
+            "mysql":{"manifest":"config/mysql-schema-manifest.json","files":files}, "compose":{"path":"docker-compose.yml","sha256":hash(compose)}});
+        // serde_json's map is sorted by key, matching the producer's canonical form.
+        let release = hash(serde_json::to_string(&payload)?.as_bytes());
+        payload.as_object_mut().context("payload object")?.insert(
+            "release_sha256".to_string(),
+            serde_json::Value::String(release),
+        );
+        Ok(serde_json::to_string(&payload)?)
+    }
+
+    #[tokio::test]
+    async fn patch_forces_delivery_and_compose_even_when_operations_omit_them() -> Result<()> {
+        use anyhow::Context as _;
+        use client_core::api_types::{PatchOperations, PatchPackageInfo, ReplaceOperations};
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(docker.join("config"))?;
+        std::fs::write(
+            docker.join("docker-compose.yml"),
+            "services: {old: {image: fixture}}\n",
+        )?;
+        std::fs::write(docker.join("DELIVERY_MANIFEST.json"), "old release")?;
+        let compose = b"services: {}\n";
+        let platform = valid_platform_sql().as_bytes();
+        let im = valid_im_sql().as_bytes();
+        let delivery = test_delivery_manifest(
+            compose,
+            &[
+                ("config/init_mysql.sql", platform),
+                ("config/init_mysql_im.sql", im),
+            ],
+            &[],
+        )?;
+        let archive_path = directory.path().join("patch.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        for (path, bytes) in [
+            ("docker-compose.yml", &compose[..]),
+            ("DELIVERY_MANIFEST.json", delivery.as_bytes()),
+            ("config/init_mysql.sql", platform),
+            ("config/init_mysql_im.sql", im),
+        ] {
+            zip.start_file(
+                format!("docker/{path}"),
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            zip.write_all(bytes)?;
+        }
+        zip.finish()?;
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: Some(ReplaceOperations {
+                        files: Vec::new(),
+                        directories: Vec::new(),
+                    }),
+                    delete: None,
+                },
+            },
+            target_version: "0.0.92.0".parse().context("version")?,
+            download_type: DownloadType::Patch,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let result = crate::utils::extract_docker_service(&archive_path, &strategy).await;
+        std::env::set_current_dir(cwd)?;
+        result?;
+        assert_eq!(std::fs::read(docker.join("docker-compose.yml"))?, compose);
+        assert_eq!(
+            std::fs::read_to_string(docker.join("DELIVERY_MANIFEST.json"))?,
+            delivery
+        );
+        let manifest = client_core::container::preflight::parse_delivery_manifest(&delivery)?;
+        client_core::container::preflight::verify_delivery_manifest(&manifest, &docker, None)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_patch_manifest_fails_before_changing_disk() -> Result<()> {
+        use anyhow::Context as _;
+        use client_core::api_types::{PatchOperations, PatchPackageInfo, ReplaceOperations};
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir_all(docker.join("config"))?;
+        std::fs::write(docker.join("config/app.conf"), "old")?;
+        let archive_path = directory.path().join("patch.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        for (path, bytes) in [
+            (
+                "config/mysql-schema-manifest.json",
+                &b"invalid manifest"[..],
+            ),
+            ("config/app.conf", &b"new"[..]),
+            ("config/init_mysql.sql", valid_platform_sql().as_bytes()),
+            ("config/init_mysql_im.sql", valid_im_sql().as_bytes()),
+        ] {
+            zip.start_file(
+                format!("docker/{path}"),
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            zip.write_all(bytes)?;
+        }
+        zip.finish()?;
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: Some(ReplaceOperations {
+                        files: vec!["config/app.conf".to_string()],
+                        directories: Vec::new(),
+                    }),
+                    delete: None,
+                },
+            },
+            target_version: "0.0.92.0".parse().context("version")?,
+            download_type: DownloadType::Patch,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let result = crate::utils::extract_docker_service(&archive_path, &strategy).await;
+        std::env::set_current_dir(cwd)?;
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(docker.join("config/app.conf"))?,
+            "old"
+        );
+        Ok(())
+    }
+
+    /// P1#3 回归：候选包预检在缺新必填键时失败（旧服务无需停止即可发现）
+    #[test]
+    fn candidate_package_preflight_rejects_missing_required_keys() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let docker_dir = directory.path().join("docker");
+        std::fs::create_dir_all(&docker_dir)?;
+        std::fs::write(docker_dir.join(".env"), "EXISTING=1\n")?;
+
+        let archive_path = directory.path().join("full.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive_path)?);
+        zip.start_file(
+            "docker-compose.yml",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(
+            b"services:\n  backend:\n    environment:\n      - SECRET=${NEW_MUST_SET:?}\n",
+        )?;
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"OTHER=2\n")?;
+        zip.finish()?;
+
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let result =
+            super::preflight_candidate_package_at(&archive_path, false, &docker_dir.join(".env"));
+        std::env::set_current_dir(cwd)?;
+        let error = result.expect_err("missing required key must fail the preflight");
+        assert!(
+            error.to_string().contains("NEW_MUST_SET"),
+            "错误必须指名缺失键: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn offline_legacy_archive_requires_platform_and_validates_present_im() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = directory.path().join("bundle.tar.gz");
+
+        // 空包：缺少全部模板
+        write_archive(&archive, None, None)?;
+        assert!(validate_offline_archive_sql(&archive).is_err());
+
+        // Legacy single-database releases remain supported by the new CLI.
+        write_archive(&archive, Some(valid_platform_sql()), None)?;
+        validate_offline_archive_sql(&archive)?;
+
+        // Optional templates, when present, must still be valid.
+        write_archive(
+            &archive,
+            Some(valid_platform_sql()),
+            Some("CREATE TABLE im_users (id INT);"),
+        )?;
+        assert!(validate_offline_archive_sql(&archive).is_err());
+
+        // 模板缺 USE（无法归属库）
+        write_archive(
+            &archive,
+            Some("CREATE TABLE users (id INT);"),
+            Some(valid_im_sql()),
+        )?;
+        assert!(validate_offline_archive_sql(&archive).is_err());
+
+        // 两模板齐全且合法
+        write_archive(&archive, Some(valid_platform_sql()), Some(valid_im_sql()))?;
+        validate_offline_archive_sql(&archive)?;
+        Ok(())
+    }
+
+    fn write_legacy_zip(path: &Path, entries: &[(&str, &str)]) -> Result<()> {
+        let mut archive = zip::ZipWriter::new(File::create(path)?);
+        for (name, content) in entries {
+            archive.start_file(*name, zip::write::SimpleFileOptions::default())?;
+            archive.write_all(content.as_bytes())?;
+        }
+        archive.finish()?;
+        Ok(())
+    }
+
+    fn legacy_compose() -> &'static str {
+        "services:\n  mysql:\n    image: mysql:8.0\n    volumes:\n      - ./config/init_mysql.sql:/docker-entrypoint-initdb.d/10_init_mysql.sql:ro\n      - ./config/init_mysql_data.sql:/docker-entrypoint-initdb.d/30_data.sql:ro\n"
+    }
+
+    #[test]
+    fn legacy_full_zip_accepts_single_database_and_checks_mounted_extra_schema() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = directory.path().join("full.zip");
+        let env = directory.path().join("operator.env");
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/docker-compose.yml", legacy_compose()),
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+                (
+                    "docker/config/init_mysql_data.sql",
+                    "INSERT INTO users VALUES (1);",
+                ),
+            ],
+        )?;
+        validate_offline_archive_sql(&archive)?;
+        super::preflight_candidate_package_at(&archive, false, &env)?;
+        let aliased =
+            legacy_compose().replace("./config/init_mysql.sql", "./config/./init_mysql.sql");
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/docker-compose.yml", &aliased),
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+            ],
+        )?;
+        super::preflight_candidate_package_at(&archive, false, &env)?;
+
+        let im_compose = format!(
+            "{}      - ./config/init_mysql_im.sql:/docker-entrypoint-initdb.d/20_im.sql:ro\n",
+            legacy_compose()
+        );
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/docker-compose.yml", &im_compose),
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+            ],
+        )?;
+        assert!(validate_offline_archive_sql(&archive).is_err());
+        assert!(super::preflight_candidate_package_at(&archive, false, &env).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_no_upgrade_preflight_accepts_single_database_and_rejects_bad_or_missing_im()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        std::fs::create_dir_all(root.join("config"))?;
+        let compose = root.join("docker-compose.yml");
+        let env = root.join(".env");
+        std::fs::write(&compose, legacy_compose())?;
+        std::fs::write(&env, "MYSQL_DATABASE=agent_platform\n")?;
+        std::fs::write(root.join("config/init_mysql.sql"), valid_platform_sql())?;
+        super::preflight_current_config(&compose, &env, &root)?;
+        std::fs::write(
+            root.join("config/init_mysql_im.sql"),
+            "CREATE TABLE im_users (id INT);",
+        )?;
+        assert!(super::preflight_current_config(&compose, &env, &root).is_err());
+        std::fs::remove_file(root.join("config/init_mysql_im.sql"))?;
+        std::fs::write(
+            &compose,
+            format!(
+                "{}      - ./config/init_mysql_im.sql:/docker-entrypoint-initdb.d/20_im.sql:ro\n",
+                legacy_compose()
+            ),
+        )?;
+        assert!(super::preflight_current_config(&compose, &env, &root).is_err());
+        std::fs::write(root.join("config/init_mysql_im.sql"), valid_im_sql())?;
+        super::preflight_current_config(&compose, &env, &root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_patch_reuses_current_compose_and_force_updates_single_schema() -> Result<()> {
+        use client_core::api_types::{PatchOperations, PatchPackageInfo};
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        std::fs::create_dir_all(root.join("config"))?;
+        let compose = root.join("docker-compose.yml");
+        let env = directory.path().join("secrets/operator.env");
+        std::fs::create_dir_all(env.parent().context("env parent")?)?;
+        std::fs::write(&env, "MYSQL_DATABASE=agent_platform\n")?;
+        std::fs::write(&compose, legacy_compose())?;
+        std::fs::write(root.join("config/init_mysql.sql"), "old schema")?;
+        let archive = directory.path().join("patch.zip");
+        write_legacy_zip(
+            &archive,
+            &[("docker/config/init_mysql.sql", valid_platform_sql())],
+        )?;
+        super::preflight_candidate_package_with_compose_at(
+            &archive,
+            true,
+            &env,
+            Some(&compose),
+            &[],
+        )?;
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: None,
+                    delete: None,
+                },
+            },
+            target_version: "0.0.90.1".parse()?,
+            download_type: DownloadType::Patch,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extracted =
+            crate::utils::extract_docker_service_with_env(&archive, &strategy, &env).await;
+        std::env::set_current_dir(cwd)?;
+        extracted?;
+        assert_eq!(std::fs::read_to_string(&compose)?, legacy_compose());
+        assert_eq!(
+            std::fs::read_to_string(root.join("config/init_mysql.sql"))?,
+            valid_platform_sql()
+        );
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &["docker-compose.yml".to_string()],
+            )
+            .is_err(),
+            "a patch deleting/replacing Compose cannot retain its old contents"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_patch_rejects_operations_removing_retained_component_entrypoints() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        std::fs::create_dir_all(root.join("im-app"))?;
+        let compose = root.join("docker-compose.yml");
+        let env = directory.path().join("operator.env");
+        let im_compose = format!(
+            "{}  im:\n    image: im\n    volumes:\n      - ./im-app:/app:ro\n",
+            legacy_compose()
+        );
+        std::fs::write(&compose, im_compose)?;
+        for name in [
+            "nuwax-im-web-bootstrap.jar",
+            "nuwax-im-gateway-bootstrap.jar",
+        ] {
+            std::fs::write(root.join("im-app").join(name), "jar bytes")?;
+        }
+        let archive = directory.path().join("patch.zip");
+        write_legacy_zip(
+            &archive,
+            &[("docker/config/init_mysql.sql", valid_platform_sql())],
+        )?;
+        super::preflight_candidate_package_with_compose_at(
+            &archive,
+            true,
+            &env,
+            Some(&compose),
+            &[],
+        )?;
+        for changed in ["im-app", "im-app/nuwax-im-web-bootstrap.jar"] {
+            assert!(
+                super::preflight_candidate_package_with_compose_at(
+                    &archive,
+                    true,
+                    &env,
+                    Some(&compose),
+                    &[changed.to_string()],
+                )
+                .is_err()
+            );
+        }
+        // A sibling entry cannot hide removal of a required jar in a directory mount.
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+                ("docker/im-app/readme.txt", "patched readme"),
+            ],
+        )?;
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &["im-app/nuwax-im-web-bootstrap.jar".to_string()],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("im-app/nuwax-im-web-bootstrap.jar"))?,
+            "jar bytes"
+        );
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+                ("docker/im-app/nuwax-im-web-bootstrap.jar", ""),
+            ],
+        )?;
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &[],
+            )
+            .is_err(),
+            "an explicitly empty replacement cannot fall back to the old jar"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_patch_force_restores_supplied_binary_jar_deleted_without_replace() -> Result<()>
     {
-        info!("✅ Offline deployment completed successfully!");
-        info!("🎉 All services started successfully");
-    } else {
-        warn!("⚠️ Timed out waiting for services to start; please check status manually");
+        use client_core::api_types::{PatchOperations, PatchPackageInfo, ReplaceOperations};
+        use client_core::upgrade_strategy::{DownloadType, UpgradeStrategy};
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        std::fs::create_dir_all(root.join("config"))?;
+        std::fs::create_dir_all(root.join("im-app"))?;
+        let compose = root.join("docker-compose.yml");
+        let env = root.join(".env");
+        std::fs::write(
+            &compose,
+            format!(
+                "{}  im:\n    image: im\n    volumes:\n      - ./im-app:/app:ro\n",
+                legacy_compose()
+            ),
+        )?;
+        std::fs::write(&env, "MYSQL_DATABASE=agent_platform\n")?;
+        std::fs::write(root.join("config/init_mysql.sql"), valid_platform_sql())?;
+        let web = "im-app/nuwax-im-web-bootstrap.jar";
+        std::fs::write(root.join(web), "old jar")?;
+        std::fs::write(
+            root.join("im-app/nuwax-im-gateway-bootstrap.jar"),
+            "unchanged jar",
+        )?;
+        let archive = directory.path().join("patch.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive)?);
+        zip.start_file(
+            "docker/config/init_mysql.sql",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(valid_platform_sql().as_bytes())?;
+        zip.start_file(
+            format!("docker/{web}"),
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        let jar = [0x50, 0x4b, 0xff, 0xfe];
+        zip.write_all(&jar)?;
+        zip.finish()?;
+        super::preflight_candidate_package_with_compose_at(
+            &archive,
+            true,
+            &env,
+            Some(&compose),
+            &[web.to_string()],
+        )?;
+        let strategy = UpgradeStrategy::PatchUpgrade {
+            patch_info: PatchPackageInfo {
+                url: String::new(),
+                hash: None,
+                signature: None,
+                notes: None,
+                operations: PatchOperations {
+                    replace: None,
+                    delete: Some(ReplaceOperations {
+                        files: vec![web.to_string()],
+                        directories: Vec::new(),
+                    }),
+                },
+            },
+            target_version: "0.0.90.1".parse()?,
+            download_type: DownloadType::Patch,
+        };
+        let cwd = std::env::current_dir()?;
+        std::env::set_current_dir(directory.path())?;
+        let extracted =
+            crate::utils::extract_docker_service_with_env(&archive, &strategy, &env).await;
+        std::env::set_current_dir(cwd)?;
+        extracted?;
+        assert_eq!(std::fs::read(root.join(web))?, jar);
+        assert_eq!(
+            std::fs::read_to_string(root.join("im-app/nuwax-im-gateway-bootstrap.jar"))?,
+            "unchanged jar"
+        );
+        Ok(())
     }
 
-    Ok(())
+    #[test]
+    fn legacy_patch_rejects_unsafe_operation_paths_before_retaining_compose() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("docker-compose.yml");
+        std::fs::write(&compose, legacy_compose())?;
+        let archive = directory.path().join("patch.zip");
+        write_legacy_zip(
+            &archive,
+            &[("docker/config/init_mysql.sql", valid_platform_sql())],
+        )?;
+        let env = directory.path().join("operator.env");
+        for changed in [
+            "config/../docker-compose.yml",
+            ".//docker-compose.yml",
+            "/docker-compose.yml",
+            "C:\\docker-compose.yml",
+            ".",
+        ] {
+            assert!(
+                super::preflight_candidate_package_with_compose_at(
+                    &archive,
+                    true,
+                    &env,
+                    Some(&compose),
+                    &[changed.to_string()],
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(std::fs::read_to_string(compose)?, legacy_compose());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_patch_requires_referenced_or_preexisting_im_from_candidate_archive() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("docker");
+        std::fs::create_dir_all(root.join("config"))?;
+        let compose = root.join("docker-compose.yml");
+        let env = directory.path().join("operator.env");
+        let archive = directory.path().join("patch.zip");
+        write_legacy_zip(
+            &archive,
+            &[("docker/config/init_mysql.sql", valid_platform_sql())],
+        )?;
+        std::fs::write(
+            &compose,
+            format!(
+                "{}      - ./config/init_mysql_im.sql:/docker-entrypoint-initdb.d/20_im.sql:ro\n",
+                legacy_compose()
+            ),
+        )?;
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &[],
+            )
+            .is_err()
+        );
+        std::fs::write(&compose, legacy_compose())?;
+        std::fs::write(root.join("config/init_mysql_im.sql"), valid_im_sql())?;
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &[],
+            )
+            .is_err()
+        );
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+                (
+                    "docker/config/init_mysql_im.sql",
+                    "CREATE TABLE im_users (id INT);",
+                ),
+            ],
+        )?;
+        assert!(
+            super::preflight_candidate_package_with_compose_at(
+                &archive,
+                true,
+                &env,
+                Some(&compose),
+                &[],
+            )
+            .is_err()
+        );
+        write_legacy_zip(
+            &archive,
+            &[
+                ("docker/config/init_mysql.sql", valid_platform_sql()),
+                ("docker/config/init_mysql_im.sql", valid_im_sql()),
+            ],
+        )?;
+        super::preflight_candidate_package_with_compose_at(
+            &archive,
+            true,
+            &env,
+            Some(&compose),
+            &[],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn offline_manifest_uses_declared_schema_paths_and_checks_database_identity() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive_path = directory.path().join("bundle.zip");
+        let manifest = serde_json::json!({
+            "contract_version":1,"requires":{"cli_capability":"mysql-schema-manifest-v1"},
+            "mysql_target":{"service":"mysql","internal_port":3306},"application_connections":[],
+            "databases":[{"name":"custom_app","bootstrap_only":false}],
+            "bootstrap":{"path":"config/bootstrap.sql","idempotent":true,"initdb_target":"00_bootstrap.sql"},
+            "permissions":{"path":"config/permissions.sh","user_env":"MYSQL_USER","databases":"bootstrap","initdb_target":"01_permissions.sh"},
+            "schemas":[{"database":"custom_app","path":"config/custom-schema.sql","initdb_target":"10_custom.sql"}],
+            "first_install_seeds":[]
+        });
+        let write = |database: &str| -> Result<()> {
+            let mut archive = zip::ZipWriter::new(File::create(&archive_path)?);
+            archive.start_file(
+                "docker/config/mysql-schema-manifest.json",
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            archive.write_all(serde_json::to_string(&manifest)?.as_bytes())?;
+            archive.start_file(
+                "docker/config/custom-schema.sql",
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            archive.write_all(
+                format!("USE {database};\nCREATE TABLE example (id INT);\n").as_bytes(),
+            )?;
+            archive.finish()?;
+            Ok(())
+        };
+        write("custom_app")?;
+        validate_offline_archive_sql(&archive_path)?;
+        write("other_app")?;
+        assert!(validate_offline_archive_sql(&archive_path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn offline_zip_archive_accepts_target_sql() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = directory.path().join("bundle.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive)?);
+        for (name, sql) in [
+            ("docker/config/init_mysql.sql", valid_platform_sql()),
+            ("docker/config/init_mysql_im.sql", valid_im_sql()),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(sql.as_bytes())?;
+        }
+        zip.finish()?;
+        validate_offline_archive_sql(&archive)?;
+
+        // 归一化后同名的重复模板必须被拒绝（带/不带 docker/ 前缀）
+        let duplicated = directory.path().join("duplicate.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&duplicated)?);
+        for name in ["docker/config/init_mysql.sql", "config/init_mysql.sql"] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(valid_platform_sql().as_bytes())?;
+        }
+        zip.start_file(
+            "config/init_mysql_im.sql",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(valid_im_sql().as_bytes())?;
+        zip.finish()?;
+        assert!(validate_offline_archive_sql(&duplicated).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn offline_upgrade_preserves_existing_values_and_adds_package_env_defaults() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::create_dir(&docker)?;
+        std::fs::write(
+            docker.join(".env"),
+            "# operator config\nMYSQL_PASSWORD=existing-test-value\nFRONTEND_HOST_PORT=8091",
+        )?;
+        let archive = directory.path().join("package.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive)?);
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"MYSQL_PASSWORD=package-default\nSURREALDB_USER=package-user\nSURREALDB_PASSWORD=package-password\n")?;
+        zip.finish()?;
+        let strategy = UpgradeStrategy::FullUpgrade {
+            url: String::new(),
+            hash: String::new(),
+            signature: String::new(),
+            target_version: "0.0.108".parse()?,
+            download_type: client_core::upgrade_strategy::DownloadType::Full,
+        };
+        let mut replacement = crate::utils::package_replace::PackageReplacement::prepare(
+            &archive,
+            &strategy,
+            &docker,
+            &docker.join(".env"),
+            true,
+        )?;
+        replacement.apply()?;
+        replacement.finish()?;
+        let merged = std::fs::read_to_string(docker.join(".env"))?;
+        assert!(merged.starts_with(
+            "# operator config\nMYSQL_PASSWORD=existing-test-value\nFRONTEND_HOST_PORT=8091\n"
+        ));
+        assert!(merged.contains("SURREALDB_USER=package-user\n"));
+        assert!(merged.contains("SURREALDB_PASSWORD=package-password\n"));
+        assert!(!merged.contains("MYSQL_PASSWORD=package-default"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn real_candidate_rejection_reuses_the_verified_completed_download() -> Result<()> {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        use std::time::Duration;
+        struct Fixture {
+            stop: Arc<AtomicBool>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&source)?);
+        zip.start_file(
+            "docker/docker-compose.yml",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(b"services:\n  backend:\n    image: fixture\n    environment:\n      - SECRET=${CODEX_CACHE_PREFLIGHT_REQUIRED:?required}\n")?;
+        zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(b"CODEX_CACHE_PREFLIGHT_REQUIRED=\n")?;
+        zip.start_file(
+            "docker/config/init_mysql.sql",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(valid_platform_sql().as_bytes())?;
+        zip.finish()?;
+        let body = std::fs::read(&source)?;
+        let size = body.len();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/package.zip", listener.local_addr()?);
+        listener.set_nonblocking(true)?;
+        let get_count = Arc::new(AtomicUsize::new(0));
+        let transferred = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_count = get_count.clone();
+        let thread_bytes = transferred.clone();
+        let thread_stop = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking fixture connection");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("read timeout");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 2048];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).expect("HTTP request");
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let get = request.starts_with(b"GET ");
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nETag: \"cache-preflight-one\"\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).expect("HTTP header");
+                if get {
+                    thread_count.fetch_add(1, Ordering::SeqCst);
+                    stream.write_all(&body).expect("HTTP body");
+                    thread_bytes.fetch_add(body.len(), Ordering::SeqCst);
+                }
+            }
+        });
+        let fixture = Fixture {
+            stop,
+            thread: Some(thread),
+        };
+        let identity = client_core::package_cache::PackageIdentity::new(
+            "0.0.108.0",
+            client_core::architecture::Architecture::detect().as_str(),
+            "full",
+            &url,
+            None,
+        )?;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let api = client_core::api::ApiClient::new(None, None);
+        let cache = directory.path().join("cache");
+        let selected_env = directory.path().join("operator.env");
+        for _ in 0..2 {
+            let candidate = api.download_service_package(&cache, &identity).await?;
+            let error = super::preflight_candidate_package_at(&candidate, false, &selected_env)
+                .err()
+                .context("The actual candidate preflight must reject the missing key")?;
+            assert!(format!("{error:#}").contains("CODEX_CACHE_PREFLIGHT_REQUIRED"));
+        }
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+        assert_eq!(transferred.load(Ordering::SeqCst), size);
+        drop(fixture);
+        Ok(())
+    }
+
+    #[test]
+    fn deployment_failure_rolls_back_files_only_before_mysql_startup() -> Result<()> {
+        for database_started in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let docker = directory.path().join("docker");
+            std::fs::create_dir_all(docker.join("data/mysql"))?;
+            std::fs::write(docker.join("data/mysql/canary"), "unchanged database")?;
+            std::fs::write(docker.join("docker-compose.yml"), "old compose")?;
+            std::fs::write(docker.join(".env"), "OPERATOR=keep\n")?;
+            let package = directory.path().join("package.zip");
+            let mut zip = zip::ZipWriter::new(File::create(&package)?);
+            zip.start_file(
+                "docker/docker-compose.yml",
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            zip.write_all(b"new compose")?;
+            zip.start_file("docker/.env", zip::write::SimpleFileOptions::default())?;
+            zip.write_all(b"NEW_KEY=added\n")?;
+            zip.finish()?;
+            let strategy = UpgradeStrategy::FullUpgrade {
+                url: String::new(),
+                hash: String::new(),
+                signature: String::new(),
+                target_version: "0.0.108".parse()?,
+                download_type: client_core::upgrade_strategy::DownloadType::Full,
+            };
+            let mut replacement = crate::utils::package_replace::PackageReplacement::prepare(
+                &package,
+                &strategy,
+                &docker,
+                &docker.join(".env"),
+                true,
+            )?;
+            replacement.apply()?;
+            let error = super::finish_package_deployment(
+                Some(replacement),
+                Err(anyhow::anyhow!("injected deployment failure")),
+                database_started,
+            )
+            .err()
+            .context("injected deployment failure must propagate")?;
+            assert_eq!(
+                std::fs::read_to_string(docker.join("data/mysql/canary"))?,
+                "unchanged database"
+            );
+            if database_started {
+                assert_eq!(
+                    std::fs::read_to_string(docker.join("docker-compose.yml"))?,
+                    "new compose"
+                );
+                assert!(format!("{error:#}").contains("MySQL startup"));
+                assert_eq!(std::fs::read_dir(directory.path())?.count(), 3);
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(docker.join("docker-compose.yml"))?,
+                    "old compose"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(docker.join(".env"))?,
+                    "OPERATOR=keep\n"
+                );
+                assert!(format!("{error:#}").contains("previous managed files restored"));
+                assert_eq!(std::fs::read_dir(directory.path())?.count(), 2);
+            }
+        }
+        Ok(())
+    }
 }

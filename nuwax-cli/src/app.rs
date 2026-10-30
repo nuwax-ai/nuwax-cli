@@ -133,14 +133,28 @@ impl CliApp {
                     }
                     Some(crate::cli::UpgradeSubcommand::Check { force }) => {
                         let args = crate::cli::UpgradeArgs { force, check: true };
-                        commands::run_upgrade(self, args).await.map_err(|e| {
+                        commands::run_upgrade(
+                            self,
+                            args,
+                            client_core::config::DockerChannel::Images,
+                            true,
+                        )
+                        .await
+                        .map_err(|e| {
                             client_core::DuckError::custom(
                                 t!("app.upgrade_failed", error = e.to_string()).to_string(),
                             )
                         })?;
                     }
                     None => {
-                        commands::run_upgrade(self, args).await.map_err(|e| {
+                        commands::run_upgrade(
+                            self,
+                            args,
+                            client_core::config::DockerChannel::Images,
+                            true,
+                        )
+                        .await
+                        .map_err(|e| {
                             client_core::DuckError::custom(
                                 t!("app.upgrade_failed", error = e.to_string()).to_string(),
                             )
@@ -184,6 +198,7 @@ impl CliApp {
                 new_version,
                 output,
             } => commands::run_diff_sql(old_sql, new_sql, old_version, new_version, output).await,
+            Commands::DeviceInfo { .. } => unreachable!("handled in main.rs"), // 不依赖数据库，已在 main.rs 中处理
         }
     }
 }

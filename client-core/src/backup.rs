@@ -3,6 +3,7 @@ use crate::{
     database::{BackupRecord, BackupStatus, BackupType, Database},
     error::DuckError,
 };
+use anyhow::Context as _;
 use anyhow::Result;
 use chrono::Utc;
 use flate2::Compression;
@@ -68,7 +69,29 @@ impl BackupManager {
     /// 创建备份
     pub async fn create_backup(&self, options: BackupOptions) -> Result<BackupRecord> {
         // 检查所有源路径是否存在
-        let need_backup_paths = options.source_paths;
+        let selected_root = crate::backup_release::deployment_root(&self.docker_manager)?;
+        if options.work_dir.canonicalize()? != selected_root {
+            anyhow::bail!("Backup work directory does not match the selected deployment context");
+        }
+        let release = crate::backup_release::capture_release_snapshot(
+            &self.docker_manager,
+            &options.service_version,
+        )
+        .await?;
+        let need_backup_paths = if let Some(release) = &release {
+            let mut paths = release.source_paths();
+            // Release files are frozen in the snapshot; cold data still comes
+            // from the explicitly selected deployment root.
+            for source in options.source_paths {
+                let name = source.file_name().and_then(|value| value.to_str());
+                if !name.is_some_and(|name| release.context.roots.iter().any(|root| root == name)) {
+                    paths.push(source);
+                }
+            }
+            paths
+        } else {
+            options.source_paths
+        };
 
         // 生成备份文件名（人类易读格式）
         let timestamp = Utc::now().format("%Y-%m-%d_%H-%M-%S");
@@ -87,9 +110,13 @@ impl BackupManager {
         info!("Starting to create backup: {}", backup_path.display());
 
         // 执行备份
-        match self
-            .perform_backup(&need_backup_paths, &backup_path, options.compression_level)
-            .await
+        match Self::perform_backup(
+            &need_backup_paths,
+            &backup_path,
+            options.compression_level,
+            release.as_ref().map(|snapshot| snapshot.root()),
+        )
+        .await
         {
             Ok(_) => {
                 info!("Backup created successfully: {}", backup_path.display());
@@ -135,10 +162,10 @@ impl BackupManager {
     /// - 当传入目录路径时，将递归备份该目录下的所有文件
     /// - 当传入文件路径时，将直接备份该文件
     async fn perform_backup(
-        &self,
         source_paths: &[PathBuf],
         backup_path: &Path,
         compression_level: u32,
+        release_root: Option<&Path>,
     ) -> Result<()> {
         // 确保备份目录存在
         if let Some(parent) = backup_path.parent() {
@@ -148,6 +175,7 @@ impl BackupManager {
         // 在后台线程中执行压缩操作，避免阻塞异步运行时
         let source_paths = source_paths.to_vec();
         let backup_path = backup_path.to_path_buf();
+        let release_root = release_root.map(Path::to_path_buf);
 
         tokio::task::spawn_blocking(move || {
             let file = File::create(&backup_path)?;
@@ -159,7 +187,11 @@ impl BackupManager {
             for source_path in &source_paths {
                 if source_path.is_file() {
                     // 直接处理单个文件
-                    add_file_to_archive(&mut archive, source_path, None)?;
+                    let mapping = release_root
+                        .as_deref()
+                        .filter(|root| source_path.starts_with(root))
+                        .map(|root| (root, ""));
+                    add_file_to_archive(&mut archive, source_path, mapping)?;
                 } else if source_path.is_dir() {
                     let dir_name = source_path
                         .file_name()
@@ -230,17 +262,55 @@ impl BackupManager {
         );
         info!("Target directory: {}", target_dir.display());
 
+        let selected_root = crate::backup_release::deployment_root(&self.docker_manager)?;
+        if target_dir.canonicalize()? != selected_root {
+            anyhow::bail!("Restore directory does not match the selected deployment context");
+        }
+        let rollback_data = !dirs_to_exculde.contains(&"data");
+        let release =
+            crate::backup_release::stage_release_restore(&backup_path, target_dir, rollback_data)?;
+        if let Some(release) = &release {
+            if dirs_to_exculde.iter().any(|name| *name != "data") {
+                anyhow::bail!(
+                    "Release-aware rollback only supports excluding data; partial configuration/artifact rollback is not supported"
+                );
+            }
+            if release.context.service_version != backup_record.service_version {
+                anyhow::bail!("Backup release version does not match its backup record");
+            }
+            crate::backup_release::validate_restore_runtime(&self.docker_manager, release).await?;
+        }
+
+        // P1#5/F05: 停服前核对组件兼容：当前 Compose 引用的组件文件/目录
+        // 必须以非空普通条目存在于该备份——拒绝在停服/清理之后才发现半包
+        crate::container::preflight::verify_backup_component_compatibility(
+            &backup_path,
+            release
+                .as_ref()
+                .map_or(target_dir, |release| release.root()),
+        )
+        .context("Backup is incompatible with the current deployment components")?;
+
         // 停止服务，准备恢复
         info!("Stopping services...");
         self.docker_manager.stop_services().await?;
 
-        // 清理现有数据目录，但保留配置文件
-        self.clear_data_directories(target_dir, dirs_to_exculde)
-            .await?;
-
-        // 执行恢复
-        self.perform_restore(&backup_path, target_dir, dirs_to_exculde)
-            .await?;
+        if let Some(release) = &release {
+            if rollback_data {
+                self.clear_data_directory_only(target_dir).await?;
+                self.perform_selective_restore(&backup_path, target_dir, &["data"])
+                    .await?;
+            }
+            crate::backup_release::apply_release_snapshot(release, target_dir)?;
+            crate::backup_release::restore_runtime_tags(&self.docker_manager, release).await?;
+            self.docker_manager.invalidate_compose_config_cache();
+        } else {
+            // Explicit legacy mode: no delivery receipt on either side.
+            self.clear_data_directories(target_dir, dirs_to_exculde)
+                .await?;
+            self.perform_restore(&backup_path, target_dir, dirs_to_exculde)
+                .await?;
+        }
 
         // 根据参数决定是否启动服务
         if auto_start_service {
@@ -284,6 +354,24 @@ impl BackupManager {
         info!("Starting data directory restore: {}", backup_path.display());
         info!("Target directory: {}", target_dir.display());
 
+        let selected_root = crate::backup_release::deployment_root(&self.docker_manager)?;
+        if target_dir.canonicalize()? != selected_root {
+            anyhow::bail!(
+                "Data-only restore directory does not match the selected deployment context"
+            );
+        }
+        if dirs_to_restore != ["data"] {
+            anyhow::bail!(
+                "Data-only restore requires the data root; partial or unrelated roots are not supported"
+            );
+        }
+        crate::backup_release::validate_data_only_restore(
+            &self.docker_manager,
+            &backup_path,
+            target_dir,
+        )
+        .await?;
+
         // 停止服务，准备恢复
         info!("Stopping services...");
         self.docker_manager.stop_services().await?;
@@ -322,7 +410,13 @@ impl BackupManager {
         docker_dir: &Path,
         dirs_to_exculde: &[&str],
     ) -> Result<()> {
-        let mut data_dirs_to_clear: Vec<String> = vec!["data".to_string(), "app".to_string()];
+        let mut data_dirs_to_clear: Vec<String> = vec![
+            "data".to_string(),
+            "app".to_string(),
+            // 新增应用宿主产物一并清理后按备份整目录恢复，避免新旧文件混杂（C02）
+            "im-app".to_string(),
+            "repo-collab-app".to_string(),
+        ];
         // Filter out directories that should be excluded from clearing
         data_dirs_to_clear.retain(|dir| !dirs_to_exculde.contains(&dir.as_str()));
 
@@ -385,12 +479,10 @@ impl BackupManager {
                         e
                     );
                 }
-            } else {
-                if let Err(e) = tokio::fs::remove_file(&entry_path).await
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    warn!("Failed to remove file: {} - {}", entry_path.display(), e);
-                }
+            } else if let Err(e) = tokio::fs::remove_file(&entry_path).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!("Failed to remove file: {} - {}", entry_path.display(), e);
             }
         }
 
@@ -683,7 +775,9 @@ fn add_file_to_archive(
             .map_err(|e| DuckError::Backup(format!("Failed to calculate relative path: {e}")))?;
 
         // 格式：{dir_name}/{relative_path}
-        if cfg!(windows) {
+        if dir_name.is_empty() {
+            relative_path.to_string_lossy().replace('\\', "/")
+        } else if cfg!(windows) {
             format!(
                 "{}/{}",
                 dir_name,
@@ -693,22 +787,15 @@ fn add_file_to_archive(
             format!("{}/{}", dir_name, relative_path.display())
         }
     } else {
-        // 直接处理单个文件，保持原有路径结构
+        // Preserve the existing explicit source-file contract. Release context
+        // files use the dedicated frozen-root mapping above instead.
         let path_str = file_path.to_string_lossy().to_string();
-
-        // 标准化路径分隔符为Unix风格
         let path_str = if cfg!(windows) {
             path_str.replace('\\', "/")
         } else {
             path_str
         };
-
-        // 移除路径开头可能的 "./" 前缀
-        if let Some(stripped) = path_str.strip_prefix("./") {
-            stripped.to_string()
-        } else {
-            path_str
-        }
+        path_str.strip_prefix("./").unwrap_or(&path_str).to_string()
     };
 
     debug!(
@@ -722,4 +809,147 @@ fn add_file_to_archive(
         .map_err(|e| DuckError::Backup(format!("Failed to add file to archive: {e}")))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod release_snapshot_tests {
+    use super::*;
+    use std::io::{Seek, SeekFrom, Write};
+
+    #[tokio::test]
+    async fn real_sparse_cold_backup_restores_legacy_and_release_logical_files() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        for release_aware in [false, true] {
+            let root = temp
+                .path()
+                .join(if release_aware { "release" } else { "legacy" });
+            let snapshot = if release_aware {
+                let images = crate::backup_release::release_snapshot_tests::write_release(
+                    &root, "A", "schema",
+                )?;
+                Some(crate::backup_release::capture_release_files(
+                    &root, "A", images,
+                )?)
+            } else {
+                std::fs::create_dir_all(&root)?;
+                std::fs::write(root.join("docker-compose.yml"), "services: {}\n")?;
+                std::fs::write(root.join(".env"), "USER_KEY=legacy\n")?;
+                None
+            };
+            std::fs::create_dir_all(root.join("data/mysql"))?;
+            let holes = File::create(root.join("data/mysql/holes-only"))?;
+            holes.set_len(8192)?;
+            let mut sparse = File::create(root.join("data/mysql/redo-file"))?;
+            sparse.write_all(&[1; 512])?;
+            sparse.seek(SeekFrom::Start(64 * 1024))?;
+            sparse.write_all(&[2; 512])?;
+            drop(sparse);
+            let mut expected = vec![0; 64 * 1024 + 512];
+            expected[..512].fill(1);
+            expected[64 * 1024..].fill(2);
+            let mut paths = snapshot
+                .as_ref()
+                .map_or_else(Vec::new, |snapshot| snapshot.source_paths());
+            paths.push(root.join("data"));
+            let archive_path = root.with_extension("tar.gz");
+            BackupManager::perform_backup(
+                &paths,
+                &archive_path,
+                1,
+                snapshot.as_ref().map(|snapshot| snapshot.root()),
+            )
+            .await?;
+            let mut archive = Archive::new(GzDecoder::new(File::open(&archive_path)?));
+            let mut holes_type = None;
+            for entry in archive.entries()? {
+                let entry = entry?;
+                if entry.path()?.to_string_lossy() == "data/mysql/holes-only" {
+                    assert_eq!(entry.size(), 8192);
+                    holes_type = Some(entry.header().entry_type());
+                }
+            }
+            // Linux's Builder emits S for a fully sparse real file. Other OSes
+            // currently emit regular entries; fixed GNU fixtures cover them.
+            if cfg!(target_os = "linux") {
+                assert!(holes_type.expect("holes-only member").is_gnu_sparse());
+            }
+            let staged = crate::backup_release::stage_release_restore(&archive_path, &root, true)?;
+            assert_eq!(staged.is_some(), release_aware);
+            crate::container::preflight::verify_backup_component_compatibility(
+                &archive_path,
+                &root,
+            )?;
+            let manager = BackupManager::new(
+                temp.path().join("backups"),
+                Arc::new(Database::connect_memory().await?),
+                Arc::new(DockerManager::with_project(
+                    root.join("docker-compose.yml"),
+                    root.join(".env"),
+                    None,
+                )?),
+            )?;
+            for selective in [false, true] {
+                let restored = root.join(if selective {
+                    "selective-restored"
+                } else {
+                    "full-restored"
+                });
+                if selective {
+                    manager
+                        .perform_selective_restore(&archive_path, &restored, &["data"])
+                        .await?;
+                } else {
+                    manager
+                        .perform_restore(&archive_path, &restored, &[])
+                        .await?;
+                }
+                assert_eq!(
+                    std::fs::read(restored.join("data/mysql/redo-file"))?,
+                    expected
+                );
+                assert_eq!(
+                    std::fs::metadata(restored.join("data/mysql/holes-only"))?.len(),
+                    8192
+                );
+                assert_eq!(
+                    std::fs::read(restored.join("data/mysql/holes-only"))?,
+                    vec![0; 8192]
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn real_backup_archive_roundtrips_frozen_absolute_paths_and_empty_app() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("custom-deployment");
+        let images =
+            crate::backup_release::release_snapshot_tests::write_release(&root, "A", "schema")?;
+        let snapshot = crate::backup_release::capture_release_files(&root, "A", images)?;
+        let archive_path = temp.path().join("release.tar.gz");
+        BackupManager::perform_backup(
+            &snapshot.source_paths(),
+            &archive_path,
+            1,
+            Some(snapshot.root()),
+        )
+        .await?;
+        let mut archive = Archive::new(GzDecoder::new(File::open(&archive_path)?));
+        let names = archive
+            .entries()?
+            .map(|entry| Ok(entry?.path()?.to_string_lossy().into_owned()))
+            .collect::<Result<Vec<String>>>()?;
+        assert!(names.iter().any(|name| name == "docker-compose.yml"));
+        assert!(
+            names
+                .iter()
+                .any(|name| name == crate::backup_release::RELEASE_CONTEXT_FILE)
+        );
+        assert!(names.iter().all(|name| !Path::new(name).is_absolute()));
+        let staged = crate::backup_release::stage_release_restore(&archive_path, &root, false)?
+            .ok_or_else(|| anyhow::anyhow!("Missing staged release"))?;
+        assert!(staged.root().join("app").is_dir());
+        Ok(())
+    }
 }

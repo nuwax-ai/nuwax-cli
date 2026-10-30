@@ -1,15 +1,18 @@
-use crate::container::DockerManager;
+use crate::container::{DockerManager, MissingVariables, interpolate_env};
 use crate::sql_diff::TableDefinition;
 use anyhow::{Context, Result, anyhow};
 use docker_compose_types as dct;
 use mysql_async::prelude::*;
-use mysql_async::{Opts, Pool, Row, Transaction, TxOpts, from_row};
+use mysql_async::{OptsBuilder, Pool, Row, from_row};
+use std::collections::HashMap;
+use std::path::Path;
 
 /// MySQL容器异步差异SQL执行器
 /// 专为Duck Client自动升级部署设计
 pub struct MySqlExecutor {
     pool: Pool,
-    config: MySqlConfig,
+    /// 应用账号（管理连接捕获的 MYSQL_USER；manifest permissions 授权对象）
+    app_user: Option<String>,
 }
 
 /// MySQL配置适配现有系统
@@ -19,107 +22,241 @@ pub struct MySqlConfig {
     pub port: u16,
     pub user: String,
     pub password: String,
-    pub database: String,
+    /// 默认库：应用连接为 `MYSQL_DATABASE`；root 管理连接为 `None`
+    /// （多库迁移时库切换由 diff 内的 `USE` 段完成）
+    pub database: Option<String>,
+    /// 应用账号（root 管理连接捕获 `MYSQL_USER`，供 manifest permissions 授权）
+    pub app_user: Option<String>,
 }
 
-impl MySqlConfig {
-    /// 通过解析 docker-compose.yml 文件为容器环境适配配置
-    pub async fn for_container(compose_file: Option<&str>, env_file: Option<&str>) -> Result<Self> {
-        let docker_manager = match (compose_file, env_file) {
-            (Some(c), Some(e)) => DockerManager::with_project(c, e, None)?,
-            _ => {
-                return Err(anyhow!(
-                    "docker-compose.yml and .env paths are required to load Docker Compose configuration"
-                ));
-            }
-        };
-        let compose_config = docker_manager
-            .load_compose_config()
-            .context("Failed to load Docker Compose configuration")?;
+/// 从 compose 解析出的 mysql 服务连接要素（与凭据用途无关）
+struct MysqlServiceEndpoint {
+    port: u16,
+    env: HashMap<String, String>,
+}
 
-        let mysql_service = compose_config
-            .services
-            .0
-            .get("mysql")
-            .and_then(|s| s.as_ref())
-            .ok_or_else(|| anyhow!("'mysql' service not found in docker-compose.yml"))?;
+fn parse_short_published_port(port: &str, target_port: u16) -> Option<u16> {
+    let mut segments = port.rsplit(':');
+    let mapped_target = segments.next()?.parse::<u16>().ok()?;
+    if mapped_target != target_port {
+        return None;
+    }
+    segments.next()?.parse::<u16>().ok()
+}
 
-        let mut config_map = std::collections::HashMap::new();
-        if let dct::Environment::List(env_list) = &mysql_service.environment {
+/// 解析 mysql 服务：插值引用校验 + 端口映射 + environment 键值
+async fn resolve_mysql_service_endpoint(
+    compose_file: Option<&str>,
+    env_file: Option<&str>,
+) -> Result<MysqlServiceEndpoint> {
+    let docker_manager = match (compose_file, env_file) {
+        (Some(c), Some(e)) => DockerManager::with_project(c, e, None)?,
+        _ => {
+            return Err(anyhow!(
+                "docker-compose.yml and .env paths are required to load Docker Compose configuration"
+            ));
+        }
+    };
+    let compose_config = docker_manager
+        .load_compose_config()
+        .context("Failed to load Docker Compose configuration")?;
+
+    let mysql_service = compose_config
+        .services
+        .0
+        .get("mysql")
+        .and_then(|s| s.as_ref())
+        .ok_or_else(|| anyhow!("'mysql' service not found in docker-compose.yml"))?;
+
+    // The shared Compose loader has already resolved these scalars. A
+    // second interpolation would corrupt literal dollars in credentials.
+    validate_mysql_references(
+        docker_manager.get_compose_file(),
+        docker_manager.get_env_file(),
+    )?;
+    let mut config_map = HashMap::new();
+    match &mysql_service.environment {
+        dct::Environment::List(env_list) => {
             for item in env_list {
                 if let Some((key, value)) = item.split_once('=') {
                     config_map.insert(key.to_string(), value.to_string());
                 }
             }
         }
+        dct::Environment::KvPair(values) => {
+            for (key, value) in values {
+                if let Some(value) = value {
+                    config_map.insert(key.to_string(), value.to_string());
+                } else if let Ok(value) = std::env::var(key) {
+                    config_map.insert(key.to_string(), value);
+                }
+            }
+        }
+    }
 
-        let port = match &mysql_service.ports {
-            dct::Ports::Short(ports_list) => ports_list
-                .iter()
-                .find_map(|p| {
-                    let parts: Vec<&str> = p.split(':').collect();
-                    if parts.len() == 2 && parts[1] == "3306" {
-                        parts[0].parse::<u16>().ok()
-                    } else {
-                        None
+    let port = match &mysql_service.ports {
+        dct::Ports::Short(ports_list) => ports_list
+            .iter()
+            .find_map(|p| parse_short_published_port(p, 3306))
+            .ok_or_else(|| anyhow!("No mapping to container port 3306 found in 'mysql' service"))?,
+        dct::Ports::Long(ports_list) => ports_list
+            .iter()
+            .find_map(|p| {
+                if p.target == 3306 {
+                    match &p.published {
+                        Some(dct::PublishedPort::Single(port_num)) => Some(*port_num),
+                        Some(dct::PublishedPort::Range(port_str)) => port_str.parse::<u16>().ok(),
+                        None => None,
                     }
-                })
-                .ok_or_else(|| {
-                    anyhow!("No mapping to container port 3306 found in 'mysql' service")
-                })?,
-            dct::Ports::Long(ports_list) => ports_list
-                .iter()
-                .find_map(|p| {
-                    if p.target == 3306 {
-                        match &p.published {
-                            Some(dct::PublishedPort::Single(port_num)) => Some(*port_num),
-                            Some(dct::PublishedPort::Range(port_str)) => {
-                                port_str.parse::<u16>().ok()
-                            }
-                            None => None,
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .ok_or_else(|| {
-                    anyhow!("No mapping to container port 3306 found in 'mysql' service")
-                })?,
-        };
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| anyhow!("No mapping to container port 3306 found in 'mysql' service"))?,
+    };
+
+    Ok(MysqlServiceEndpoint {
+        port,
+        env: config_map,
+    })
+}
+
+impl MySqlConfig {
+    /// 通过解析 docker-compose.yml 文件为容器环境适配配置（应用账号 + 默认库）
+    pub async fn for_container(compose_file: Option<&str>, env_file: Option<&str>) -> Result<Self> {
+        let endpoint = resolve_mysql_service_endpoint(compose_file, env_file).await?;
+        let user = endpoint
+            .env
+            .get("MYSQL_USER")
+            .cloned()
+            .unwrap_or_else(|| "root".to_string());
+        let password = endpoint
+            .env
+            .get("MYSQL_PASSWORD")
+            .cloned()
+            .unwrap_or_else(|| "root".to_string());
+        let database = endpoint
+            .env
+            .get("MYSQL_DATABASE")
+            .cloned()
+            .unwrap_or_else(|| "agent_platform".to_string());
 
         Ok(MySqlConfig {
             host: "127.0.0.1".to_string(),
-            port,
-            user: config_map
-                .get("MYSQL_USER")
-                .cloned()
-                .unwrap_or_else(|| "root".to_string()),
-            password: config_map
-                .get("MYSQL_PASSWORD")
-                .cloned()
-                .unwrap_or_else(|| "root".to_string()),
-            database: config_map
-                .get("MYSQL_DATABASE")
-                .cloned()
-                .unwrap_or_else(|| "agent_platform".to_string()),
+            port: endpoint.port,
+            user,
+            password,
+            database: Some(database),
+            app_user: None,
         })
     }
 
-    /// 生成连接URL
-    fn to_url(&self) -> String {
-        format!(
-            "mysql://{}:{}@{}:{}/{}",
-            self.user, self.password, self.host, self.port, self.database
-        )
+    /// root 管理连接：多库 schema 迁移（Live Diff）专用。
+    /// 建库（CREATE DATABASE）、授权（GRANT）与跨库 DDL 均超出应用账号权限；
+    /// 不设默认库，库切换由生成的 diff 内 `USE` 段完成。
+    /// `app_user` 捕获官方镜像创建的应用账号（manifest permissions 授权对象）。
+    /// 缺少 `MYSQL_ROOT_PASSWORD` 时 Fail Fast，错误信息不回显任何凭据。
+    pub async fn for_container_admin(
+        compose_file: Option<&str>,
+        env_file: Option<&str>,
+    ) -> Result<Self> {
+        let endpoint = resolve_mysql_service_endpoint(compose_file, env_file).await?;
+        let password = endpoint
+            .env
+            .get("MYSQL_ROOT_PASSWORD")
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "'mysql' service environment must define MYSQL_ROOT_PASSWORD for schema migration"
+                )
+            })?;
+        let app_user = endpoint.env.get("MYSQL_USER").cloned();
+
+        Ok(MySqlConfig {
+            host: "127.0.0.1".to_string(),
+            port: endpoint.port,
+            user: "root".to_string(),
+            password,
+            database: None,
+            app_user,
+        })
     }
+}
+
+/// Validate references in the original credential expressions, never in the
+/// resolved credentials themselves (which may legally contain $ or ${...}).
+fn validate_mysql_references(compose_path: &Path, env_path: &Path) -> Result<()> {
+    let source = std::fs::read_to_string(compose_path)?;
+    let compose: serde_yaml::Value = serde_yaml::from_str(&source)?;
+    let values = crate::container::load_env_values(env_path)?;
+    let environment = &compose["services"]["mysql"]["environment"];
+    let validate = |key: &str, expression: &str| -> Result<()> {
+        if ![
+            "MYSQL_USER",
+            "MYSQL_PASSWORD",
+            "MYSQL_DATABASE",
+            "MYSQL_ROOT_PASSWORD",
+        ]
+        .contains(&key)
+        {
+            return Ok(());
+        }
+        interpolate_env(
+            expression,
+            &|name| {
+                std::env::var(name)
+                    .ok()
+                    .or_else(|| values.get(name).cloned())
+            },
+            MissingVariables::Error,
+        )
+        .map_err(|_| {
+            anyhow!(
+                "MySQL {key} references an unavailable environment variable; define it in {}",
+                env_path.display()
+            )
+        })?;
+        Ok(())
+    };
+    match environment {
+        serde_yaml::Value::Sequence(entries) => {
+            for entry in entries {
+                if let Some((key, value)) = entry.as_str().and_then(|entry| entry.split_once('=')) {
+                    validate(key, value)?;
+                }
+            }
+        }
+        serde_yaml::Value::Mapping(entries) => {
+            for (key, value) in entries {
+                if let (Some(key), Some(value)) = (key.as_str(), value.as_str()) {
+                    validate(key, value)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 impl MySqlExecutor {
     /// 创建新的执行器
     pub fn new(config: MySqlConfig) -> Self {
-        let opts = Opts::from_url(&config.to_url()).unwrap();
+        let opts = OptsBuilder::default()
+            .ip_or_hostname(config.host.clone())
+            .tcp_port(config.port)
+            .user(Some(config.user.clone()))
+            .pass(Some(config.password.clone()))
+            .db_name(config.database.clone());
         let pool = Pool::new(opts);
-        Self { pool, config }
+        Self {
+            pool,
+            app_user: config.app_user.clone(),
+        }
+    }
+
+    /// 应用账号（管理连接捕获的 `MYSQL_USER`）
+    pub fn app_user(&self) -> Option<&str> {
+        self.app_user.as_deref()
     }
 
     /// 测试连接是否可用
@@ -129,83 +266,55 @@ impl MySqlExecutor {
         Ok(())
     }
 
-    /// 执行单个SQL语句
+    /// 执行单个SQL语句。
+    /// 显式排空剩余结果集：若调用方传入多条语句（分号分隔），
+    /// 未排空会把池化连接留在协议失步状态，后续查询会读到残留结果集。
     pub async fn execute_single(&self, sql: &str) -> Result<u64, mysql_async::Error> {
         let mut conn = self.pool.get_conn().await?;
         let result = conn.query_iter(sql).await?;
-        Ok(result.affected_rows())
+        let affected = result.affected_rows();
+        result.drop_result().await?;
+        Ok(affected)
     }
 
-    /// 执行差异SQL内容（多语句支持）
-    /// 自动处理注释和空行，支持事务回滚
+    /// 在同一连接上顺序执行差异 SQL。MySQL DDL 不支持整批事务回滚。
     pub async fn execute_diff_sql(&self, sql_content: &str) -> Result<Vec<String>, anyhow::Error> {
-        self.execute_diff_sql_with_retry(sql_content, 1).await
+        self.execute_diff_sql_once(sql_content).await
     }
 
-    /// 带重试机制的SQL执行
+    /// 保留旧接口签名；DDL 无法安全地整批重试，重试参数不再生效。
+    #[deprecated(note = "DDL batches are not safely retryable; use execute_diff_sql_once")]
     pub async fn execute_diff_sql_with_retry(
         &self,
         sql_content: &str,
-        max_retries: u8,
+        _max_retries: u8,
     ) -> Result<Vec<String>, anyhow::Error> {
-        let sql_lines = self.parse_sql_commands(sql_content);
-        let mut results = Vec::new();
-        let mut last_error: Option<mysql_async::Error> = None;
-
-        for attempt in 0..=max_retries {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
-                results.push(format!("🔄 Retrying attempt {attempt}/{max_retries}..."));
-            }
-
-            let mut conn = self.pool.get_conn().await?;
-            let mut tx = conn.start_transaction(TxOpts::default()).await?;
-
-            // 记录本次尝试前的日志数量，如果失败可以回滚
-            let results_len_before_attempt = results.len();
-
-            match self
-                .execute_in_transaction(&mut tx, &sql_lines, &mut results)
-                .await
-            {
-                Ok(_) => {
-                    tx.commit().await?;
-                    results.insert(0, "✅ Diff SQL executed successfully".to_string());
-                    return Ok(results);
-                }
-                Err(e) => {
-                    tx.rollback().await?;
-                    // 移除本次失败尝试中添加的日志
-                    results.truncate(results_len_before_attempt);
-                    results.push(format!("❌ Attempt {} failed: {}", attempt + 1, e));
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        Err(anyhow::anyhow!(
-            "❌ SQL execution failed after {} attempts. Last error: {}",
-            max_retries + 1,
-            last_error.unwrap()
-        ))
+        self.execute_diff_sql_once(sql_content).await
     }
 
-    /// 执行在事务中的差异SQL
-    async fn execute_in_transaction<'a>(
+    /// 出错即停，错误中包含已完成数量与失败语句；重跑时应先重新生成 Live Diff。
+    pub async fn execute_diff_sql_once(
         &self,
-        tx: &mut Transaction<'a>,
-        lines: &[String],
-        results: &mut Vec<String>,
-    ) -> Result<(), mysql_async::Error> {
-        for (idx, sql) in lines.iter().enumerate() {
+        sql_content: &str,
+    ) -> Result<Vec<String>, anyhow::Error> {
+        let statements = self.parse_sql_commands(sql_content);
+        let mut conn = self.pool.get_conn().await?;
+        let mut results = Vec::new();
+        for (idx, sql) in statements.iter().enumerate() {
             if sql.starts_with("--") || sql.trim().is_empty() {
                 continue;
             }
-
-            tx.query_drop(sql).await?;
+            conn.query_drop(sql).await.with_context(|| {
+                format!(
+                    "Diff SQL failed at statement {} after {} successful statements",
+                    idx + 1,
+                    results.len()
+                )
+            })?;
+            tracing::info!(statement_index = idx + 1, statement = %sql, "Diff SQL statement applied");
             results.push(format!("[{}] ✅ {}", idx + 1, sql));
         }
-        Ok(())
+        Ok(results)
     }
 
     /// 解析SQL内容为可执行的命令列表
@@ -248,31 +357,34 @@ impl MySqlExecutor {
         Ok(())
     }
 
-    /// 抓取在线数据库架构：通过 SHOW CREATE TABLE 获取真实DDL，再用 sqlparser 解析为内部类型
+    /// 抓取指定库的在线数据库架构：通过 SHOW CREATE TABLE 获取真实DDL，再用 sqlparser 解析为内部类型。
+    /// 库不存在或为空库时返回空表集（多库 Live Diff 据此生成"建库+全量建表"）
     pub async fn fetch_live_schema(
         &self,
+        schema: &str,
     ) -> Result<std::collections::HashMap<String, TableDefinition>, anyhow::Error> {
-        let (tables, _sql) = self.fetch_live_schema_with_sql().await?;
+        let (tables, _sql) = self.fetch_live_schema_with_sql(schema).await?;
         Ok(tables)
     }
 
-    /// 抓取在线数据库架构并返回原始 SQL
+    /// 抓取指定库的在线数据库架构并返回原始 SQL
     /// 返回：(解析后的表定义, 原始 CREATE TABLE SQL)
     pub async fn fetch_live_schema_with_sql(
         &self,
+        schema: &str,
     ) -> Result<(std::collections::HashMap<String, TableDefinition>, String), anyhow::Error> {
-        use crate::sql_diff::parse_sql_tables;
+        use crate::sql_diff::parse_sql_tables_strict;
 
         let mut conn = self.pool.get_conn().await?;
 
-        // 获取当前数据库所有表名
+        // 获取指定库的所有表名
         let table_names: Vec<String> = conn
             .exec(
                 r#"SELECT TABLE_NAME
                     FROM INFORMATION_SCHEMA.TABLES
                     WHERE TABLE_SCHEMA = ?
                     ORDER BY TABLE_NAME"#,
-                (self.config.database.clone(),),
+                (schema,),
             )
             .await?
             .into_iter()
@@ -282,10 +394,10 @@ impl MySqlExecutor {
             })
             .collect();
 
-        // 拼接所有表的 CREATE 语句
+        // 拼接所有表的 CREATE 语句（全限定名，不依赖连接的默认库）
         let mut create_sqls = String::new();
         for table in &table_names {
-            let query = format!("SHOW CREATE TABLE `{}`", table);
+            let query = format!("SHOW CREATE TABLE `{}`.`{}`", schema, table);
             let row: Row = conn.exec_first(query, ()).await?.ok_or_else(|| {
                 anyhow::anyhow!(format!(
                     "Failed to get CREATE statement for table: {}",
@@ -304,10 +416,65 @@ impl MySqlExecutor {
         }
 
         // 使用 sqlparser 解析 DDL，严格避免正则
-        let tables = parse_sql_tables(&create_sqls)
+        let tables = parse_sql_tables_strict(&create_sqls)
             .map_err(|e| anyhow::anyhow!(format!("Failed to parse online DDL: {}", e)))?;
 
         Ok((tables, create_sqls))
+    }
+
+    /// 单列字符串查询（内部运维用：如读取 mysql.db 的授权模式）
+    pub async fn query_string_column(
+        &self,
+        sql: &str,
+        param: &str,
+    ) -> Result<Vec<String>, mysql_async::Error> {
+        let mut conn = self.pool.get_conn().await?;
+        let rows: Vec<String> = conn.exec(sql, (param,)).await?;
+        Ok(rows)
+    }
+
+    /// 在同一连接的专用会话中执行权限语句（F04，与部署 permissions 脚本语义等价）：
+    /// - 先保存 `@@sql_mode`，设置 `NO_BACKSLASH_ESCAPES` 后逐条执行，最后恢复——
+    ///   会话模式不泄漏到后续 schema DDL（池化连接复用安全）；
+    /// - 任意账户名只需单引号加倍即可安全表达；执行失败在恢复模式后返回错误。
+    pub async fn execute_privilege_statements(
+        &self,
+        statements: &[String],
+    ) -> Result<(), mysql_async::Error> {
+        let mut conn = self.pool.get_conn().await?;
+        let saved_mode: Option<(String,)> = conn.exec_first("SELECT @@sql_mode", ()).await?;
+        conn.query_drop("SET SESSION sql_mode=CONCAT(@@sql_mode, ',NO_BACKSLASH_ESCAPES')")
+            .await?;
+        let mut failure = None;
+        for statement in statements {
+            if let Err(error) = conn.query_drop(statement).await {
+                failure = Some(error);
+                break;
+            }
+            tracing::info!(statement = %statement, "Privilege statement applied");
+        }
+        if let Some((saved,)) = saved_mode {
+            let restore = format!("SET SESSION sql_mode='{}'", saved.replace('\'', "''"));
+            if let Err(restore_error) = conn.query_drop(restore).await {
+                tracing::warn!(error = %restore_error, "Failed to restore sql_mode on pooled connection");
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// 判断库是否存在（仅用于日志与状态展示）
+    pub async fn schema_exists(&self, schema: &str) -> Result<bool, mysql_async::Error> {
+        let mut conn = self.pool.get_conn().await?;
+        let exists: Option<(i64,)> = conn
+            .exec_first(
+                r#"SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?"#,
+                (schema,),
+            )
+            .await?;
+        Ok(exists.is_some_and(|(count,)| count > 0))
     }
 
     /// 验证执行结果
@@ -355,52 +522,210 @@ pub struct ExecutionResult {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parses_short_mysql_port_with_bind_address() {
+        assert_eq!(parse_short_published_port("13306:3306", 3306), Some(13306));
+        assert_eq!(
+            parse_short_published_port("127.0.0.1:23306:3306", 3306),
+            Some(23306)
+        );
+        assert_eq!(parse_short_published_port("16379:6379", 3306), None);
+    }
+
     #[tokio::test]
-    async fn test_mysql_connection() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        let compose_path = std::path::Path::new(&manifest_dir).join("fixtures/docker-compose.yml");
-        let env_path = std::path::Path::new(&manifest_dir).join("fixtures/.env");
+    async fn compose_credentials_preserve_literal_dollars_quotes_hashes_and_colons() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("credentials.env");
+        std::fs::write(
+            &compose,
+            "services:\n  mysql:\n    image: mysql:8.0\n    ports: [\"13306:3306\"]\n    environment:\n      - MYSQL_USER=${NUWAX_TEST_DB_USER}\n      - MYSQL_PASSWORD=${NUWAX_TEST_DB_PASSWORD}\n      - MYSQL_DATABASE=${NUWAX_TEST_DB_NAME}\n",
+        )?;
+        let password = "synthetic $word ${word} $$ # literal: value \"quote\"";
+        std::fs::write(
+            &env_path,
+            format!(
+                "NUWAX_TEST_DB_USER=synthetic\nNUWAX_TEST_DB_PASSWORD='{password}'\nNUWAX_TEST_DB_NAME=synthetic_db\n"
+            ),
+        )?;
         let config = MySqlConfig::for_container(
-            Some(compose_path.to_str().unwrap()),
+            Some(compose.to_str().unwrap()),
+            Some(env_path.to_str().unwrap()),
+        )
+        .await?;
+        assert_eq!(config.password, password);
+        assert_eq!(config.user, "synthetic");
+        assert_eq!(config.database.as_deref(), Some("synthetic_db"));
+        assert_eq!(config.port, 13306);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_mysql_reference_fails_without_printing_credentials() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("credentials.env");
+        std::fs::write(
+            &compose,
+            "services:\n  mysql:\n    image: mysql:8.0\n    ports: [\"13306:3306\"]\n    environment:\n      - MYSQL_PASSWORD=${NUWAX_MISSING_DB_PASSWORD}\n",
+        )?;
+        std::fs::write(&env_path, "UNRELATED='synthetic-sensitive-value'\n")?;
+        let error = MySqlConfig::for_container(
+            Some(compose.to_str().unwrap()),
             Some(env_path.to_str().unwrap()),
         )
         .await
-        .unwrap();
-        let executor = MySqlExecutor::new(config);
-        if executor.test_connection().await.is_ok() {
-            // 测试真实执行
-            executor
-                .execute_single("CREATE DATABASE IF NOT EXISTS test_db")
-                .await
-                .unwrap();
+        .unwrap_err();
+        assert!(error.to_string().contains("MYSQL_PASSWORD"));
+        assert!(!format!("{error:#}").contains("synthetic-sensitive-value"));
+        Ok(())
+    }
 
-            executor.execute_single("USE test_db").await.unwrap();
+    #[tokio::test]
+    async fn mysql_defaults_and_mapping_environment_remain_supported() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("credentials.env");
+        std::fs::write(
+            &compose,
+            "services:\n  mysql:\n    image: mysql:8.0\n    ports: [\"13306:3306\"]\n    environment:\n      MYSQL_PASSWORD: ${NUWAX_MISSING_PASSWORD_WITH_DEFAULT:-fallback}\n",
+        )?;
+        std::fs::write(&env_path, "")?;
+        let config = MySqlConfig::for_container(
+            Some(compose.to_str().unwrap()),
+            Some(env_path.to_str().unwrap()),
+        )
+        .await?;
+        assert_eq!(config.user, "root");
+        assert_eq!(config.database.as_deref(), Some("agent_platform"));
+        assert_eq!(config.password, "fallback");
+        Ok(())
+    }
 
-            executor
-                .execute_single(
-                    "CREATE TABLE IF NOT EXISTS test_table (id INT PRIMARY KEY, name VARCHAR(255))",
-                )
-                .await
-                .unwrap();
-
-            let results = executor
-                .execute_diff_sql("CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100)); \
-                                 ALTER TABLE users ADD COLUMN email VARCHAR(255); \
-                                 CREATE INDEX idx_name ON users(name);")
-                .await
-                .unwrap();
-
-            assert!(!results.is_empty());
-            println!("✅ MySQL执行器测试通过");
-
-            // 清理
-            executor
-                .execute_single("DROP DATABASE IF EXISTS test_db")
-                .await
-                .unwrap();
-        } else {
-            println!("⚠️ MySQL容器未运行，跳过测试");
+    #[tokio::test]
+    async fn mysql_defaults_distinguish_unset_and_empty_values() -> Result<()> {
+        for (expression, defined, expected) in [
+            ("${NUWAX_PASSWORD_FALLBACK-fallback}", false, "fallback"),
+            ("${NUWAX_PASSWORD_FALLBACK-fallback}", true, ""),
+            ("${NUWAX_PASSWORD_FALLBACK:-fallback}", false, "fallback"),
+            ("${NUWAX_PASSWORD_FALLBACK:-fallback}", true, "fallback"),
+        ] {
+            let directory = tempfile::tempdir()?;
+            let compose = directory.path().join("compose.yml");
+            let env_path = directory.path().join("credentials.env");
+            std::fs::write(
+                &compose,
+                format!(
+                    "services:\n  mysql:\n    image: mysql:8.0\n    ports: [\"13306:3306\"]\n    environment:\n      - MYSQL_PASSWORD={expression}\n"
+                ),
+            )?;
+            std::fs::write(
+                &env_path,
+                if defined {
+                    "NUWAX_PASSWORD_FALLBACK=\n"
+                } else {
+                    ""
+                },
+            )?;
+            let config = MySqlConfig::for_container(
+                Some(compose.to_str().unwrap()),
+                Some(env_path.to_str().unwrap()),
+            )
+            .await?;
+            assert_eq!(config.password, expected);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_config_uses_root_password_without_default_database() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("credentials.env");
+        std::fs::write(
+            &compose,
+            "services:\n  mysql:\n    image: mysql:8.0\n    ports: [\"13306:3306\"]\n    environment:\n      - MYSQL_ROOT_PASSWORD=${NUWAX_TEST_ROOT_PASSWORD}\n      - MYSQL_DATABASE=app_db\n",
+        )?;
+        let password = "synthetic $root {secret} $$ # literal";
+        std::fs::write(
+            &env_path,
+            format!("NUWAX_TEST_ROOT_PASSWORD='{password}'\n"),
+        )?;
+        let config = MySqlConfig::for_container_admin(
+            Some(compose.to_str().unwrap()),
+            Some(env_path.to_str().unwrap()),
+        )
+        .await?;
+        assert_eq!(config.user, "root");
+        assert_eq!(config.password, password);
+        assert_eq!(config.database, None);
+        assert_eq!(config.port, 13306);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_config_missing_root_password_fails_without_printing_credentials() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("credentials.env");
+        // 应用账号配置完整，但缺少 MYSQL_ROOT_PASSWORD
+        std::fs::write(
+            &compose,
+            "services:\n  mysql:\n    image: mysql:8.0\n    ports: [\"13306:3306\"]\n    environment:\n      - MYSQL_USER=app\n      - MYSQL_PASSWORD=${NUWAX_TEST_APP_PASSWORD}\n      - MYSQL_DATABASE=app_db\n",
+        )?;
+        std::fs::write(
+            &env_path,
+            "NUWAX_TEST_APP_PASSWORD='synthetic-sensitive-value'\n",
+        )?;
+        let error = MySqlConfig::for_container_admin(
+            Some(compose.to_str().unwrap()),
+            Some(env_path.to_str().unwrap()),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("MYSQL_ROOT_PASSWORD"));
+        assert!(!format!("{error:#}").contains("synthetic-sensitive-value"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_MYSQL_URL pointing to a disposable MySQL database"]
+    async fn test_mysql_connection() -> Result<()> {
+        let url = std::env::var("TEST_MYSQL_URL").context("TEST_MYSQL_URL is required")?;
+        let options = mysql_async::Opts::from_url(&url)
+            .map_err(|_| anyhow::anyhow!("TEST_MYSQL_URL must be a valid MySQL URL"))?;
+        let database = options
+            .db_name()
+            .filter(|name| !name.is_empty())
+            .context("TEST_MYSQL_URL must name a disposable database")?;
+        let config = MySqlConfig {
+            host: options.ip_or_hostname().to_string(),
+            port: options.tcp_port(),
+            user: options
+                .user()
+                .context("TEST_MYSQL_URL requires a user")?
+                .to_string(),
+            password: options.pass().unwrap_or_default().to_string(),
+            database: Some(database.to_string()),
+            app_user: None,
+        };
+        let executor = MySqlExecutor::new(config);
+        executor.test_connection().await?;
+        let table = format!("nuwax_connection_{}", uuid::Uuid::now_v7().simple());
+        let statements = format!(
+            "CREATE TABLE `{table}` (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100));\n\
+             ALTER TABLE `{table}` ADD COLUMN email VARCHAR(255);\n\
+             CREATE INDEX idx_name ON `{table}`(name);"
+        );
+        let execution = executor.execute_diff_sql(&statements).await;
+        // Clean the unique table even when a later DDL statement fails.
+        let cleanup = executor
+            .execute_single(&format!("DROP TABLE IF EXISTS `{table}`"))
+            .await;
+        let results = execution?;
+        cleanup?;
+        assert_eq!(results.len(), 3);
+        Ok(())
     }
 
     #[tokio::test]
@@ -444,6 +769,38 @@ mod tests {
         let commands = executor.parse_sql_commands(content);
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0], "CREATE TABLE test (id INT);");
+    }
+
+    #[tokio::test]
+    async fn test_multi_db_preamble_and_use_statements_split_correctly() {
+        // 多库 Live Diff 组装结果：建库原句 / USE / DDL 必须各自成为独立语句
+        let content = "-- ===== Database: `nuwax_im` =====\n\
+                      CREATE DATABASE IF NOT EXISTS `nuwax_im` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;\n\
+                      GRANT ALL PRIVILEGES ON nuwax_im.* TO 'agent_platform'@'%';\n\
+                      FLUSH PRIVILEGES;\n\
+                      USE `nuwax_im`;\n\
+                      CREATE TABLE `im_agent_binding` (id bigint NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB;\n\
+                      ALTER TABLE `im_agent_binding` ADD COLUMN mode tinyint NOT NULL DEFAULT '1';";
+
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let compose_path = std::path::Path::new(&manifest_dir).join("fixtures/docker-compose.yml");
+        let env_path = std::path::Path::new(&manifest_dir).join("fixtures/.env");
+        let config = MySqlConfig::for_container(
+            Some(compose_path.to_str().unwrap()),
+            Some(env_path.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+        let executor = MySqlExecutor::new(config);
+
+        let commands = executor.parse_sql_commands(content);
+        assert_eq!(commands.len(), 6, "statements: {commands:?}");
+        assert!(commands[0].starts_with("CREATE DATABASE IF NOT EXISTS"));
+        assert!(commands[1].starts_with("GRANT ALL PRIVILEGES"));
+        assert_eq!(commands[2], "FLUSH PRIVILEGES;");
+        assert_eq!(commands[3], "USE `nuwax_im`;");
+        assert!(commands[4].starts_with("CREATE TABLE `im_agent_binding`"));
+        assert!(commands[5].starts_with("ALTER TABLE `im_agent_binding`"));
     }
 
     #[test]

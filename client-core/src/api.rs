@@ -1,10 +1,13 @@
-use crate::api_config::ApiConfig;
+use crate::api_config::{ApiConfig, ApiEndpoints};
 use crate::api_types::*;
 use crate::authenticated_client::AuthenticatedClient;
+use crate::config::DockerChannel;
 use crate::constants::api as api_constants;
 use crate::downloader::{DownloadProgress, DownloaderConfig, FileDownloader};
+use crate::environment::Environment;
 use crate::error::DuckError;
 use crate::version::Version;
+use anyhow::Context as _;
 use anyhow::Result;
 use futures::stream::StreamExt;
 use reqwest::Client;
@@ -655,31 +658,28 @@ impl ApiClient {
         }
     }
 
-    /// 获取增强的服务清单（支持分架构和增量升级）
+    /// 获取增强的服务清单（离线镜像通道，历史默认行为）
     /// 优先从 OSS 获取，失败后降级到原 API 地址
     /// 支持通过 NUWAX_API_DOCKER_VERSION_URL 环境变量自定义 URL
     /// NUWAX_CLI_ENV=test 时使用 beta/latest.json
     pub async fn get_enhanced_service_manifest(&self) -> Result<EnhancedServiceManifest> {
-        // 检查是否设置了自定义 Docker 版本 URL 环境变量
-        let custom_url = std::env::var(api_constants::NUWAX_API_DOCKER_VERSION_URL_ENV);
+        self.get_service_manifest(DockerChannel::Images).await
+    }
 
-        let (oss_url, url_source) = if let Ok(url) = custom_url {
-            (url, "env NUWAX_API_DOCKER_VERSION_URL")
-        } else {
-            // 检查是否为测试环境
-            let cli_env = std::env::var("NUWAX_CLI_ENV").unwrap_or_default();
-            if cli_env.eq_ignore_ascii_case("test") || cli_env.eq_ignore_ascii_case("testing") {
-                (
-                    self.config.endpoints.docker_version_oss_beta.clone(),
-                    "beta OSS (test env)",
-                )
-            } else {
-                (
-                    self.config.endpoints.docker_version_oss_prod.clone(),
-                    "prod OSS",
-                )
-            }
-        };
+    /// 按镜像交付通道获取服务清单。
+    ///
+    /// registry 通道**不降级到 API**：API 端点只提供离线全量清单，降级过去会让瘦部署静默
+    /// 拿到带 tar 的包（多下十几 GiB，且镜像加载已被跳过），宁可直接失败。
+    pub async fn get_service_manifest(
+        &self,
+        channel: DockerChannel,
+    ) -> Result<EnhancedServiceManifest> {
+        let (oss_url, url_source) = manifest_url_for(
+            channel,
+            std::env::var(manifest_url_env(channel)).ok().as_deref(),
+            &Environment::from_env(),
+            &self.config.endpoints,
+        );
 
         info!("Fetching service manifest from {}: {}", url_source, oss_url);
 
@@ -687,6 +687,11 @@ impl ApiClient {
             Ok(manifest) => {
                 info!("Successfully fetched manifest from {}", url_source);
                 return Ok(manifest);
+            }
+            Err(e) if channel == DockerChannel::Registry => {
+                return Err(e).with_context(|| {
+                    format!("registry channel manifest is not available at {oss_url}")
+                });
             }
             Err(e) => {
                 warn!(
@@ -777,127 +782,21 @@ impl ApiClient {
         }
     }
 
-    /// 下载服务更新包（带哈希验证和优化及进度回调）
-    pub async fn download_service_update_optimized_with_progress<F>(
+    /// Download a release-bound package into its final, atomically promoted cache.
+    pub async fn download_service_package(
         &self,
-        download_path: &Path,
-        version: Option<&str>,
-        download_url: &str,
-        progress_callback: Option<F>,
-    ) -> Result<()>
-    where
-        F: Fn(DownloadProgress) + Send + Sync + 'static,
-    {
-        // 3. 获取哈希文件路径
-        let hash_file_path = download_path.with_extension("zip.hash");
-
-        info!("Determining download method:");
-        info!("   Download URL: {}", download_url);
-
-        // 5. 检查文件是否已存在且完整
-        let mut should_download = true;
-        if download_path.exists() && hash_file_path.exists() {
-            info!("Found existing file: {}", download_path.display());
-            info!("Found hash file: {}", hash_file_path.display());
-            // 读取保存的哈希和版本信息
-            if let Ok(hash_content) = std::fs::read_to_string(&hash_file_path) {
-                let hash_info: DownloadHashInfo = hash_content.parse().map_err(|e| {
-                    DuckError::custom(format!("Invalid hash info format for downloaded file: {e}"))
-                })?;
-
-                info!("Hash file info:");
-                info!("   Saved hash: {}", hash_info.hash);
-                info!("   Saved version: {}", hash_info.version);
-                info!("   Saved timestamp: {}", hash_info.timestamp);
-
-                // 验证本地文件哈希
-                info!("Verifying local file hash...");
-                if let Ok(actual_hash) = Self::calculate_file_hash(download_path).await {
-                    if actual_hash.to_lowercase() == hash_info.hash.to_lowercase() {
-                        info!("File hash verification passed, skipping download");
-                        info!("   Local hash: {}", actual_hash);
-                        info!("   Server hash: {}", hash_info.hash);
-                        should_download = false;
-                    } else {
-                        warn!("File hash mismatch, need to re-download");
-                        warn!("   Local hash: {}", actual_hash);
-                        warn!("   Expected hash: {}", hash_info.hash);
-                    }
-                } else {
-                    warn!("Unable to calculate local file hash, re-downloading");
-                }
-            } else {
-                warn!("Unable to read hash file, re-downloading");
-            }
-        } else {
-            info!("File does not exist, re-downloading");
-        }
-
-        if !should_download {
-            info!("Skipping download, using existing file");
-            return Ok(());
-        }
-
-        // 6. 确保下载目录存在
-        if let Some(parent) = download_path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            return Err(anyhow::anyhow!("Failed to create download directory: {e}"));
-        }
-
-        info!("Starting to download service update package...");
-        info!("   Final download URL: {}", download_url);
-        info!("   Target path: {}", download_path.display());
-
-        // 7. 执行下载
-        // 使用新的下载器模块
-        let config = DownloaderConfig::default();
-
-        let downloader = FileDownloader::new(config);
-
-        // 使用新的智能下载器（支持 OSS、扩展超时、断点续传和hash验证）
-        downloader
-            .download_file_with_options(
-                download_url,
-                download_path,
-                progress_callback,
-                None,
-                version,
-            )
-            .await
-            .map_err(|e| DuckError::custom(format!("Download failed: {e}")))?;
-
-        info!("File download completed");
-        info!("   File path: {}", download_path.display());
-
-        // 10. 保存哈希文件
-        info!("Calculating local hash of external file...");
-        match Self::calculate_file_hash(download_path).await {
-            Ok(local_hash) => {
-                info!("External file local hash: {}", local_hash);
-                Self::save_hash_file(&hash_file_path, &local_hash, version).await?;
-            }
-            Err(e) => {
-                warn!("Failed to calculate external file hash: {}", e);
-            }
-        }
-        info!("Service update package download completed!");
-        info!("   File location: {}", download_path.display());
-
-        Ok(())
-    }
-
-    /// 下载服务更新包（带哈希验证和优化）- 保持向后兼容
-    pub async fn download_service_update_optimized(
-        &self,
-        download_path: &Path,
-        version: Option<&str>,
-        download_url: &str,
-    ) -> Result<()> {
-        self.download_service_update_optimized_with_progress::<fn(DownloadProgress)>(
-            download_path,
-            version,
-            download_url,
+        download_directory: &Path,
+        identity: &crate::package_cache::PackageIdentity,
+    ) -> Result<std::path::PathBuf> {
+        let downloader = FileDownloader::new(DownloaderConfig {
+            retain_completed_metadata: true,
+            ..DownloaderConfig::default()
+        });
+        crate::package_cache::download_package::<fn(DownloadProgress)>(
+            &self.client,
+            &downloader,
+            download_directory,
+            identity,
             None,
         )
         .await
@@ -949,6 +848,51 @@ pub mod system_info {
     }
 }
 
+/// 该通道清单 URL 的环境变量覆盖名（最高优先级）
+fn manifest_url_env(channel: DockerChannel) -> &'static str {
+    match channel {
+        DockerChannel::Images => api_constants::NUWAX_API_DOCKER_VERSION_URL_ENV,
+        DockerChannel::Registry => api_constants::NUWAX_API_DOCKER_REGISTRY_VERSION_URL_ENV,
+    }
+}
+
+/// 通道 + 环境变量覆盖 + 运行环境 → 清单 URL。
+/// 选择规则集中在这个纯函数里，两条通道的优先级差异一目了然。
+/// 运行环境判定复用 `Environment`，与 API 基础地址、配置/数据库路径同一套规则。
+fn manifest_url_for(
+    channel: DockerChannel,
+    url_override: Option<&str>,
+    environment: &Environment,
+    endpoints: &ApiEndpoints,
+) -> (String, String) {
+    if let Some(url) = url_override {
+        return (
+            url.to_string(),
+            format!("env {}", manifest_url_env(channel)),
+        );
+    }
+
+    let beta = environment.is_testing();
+    match (channel, beta) {
+        (DockerChannel::Images, true) => (
+            endpoints.docker_version_oss_beta.clone(),
+            "beta OSS (test env)".to_string(),
+        ),
+        (DockerChannel::Images, false) => (
+            endpoints.docker_version_oss_prod.clone(),
+            "prod OSS".to_string(),
+        ),
+        (DockerChannel::Registry, true) => (
+            endpoints.docker_registry_version_oss_beta.clone(),
+            "registry beta OSS (test env)".to_string(),
+        ),
+        (DockerChannel::Registry, false) => (
+            endpoints.docker_registry_version_oss_prod.clone(),
+            "registry prod OSS".to_string(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,6 +902,59 @@ mod tests {
     // 创建测试用的API客户端
     fn create_test_api_client() -> ApiClient {
         ApiClient::new(Some("test_client_id".to_string()), None)
+    }
+
+    /// 离线通道的默认 URL 必须与新增 registry 通道之前逐字节一致
+    #[test]
+    fn manifest_urls_are_channel_scoped_and_offline_defaults_are_unchanged() {
+        use crate::environment::Environment;
+        let offline = Environment::Production;
+        let test = Environment::Test;
+        let endpoints = &ApiConfig::default().endpoints;
+        let (url, source) = manifest_url_for(DockerChannel::Images, None, &offline, endpoints);
+        assert_eq!(
+            url,
+            "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/latest.json"
+        );
+        assert_eq!(source, "prod OSS");
+
+        let (beta, beta_source) = manifest_url_for(DockerChannel::Images, None, &test, endpoints);
+        assert_eq!(beta, endpoints.docker_version_oss_beta);
+        assert_eq!(beta_source, "beta OSS (test env)");
+
+        // 覆盖变量只要存在就生效（哪怕是空值），与引入 registry 通道之前一致
+        let (override_empty, override_source) =
+            manifest_url_for(DockerChannel::Images, Some(""), &offline, endpoints);
+        assert_eq!(override_empty, "");
+        assert_eq!(override_source, "env NUWAX_API_DOCKER_VERSION_URL");
+
+        let (registry, source) =
+            manifest_url_for(DockerChannel::Registry, None, &offline, endpoints);
+        assert_eq!(
+            registry,
+            "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/registry.json"
+        );
+        assert_eq!(source, "registry prod OSS");
+        let (registry_beta, _) = manifest_url_for(DockerChannel::Registry, None, &test, endpoints);
+        assert_eq!(registry_beta, endpoints.docker_registry_version_oss_beta);
+
+        // 覆盖变量按通道隔离：瘦通道不能借用离线通道的覆盖
+        assert_eq!(
+            manifest_url_env(DockerChannel::Images),
+            "NUWAX_API_DOCKER_VERSION_URL"
+        );
+        assert_eq!(
+            manifest_url_env(DockerChannel::Registry),
+            "NUWAX_API_DOCKER_REGISTRY_VERSION_URL"
+        );
+        let (override_url, override_source) = manifest_url_for(
+            DockerChannel::Registry,
+            Some("http://192.0.2.117/registry.json"),
+            &offline,
+            endpoints,
+        );
+        assert_eq!(override_url, "http://192.0.2.117/registry.json");
+        assert_eq!(override_source, "env NUWAX_API_DOCKER_REGISTRY_VERSION_URL");
     }
 
     #[test]

@@ -2,14 +2,26 @@
 resolver = "2"
 members = ["client-core", "nuwax-cli"]
 
+[workspace.package]
+edition = "2024"
+authors = ["soddygo"]
+license = "MIT OR Apache-2.0"
+homepage = "https://nuwax.com/"
+repository = "https://github.com/nuwax-ai/nuwax-cli"
+documentation = "https://github.com/nuwax-ai/nuwax-cli"
 
 [workspace.dependencies]
 
-# 集成的 ducker Docker TUI (锁定 v0.5.5 以兼容 bollard 0.19.4)
-ducker = { version = "0.5.5"}
+# 内部 crate
+client-core = { path = "client-core", version = "0.1.11", default-features = false }
+
+# 集成的 ducker Docker TUI (v0.6.5 依赖 bollard ^0.20.1，与 0.21.0 不兼容)
+ducker = { version = "0.6.5" }
+# Docker API 客户端 (与 ducker v0.6.5 兼容，锁定 0.20.1；0.20.2+ 会破坏 ducker 编译)
+bollard = "=0.20.1"
 
 # 异步运行时
-tokio = { version = "1.52", features = ["macros", "net", "rt", "rt-multi-thread"] }
+tokio = { version = "1.53", features = ["macros", "net", "rt", "rt-multi-thread"] }
 tokio-util = "0.7"
 futures = "0.3"
 futures-util = "0.3"
@@ -37,7 +49,7 @@ axum = { version = "0.8", features = [
     "macros",
 ] }
 tower = { version = "0.5" }
-tower-http = { version = "0.6", features = [
+tower-http = { version = "0.7", features = [
     "compression-full",
     "cors",
     "fs",
@@ -46,13 +58,13 @@ tower-http = { version = "0.6", features = [
 axum-extra = { version = "0.12", features = ["typed-header"] }
 
 # API文档
-utoipa = { version = "5.4", features = ["axum_extras", "chrono"] }
-utoipa-rapidoc = { version = "6", features = ["axum"] }
-utoipa-redoc = { version = "6", features = ["axum"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa = { version = "6", features = ["axum_extras", "chrono"] }
+utoipa-rapidoc = { version = "7", features = ["axum"] }
+utoipa-redoc = { version = "7", features = ["axum"] }
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
 
 # 并发工具
-dashmap = "6.1"
+dashmap = "6.2"
 once_cell = "1.21"
 
 # 测试
@@ -62,10 +74,10 @@ criterion = "0.8.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "=0.9.33"
-serde_with = "3.20"
+serde_with = "3.24"
 
 # 配置文件
-toml = "0.9"
+toml = "1.1.7"
 
 # 构建工具
 derive_builder = "0.20"
@@ -79,17 +91,17 @@ reqwest = { version = "0.13", features = [
 # TLS 加密提供者 - 使用 ring 替代 aws-lc-rs，避免 Ubuntu 20.04 GCC 编译器兼容性问题
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
-http = "1.3"
+http = "1.5"
 
 # 命令行工具
 clap = { version = "4.6", features = ["derive", "env"] }
 
 # UUID
-uuid = { version = "1.23", features = ["v7"] }
+uuid = { version = "1.26", features = ["v7"] }
 
 # 数据库
-# sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
-duckdb = { version = "1.3", features = ["bundled", "chrono", "uuid", "json"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-ring", "mysql"] }
+duckdb = { version = "1.10505.0", features = ["bundled", "chrono", "uuid", "json"] }
 
 # 自更新 - 已移除，现在使用基于 GitHub API 的更新机制
 
@@ -107,7 +119,7 @@ flate2 = "1.1"
 tar = "0.4"
 
 # 文件类型检测 (魔数检测)
-infer = "0.19"
+infer = "0.22"
 
 # 加密和哈希
 sha2 = "0.11"
@@ -118,9 +130,9 @@ indicatif = "0.18"
 # 消息传递 (用于DuckDB Actor模式)
 tokio-stream = "0.1"
 
-# SQL解析 依赖的库
-sqlparser = "0.62"
-regex = "1.12"
+# SQL解析 依赖的库(nuwax fork of upstream sqlparser,支持 CREATE FULLTEXT/SPATIAL INDEX)
+sqlparser = { package = "nuwax-sqlparser", version = "0.63.3" }
+regex = "1.13"
 
 # --- OSS Dependencies ---
 # Note: 使用 aliyun-oss-rust-sdk 库，支持分片上传，解决大文件(>5GB)上传问题;另外: 当文件较大，建议使用 SDK 或者 ossutil 进行大文件下载。下载链接默认有效期 300s，大文件下载可能会失败，失败仍会产生流量费用
@@ -131,13 +143,10 @@ url = "2.5"
 winnow = "1.0"
 
 
-# Docker API 客户端 (与 ducker v0.5.5 兼容)
-bollard = "0.19.4"
-
 # MySQL Async 客户端,用于连接mysql,执行差异sql,升级库表结构
-mysql_async = "0.36.2"
+mysql_async = "0.37.0"
 
-docker-compose-types = "0.23"
+docker-compose-types = "0.24.0"
 
 # 解析.env 环境变量文件
 dotenvy = "0.15"
@@ -149,17 +158,23 @@ rust-i18n = "4"
 fs_extra = "1.3"
 remove_dir_all = "1"
 
+# 数据并行（staged 文件批量 fsync）
+rayon = "1"
+
 # Base64 编码/解码
-base64 = "0.22"
+base64 = "0.23"
+
+# Windows 注册表访问(设备指纹 MachineGuid 读取, 仅 windows target)
+winreg = "0.56"
 
 # 系统信息
-num_cpus = "1.16"
+num_cpus = "1.17"
 
 # Shell 变量展开
-shellexpand = "3.1.0"
+shellexpand = "3.1.2"
 
 # 缓存库
-quick_cache = "0.6"
+quick_cache = "0.7"
 
 # CLI 自更新
 self-replace = "1.5.0"
@@ -171,7 +186,7 @@ color-eyre = "0.6"
 ratatui = "0.30"
 
 # 系统目录路径
-dirs = "6.0"
+dirs = "7.0"
 
 # 解析器组合子
 nom = "8"
@@ -180,11 +195,12 @@ nom = "8"
 libc = "0.2"
 
 # Unix 系统调用
-nix = { version = "0.30", features = ["user"] }
+nix = { version = "0.31", features = ["user"] }
 
 # 测试相关
 tokio-test = "0.4"
-memory-stats = "1.1"
+memory-stats = "1.2"
+ctor = "1.0"
 
 # The profile that 'dist' will build with
 [profile.dist]

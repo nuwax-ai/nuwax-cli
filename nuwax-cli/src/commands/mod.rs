@@ -3,6 +3,7 @@ pub mod auto_upgrade_deploy;
 pub mod backup;
 pub mod cache;
 pub mod check_update;
+pub mod device_info;
 pub mod diff_sql;
 pub mod docker_service;
 pub mod ducker;
@@ -38,3 +39,6 @@ pub use check_update::handle_check_update_command;
 
 // Diff SQL commands
 pub use diff_sql::run_diff_sql;
+
+// Device info commands
+pub use device_info::run_device_info;

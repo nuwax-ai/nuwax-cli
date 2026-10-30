@@ -18,7 +18,7 @@ fn create_success_exit_status() -> ExitStatus {
     {
         // 在非Unix系统上，我们使用一个实际的成功命令来获取ExitStatus
         std::process::Command::new("cmd")
-            .args(&["/C", "echo", "ok"])
+            .args(["/C", "echo", "ok"])
             .output()
             .map(|output| output.status)
             .unwrap_or_else(|_| {
@@ -476,6 +476,7 @@ fn get_disk_space() -> DiskSpace {
 }
 
 // 辅助函数：解析磁盘大小
+#[cfg(unix)]
 fn parse_size(size_str: &str) -> Option<u64> {
     let size_str = size_str.trim();
     let (num_str, unit) = if let Some(pos) = size_str.find(|c: char| c.is_alphabetic()) {

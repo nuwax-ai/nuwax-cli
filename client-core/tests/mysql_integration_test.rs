@@ -1,16 +1,262 @@
 use anyhow::{Context, Result, anyhow};
 use client_core::mysql_executor::{MySqlConfig, MySqlExecutor};
-use sqlx::mysql::MySqlPoolOptions;
+use client_core::sql_diff::generate_live_schema_diff_multi;
+use client_core::sql_diff::parse_schema_template;
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use url::Url;
 
-const TEST_DB: &str = "executor_integration_test";
 const TEST_COMPOSE_PROJECT: &str = "nuwax_mysql_integration";
 const TEST_MYSQL_SERVICE: &str = "mysql";
 const TEST_MYSQL_TIMEOUT: Duration = Duration::from_secs(90);
 const TEST_MYSQL_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+#[tokio::test]
+#[ignore = "requires TEST_MYSQL_URL pointing to a disposable MySQL instance"]
+async fn test_partial_ddl_failure_is_reconciled_by_live_rediff() -> Result<()> {
+    let url = std::env::var("TEST_MYSQL_URL").context("TEST_MYSQL_URL is required")?;
+    let config = mysql_config_from_url(&url)?;
+    let database = config
+        .database
+        .clone()
+        .ok_or_else(|| anyhow!("TEST_MYSQL_URL must name a database"))?;
+    let executor = MySqlExecutor::new(config);
+    let table = "nuwax_partial_ddl_recovery";
+    executor
+        .execute_single(&format!("DROP TABLE IF EXISTS `{table}`"))
+        .await?;
+
+    let attempted = format!(
+        "CREATE TABLE `{table}` (id INT NOT NULL, PRIMARY KEY (id));\n\
+         ALTER TABLE `{table}` ADD COLUMN id INT;"
+    );
+    let error = executor
+        .execute_diff_sql_once(&attempted)
+        .await
+        .err()
+        .ok_or_else(|| anyhow!("duplicate column should fail after the first DDL"))?;
+    assert!(error.to_string().contains("after 1 successful statements"));
+
+    let live_templates = |ddl: String| -> Result<Vec<client_core::sql_diff::SchemaTemplate>> {
+        Ok(vec![parse_schema_template(&format!(
+            "USE `{database}`;\n{ddl}"
+        ))?])
+    };
+    let target =
+        format!("CREATE TABLE `{table}` (id INT NOT NULL, name VARCHAR(20), PRIMARY KEY (id));");
+    let remaining =
+        generate_live_schema_diff_multi(&executor, &live_templates(target.clone())?, "recovery")
+            .await?;
+    assert!(remaining.diff_sql.contains("ADD COLUMN `name`"));
+    executor.execute_diff_sql_once(&remaining.diff_sql).await?;
+
+    let final_diff =
+        generate_live_schema_diff_multi(&executor, &live_templates(target.clone())?, "recovery")
+            .await?;
+    assert!(!final_diff.has_executable_sql);
+
+    let manual_target = format!("{} ENGINE=MyISAM;", target.trim_end_matches(';'));
+    let manual_diff =
+        generate_live_schema_diff_multi(&executor, &live_templates(manual_target)?, "manual")
+            .await?;
+    assert!(!manual_diff.has_executable_sql);
+    assert!(manual_diff.has_warnings);
+    assert!(manual_diff.diff_sql.contains("table option ENGINE differs"));
+
+    executor
+        .execute_single(&format!("DROP TABLE IF EXISTS `{table}`"))
+        .await?;
+    Ok(())
+}
+
+/// 多库 Live Diff 真实 MySQL 场景验收（隔离库名，用后即删，不触碰现有部署）：
+///
+/// 1. 平台库已存在且含业务数据、IM 库不存在 → 一次迁移补建 IM 库，平台数据保留；
+/// 2. 两库各自漂移（平台加列、IM 加表）→ 再次迁移全部应用，数据保留；
+/// 3. IM 库与目标约束冲突 → 整体报错停止；解除冲突后重试按实际状态收敛。
+#[tokio::test]
+#[ignore = "requires TEST_MYSQL_URL pointing to a disposable MySQL instance"]
+async fn multi_database_live_diff_scenarios() -> Result<()> {
+    let url = std::env::var("TEST_MYSQL_URL").context("TEST_MYSQL_URL is required")?;
+    let mut config = mysql_config_from_url(&url)?;
+    // 管理连接：无默认库（库切换由 diff 的 USE 段完成）
+    config.database = None;
+    let executor = MySqlExecutor::new(config.clone());
+    executor.test_connection().await?;
+
+    let suffix = uuid::Uuid::now_v7().simple();
+    let platform_db = format!("nuwax_mdp_{suffix}");
+    let im_db = format!("nuwax_mdi_{suffix}");
+
+    let outcome = multi_database_scenario_body(&executor, &config, &platform_db, &im_db).await;
+
+    // 无论成败都清理隔离库，清理失败也必须暴露。
+    let cleanup = cleanup_test_databases(&executor, &[&platform_db, &im_db]).await;
+    finish_mysql_test(outcome, cleanup)
+}
+
+async fn multi_database_scenario_body(
+    executor: &MySqlExecutor,
+    config: &MySqlConfig,
+    platform_db: &str,
+    im_db: &str,
+) -> Result<()> {
+    use client_core::sql_diff::{
+        SchemaTemplate, generate_live_schema_diff_multi, parse_schema_template,
+    };
+
+    let templates_for = |platform_ddl: &str, im_ddl: &str| -> Result<Vec<SchemaTemplate>> {
+        Ok(vec![
+            parse_schema_template(&format!("USE `{platform_db}`;\n{platform_ddl}"))?,
+            // IM 模板带建库前缀，与真实 init_mysql_im.sql 形态一致
+            parse_schema_template(&format!(
+                "CREATE DATABASE IF NOT EXISTS `{im_db}` DEFAULT CHARACTER SET utf8mb4;\nUSE `{im_db}`;\n{im_ddl}"
+            ))?,
+        ])
+    };
+    let migrate = |templates: Vec<SchemaTemplate>| async move {
+        generate_live_schema_diff_multi(executor, &templates, "scenario").await
+    };
+
+    // ── 场景 1：平台库已存在含数据，IM 库不存在 ─────────────────────────
+    executor
+        .execute_single(&format!(
+            "CREATE DATABASE `{platform_db}`; \
+             CREATE TABLE `{platform_db}`.`users` \
+             (`id` bigint NOT NULL, `name` varchar(64), PRIMARY KEY (`id`)); \
+             INSERT INTO `{platform_db}`.`users` VALUES (1, 'must-survive')"
+        ))
+        .await
+        .context("准备平台库失败")?;
+
+    let platform_v1 =
+        "CREATE TABLE `users` (`id` bigint NOT NULL, `name` varchar(64), PRIMARY KEY (`id`));";
+    let im_v1 = "CREATE TABLE `im_msg` (`id` bigint NOT NULL, PRIMARY KEY (`id`));";
+
+    let result = migrate(templates_for(platform_v1, im_v1)?).await?;
+    assert!(
+        result.has_executable_sql,
+        "IM 库缺失应产生可执行差异: {}",
+        result.description
+    );
+    assert!(
+        result
+            .diff_sql
+            .contains(&format!("CREATE DATABASE IF NOT EXISTS `{im_db}`"))
+    );
+    assert!(result.diff_sql.contains(&format!("USE `{im_db}`;")));
+    executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .context("场景1 迁移失败")?;
+
+    // 两库就绪后再建立断言用连接（按库连接 + 静态 SQL，动态值走 bind）
+    let connect = |database: &str| {
+        MySqlPoolOptions::new().max_connections(1).connect_with(
+            MySqlConnectOptions::new()
+                .host(&config.host)
+                .port(config.port)
+                .username(&config.user)
+                .password(&config.password)
+                .database(database),
+        )
+    };
+    let platform_pool = connect(platform_db).await.context("无法连接平台测试库")?;
+    let im_pool = connect(im_db).await.context("无法连接 IM 测试库")?;
+    let im_schema_table_count = || async {
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?")
+                .bind(im_db)
+                .fetch_one(&im_pool)
+                .await
+                .context("查询 IM 库表数失败")?;
+        Ok::<_, anyhow::Error>(count)
+    };
+
+    let kept: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM `users` WHERE `name` = 'must-survive'")
+        .fetch_one(&platform_pool)
+        .await?;
+    assert_eq!(kept, (1,), "平台库业务数据必须保留");
+    assert_eq!(im_schema_table_count().await?, (1,), "IM 库应补建 1 张表");
+
+    // ── 场景 2：两库各自漂移（平台加列、IM 加表） ───────────────────────
+    let platform_v2 = "CREATE TABLE `users` (`id` bigint NOT NULL, `name` varchar(64), `email` varchar(255), PRIMARY KEY (`id`));";
+    let im_v2 = "CREATE TABLE `im_msg` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n\
+                 CREATE TABLE `im_conv` (`id` bigint NOT NULL, PRIMARY KEY (`id`));";
+
+    let result = migrate(templates_for(platform_v2, im_v2)?).await?;
+    assert!(
+        result.has_executable_sql,
+        "两库漂移都应被检出: {}",
+        result.description
+    );
+    executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .context("场景2 迁移失败")?;
+
+    let kept: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM `users` WHERE `name` = 'must-survive'")
+        .fetch_one(&platform_pool)
+        .await?;
+    assert_eq!(kept, (1,), "加列后平台数据仍保留");
+    let email_column: Vec<(String,)> =
+        sqlx::query_as("SHOW COLUMNS FROM `users` WHERE Field = 'email'")
+            .fetch_all(&platform_pool)
+            .await?;
+    assert_eq!(email_column.len(), 1, "平台库新列已应用");
+    assert_eq!(im_schema_table_count().await?, (2,), "IM 库新表已应用");
+
+    // ── 场景 3：IM 库约束冲突 → 停止；解除后重试收敛 ────────────────────
+    executor
+        .execute_single(&format!(
+            "CREATE TABLE `{im_db}`.`im_tag` (`id` bigint NOT NULL, `tag` varchar(64), PRIMARY KEY (`id`)); \
+             INSERT INTO `{im_db}`.`im_tag` VALUES (1, 'dup'), (2, 'dup')"
+        ))
+        .await
+        .context("准备冲突数据失败")?;
+
+    let im_v3 = "CREATE TABLE `im_msg` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n\
+                 CREATE TABLE `im_conv` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n\
+                 CREATE TABLE `im_tag` (`id` bigint NOT NULL, `tag` varchar(64), PRIMARY KEY (`id`), UNIQUE KEY `uk_tag` (`tag`));";
+
+    let result = migrate(templates_for(platform_v2, im_v3)?).await?;
+    assert!(result.has_executable_sql, "唯一键差异应被检出");
+    let failure = executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .err()
+        .context("重复值与 UNIQUE 约束冲突必须让迁移整体失败")?;
+    assert!(
+        format!("{failure:#}").contains("Diff SQL failed"),
+        "失败语义应为出错即停: {failure:#}"
+    );
+
+    // 解除冲突后重试：差异按数据库实际状态重算，只补未完成的约束
+    executor
+        .execute_single(&format!("DELETE FROM `{im_db}`.`im_tag` WHERE `id` = 2"))
+        .await?;
+    let result = migrate(templates_for(platform_v2, im_v3)?).await?;
+    executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .context("解除冲突后的重试必须成功")?;
+
+    let dup_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM `im_tag` WHERE `tag` = 'dup'")
+        .fetch_one(&im_pool)
+        .await?;
+    assert_eq!(dup_count, (1,), "冲突数据按人工处理保留一行");
+
+    // 幂等：无变更再跑一次不执行任何语句
+    let result = migrate(templates_for(platform_v2, im_v3)?).await?;
+    assert!(
+        !result.has_executable_sql,
+        "收敛后应无差异: {}",
+        result.description
+    );
+    Ok(())
+}
 
 /// 测试 MySqlExecutor 的集成测试
 /// 这个测试会：
@@ -33,17 +279,26 @@ async fn test_mysql_executor_integration() -> Result<()> {
         }
         Err(err) => return Err(err),
     };
-    let config = test_env.config.clone();
+    let mut config = test_env.config.clone();
 
     // 2.1. 使用 root 用户确保测试用户拥有所需权限
     println!("🔧 2.1. 使用 root 用户确保测试用户拥有权限...");
     let mut root_config = config.clone();
-    root_config.user = "root".to_string();
-    // 注意：这里我们假设 root 密码也是 'root'，这通常在 .env 文件中配置
-    root_config.password = "root".to_string();
+    // 管理连接不能绑定即将创建/删除的测试库，否则连接池重置会报 1049。
+    root_config.database = None;
+    if root_config.user != "root" {
+        root_config.user = "root".to_string();
+        root_config.password = if std::env::var_os("TEST_MYSQL_URL").is_some() {
+            std::env::var("TEST_MYSQL_ROOT_PASSWORD").context(
+                "TEST_MYSQL_ROOT_PASSWORD is required for an external non-root test user",
+            )?
+        } else {
+            "root".to_string()
+        };
+    }
 
     let root_executor = MySqlExecutor::new(root_config);
-    let grant_sql = format!("GRANT ALL PRIVILEGES ON *.* TO '{}'@'%'", &config.user);
+    let grant_sql = format!("GRANT ALL PRIVILEGES ON *.* TO '{}'@'%'", config.user);
     root_executor
         .execute_single(&grant_sql)
         .await
@@ -57,23 +312,36 @@ async fn test_mysql_executor_integration() -> Result<()> {
 
     println!("✅ 权限已自动授予。");
 
+    // 只创建和清理本用例拥有的唯一库，保留 TEST_MYSQL_URL 的共享基准库。
+    let database = format!("nuwax_executor_{}", uuid::Uuid::now_v7().simple());
+    println!("🧹 3. 创建隔离测试数据库 '{database}'...");
+    root_executor
+        .execute_single(&format!("CREATE DATABASE `{database}`"))
+        .await
+        .context("创建隔离测试数据库失败")?;
+    config.database = Some(database.clone());
+
+    let outcome = mysql_executor_scenario_body(&config, &database).await;
+    let cleanup = cleanup_test_databases(&root_executor, &[&database]).await;
+    let outcome = finish_mysql_test(outcome, cleanup);
+    let stop = if test_env.started_by_test && should_cleanup_mysql() {
+        stop_mysql(&test_env.compose)
+    } else {
+        Ok(())
+    };
+    finish_mysql_test(outcome, stop)?;
+
+    println!("✅ 集成测试成功!");
+    Ok(())
+}
+
+async fn mysql_executor_scenario_body(config: &MySqlConfig, database: &str) -> Result<()> {
     let executor = MySqlExecutor::new(config.clone());
 
-    // 3. 清理并创建测试数据库
-    println!("🧹 3. 清理并创建测试数据库 '{TEST_DB}'...");
-    let drop_db_sql = format!("DROP DATABASE IF EXISTS `{TEST_DB}`");
-    executor.execute_single(&drop_db_sql).await.ok();
-
-    let create_db_sql = format!("CREATE DATABASE `{TEST_DB}`");
-    executor
-        .execute_single(&create_db_sql)
-        .await
-        .context("创建测试数据库失败")?;
-
     // 4. 执行 SQL 脚本
-    println!("🔧 4. 在 '{TEST_DB}' 数据库中执行 SQL 脚本...");
+    println!("🔧 4. 在 '{database}' 数据库中执行 SQL 脚本...");
     let sql_script = format!(
-        "USE `{TEST_DB}`;
+        "USE `{database}`;
         {SQL_CREATE_TABLE}\n{SQL_ADD_COLUMN_AND_INDEX}\n{SQL_INSERT_DATA}\n{SQL_DROP_INDEX_AND_COLUMN}"
     );
     executor
@@ -83,14 +351,16 @@ async fn test_mysql_executor_integration() -> Result<()> {
 
     // 5. 连接数据库并验证结果
     println!("🔧 5. 连接数据库并验证结果...");
-    let db_url = format!(
-        "mysql://{}:{}@{}:{}/{}",
-        config.user, config.password, config.host, config.port, TEST_DB
-    );
+    let connection_options = MySqlConnectOptions::new()
+        .host(&config.host)
+        .port(config.port)
+        .username(&config.user)
+        .password(&config.password)
+        .database(database);
 
     let pool = MySqlPoolOptions::new()
         .max_connections(1)
-        .connect(&db_url)
+        .connect_with(connection_options)
         .await
         .context("无法连接到测试数据库")?;
 
@@ -99,30 +369,51 @@ async fn test_mysql_executor_integration() -> Result<()> {
         .fetch_all(&pool)
         .await
         .context("查询表结构失败")?;
-    assert!(columns.is_empty(), "'status' 列未被成功删除");
+    anyhow::ensure!(columns.is_empty(), "'status' 列未被成功删除");
 
     let indexes: Vec<(String,)> =
         sqlx::query_as("SHOW INDEX FROM users WHERE Key_name = 'idx_email'")
             .fetch_all(&pool)
             .await
             .context("查询索引失败")?;
-    assert!(indexes.is_empty(), "'idx_email' 索引未被成功删除");
+    anyhow::ensure!(indexes.is_empty(), "'idx_email' 索引未被成功删除");
 
     // 验证数据
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
         .fetch_one(&pool)
         .await
         .context("查询数据失败")?;
-    assert_eq!(count.0, 1, "数据插入验证失败");
-
-    drop(pool);
-
-    if test_env.started_by_test && should_cleanup_mysql() {
-        stop_mysql(&test_env.compose)?;
-    }
-
-    println!("✅ 集成测试成功!");
+    anyhow::ensure!(count.0 == 1, "数据插入验证失败");
+    pool.close().await;
     Ok(())
+}
+
+async fn cleanup_test_databases(executor: &MySqlExecutor, databases: &[&str]) -> Result<()> {
+    let mut errors = Vec::new();
+    for database in databases {
+        if let Err(error) = executor
+            .execute_single(&format!("DROP DATABASE IF EXISTS `{database}`"))
+            .await
+        {
+            errors.push(format!("{database}: {error}"));
+        }
+    }
+    anyhow::ensure!(
+        errors.is_empty(),
+        "清理隔离测试库失败: {}",
+        errors.join("; ")
+    );
+    Ok(())
+}
+
+fn finish_mysql_test(outcome: Result<()>, cleanup: Result<()>) -> Result<()> {
+    match (outcome, cleanup) {
+        (Err(error), Err(cleanup_error)) => {
+            Err(error.context(format!("清理测试资源也失败: {cleanup_error:#}")))
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), cleanup) => cleanup,
+    }
 }
 
 #[derive(Debug)]
@@ -315,12 +606,14 @@ fn mysql_config_from_url(raw_url: &str) -> Result<MySqlConfig> {
         .ok_or_else(|| anyhow!("TEST_MYSQL_URL 缺少 host"))?
         .to_string();
     let port = url.port().unwrap_or(3306);
-    let user = url.username().to_string();
+    let options = mysql_async::Opts::from_url(raw_url)
+        .map_err(|_| anyhow!("TEST_MYSQL_URL 不是合法 MySQL 连接 URL"))?;
+    let user = options.user().unwrap_or_default().to_string();
     if user.is_empty() {
         return Err(anyhow!("TEST_MYSQL_URL 缺少用户名"));
     }
-    let password = url.password().unwrap_or_default().to_string();
-    let database = url.path().trim_start_matches('/').to_string();
+    let password = options.pass().unwrap_or_default().to_string();
+    let database = options.db_name().unwrap_or_default().to_string();
     if database.is_empty() {
         return Err(anyhow!("TEST_MYSQL_URL 缺少数据库名"));
     }
@@ -330,12 +623,24 @@ fn mysql_config_from_url(raw_url: &str) -> Result<MySqlConfig> {
         port,
         user,
         password,
-        database,
+        database: Some(database),
+        app_user: None,
     })
 }
 
 fn is_mysql_required() -> bool {
     std::env::var("TEST_MYSQL_REQUIRED").is_ok_and(|value| value == "1" || value == "true")
+}
+
+#[test]
+fn test_mysql_url_credentials_are_decoded_once() -> Result<()> {
+    let config = mysql_config_from_url(
+        "mysql://test%40user:p%40ss%3A%23%24%25E4@127.0.0.1:33316/disposable",
+    )?;
+    assert_eq!(config.user, "test@user");
+    assert_eq!(config.password, "p@ss:#$%E4");
+    assert_eq!(config.database.as_deref(), Some("disposable"));
+    Ok(())
 }
 
 fn should_cleanup_mysql() -> bool {
@@ -368,3 +673,307 @@ ALTER TABLE `users`
     DROP INDEX `idx_email`,
     DROP COLUMN `status`;
 "#;
+
+/// manifest v1 存量迁移场景（隔离库名 + 随机应用账号，用后即删）：
+/// schema 文件为拆分后的纯 USE + 表结构（无 CREATE DATABASE/GRANT）。
+///
+/// 1. 平台库已存在含数据、IM 与 bootstrap_only 库缺失 → bootstrap 建库 +
+///    应用账号授权 + IM 补建；平台数据保留；授权覆盖全部声明库；
+/// 2. 零表差异但清单新增 bootstrap_only 库 → bootstrap/授权仍独立执行；
+/// 3. 双库漂移 → Live Diff 应用；幂等重跑零执行。
+#[tokio::test]
+#[ignore = "requires TEST_MYSQL_URL pointing to a disposable MySQL instance"]
+async fn manifest_migration_scenarios() -> Result<()> {
+    let url = std::env::var("TEST_MYSQL_URL").context("TEST_MYSQL_URL is required")?;
+    let base = mysql_config_from_url(&url)?;
+    let suffix = uuid::Uuid::now_v7().simple();
+    let platform_db = format!("nuwax_mmp_{suffix}");
+    let im_db = format!("nuwax_mmi_{suffix}");
+    let custom_db = format!("nuwax_mmc_{suffix}");
+    // MySQL 用户名上限 32 字符，取 uuid 尾部 16 位保证唯一
+    let app_user = format!("nuwax_app_{}", &suffix.to_string()[24..]);
+
+    let mut admin = MySqlConfig {
+        host: base.host.clone(),
+        port: base.port,
+        user: base.user.clone(),
+        password: base.password.clone(),
+        database: None,
+        app_user: None,
+    };
+    admin.app_user = Some(app_user.clone());
+    let executor = MySqlExecutor::new(admin);
+    executor.test_connection().await?;
+
+    executor
+        .execute_single(&format!(
+            "CREATE USER IF NOT EXISTS '{app_user}'@'%' IDENTIFIED BY 'disposable'"
+        ))
+        .await
+        .context("创建应用账号失败")?;
+
+    let outcome = manifest_scenario_body(
+        &executor,
+        &app_user,
+        &platform_db,
+        &im_db,
+        &custom_db,
+        &base,
+    )
+    .await;
+
+    let cleanup = cleanup_test_databases(&executor, &[&platform_db, &im_db, &custom_db]).await;
+    let cleanup_user = executor
+        .execute_single(&format!("DROP USER IF EXISTS '{app_user}'@'%'"))
+        .await
+        .map(|_| ())
+        .context("清理隔离应用账号失败");
+    finish_mysql_test(finish_mysql_test(outcome, cleanup), cleanup_user)
+}
+
+async fn manifest_scenario_body(
+    executor: &MySqlExecutor,
+    app_user: &str,
+    platform_db: &str,
+    im_db: &str,
+    custom_db: &str,
+    base: &MySqlConfig,
+) -> Result<()> {
+    use client_core::mysql_manifest::{
+        parse_schema_manifest, run_manifest_migration, validate_manifest_files,
+    };
+
+    let workspace = tempfile::tempdir()?;
+    let docker_root = workspace.path().join("docker");
+    std::fs::create_dir_all(docker_root.join("config"))?;
+
+    let bootstrap_v1 = format!(
+        "CREATE DATABASE IF NOT EXISTS `{platform_db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n\
+         CREATE DATABASE IF NOT EXISTS `{custom_db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n\
+         CREATE DATABASE IF NOT EXISTS `{im_db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;\n"
+    );
+    let platform_v1 = format!(
+        "USE `{platform_db}`;\nCREATE TABLE `users` (`id` bigint NOT NULL, `name` varchar(64), PRIMARY KEY (`id`));\n"
+    );
+    let im_v1 = format!(
+        "USE `{im_db}`;\nCREATE TABLE `im_msg` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n"
+    );
+
+    std::fs::write(
+        docker_root.join("config/init_mysql_databases.sql"),
+        &bootstrap_v1,
+    )?;
+    std::fs::write(
+        docker_root.join("config/init_mysql_permissions.sh"),
+        "#!/bin/sh\nexit 0\n",
+    )?;
+    std::fs::write(docker_root.join("config/platform.sql"), &platform_v1)?;
+    std::fs::write(docker_root.join("config/im.sql"), &im_v1)?;
+
+    let manifest_json = |custom_bootstrap: bool| {
+        format!(
+            r#"{{
+  "contract_version": 1,
+  "requires": {{ "cli_capability": "mysql-schema-manifest-v1" }},
+  "mysql_target": {{ "service": "mysql", "internal_port": 3306 }},
+  "application_connections": [],
+  "databases": [
+    {{ "name": "{platform_db}", "bootstrap_only": false }},
+    {{ "name": "{custom_db}", "bootstrap_only": {custom_bootstrap} }},
+    {{ "name": "{im_db}", "bootstrap_only": false }}
+  ],
+  "bootstrap": {{ "path": "config/init_mysql_databases.sql", "idempotent": true, "initdb_target": "00_init_mysql_databases.sql" }},
+  "permissions": {{ "path": "config/init_mysql_permissions.sh", "user_env": "MYSQL_USER", "databases": "bootstrap", "initdb_target": "01_init_mysql_permissions.sh" }},
+  "schemas": [
+    {{ "database": "{platform_db}", "path": "config/platform.sql", "initdb_target": "10_platform.sql" }},
+    {{ "database": "{im_db}", "path": "config/im.sql", "initdb_target": "20_im.sql" }}
+  ],
+  "first_install_seeds": []
+}}"#
+        )
+    };
+    let manifest = parse_schema_manifest(&manifest_json(true)).context("清单解析失败")?;
+    validate_manifest_files(&manifest, &docker_root).context("清单文件校验失败")?;
+
+    // ── 场景 1：平台库存在含数据，IM/bootstrap_only 库缺失 ────────────────
+    executor
+        .execute_single(&format!(
+            "CREATE DATABASE `{platform_db}`;              CREATE TABLE `{platform_db}`.`users` (`id` bigint NOT NULL, `name` varchar(64), PRIMARY KEY (`id`));              INSERT INTO `{platform_db}`.`users` VALUES (1, 'must-survive')"
+        ))
+        .await
+        .context("准备平台库失败")?;
+
+    let result = run_manifest_migration(executor, &manifest, &docker_root, app_user)
+        .await
+        .context("场景1 manifest 迁移失败")?;
+    assert!(result.has_executable_sql, "IM 补建应产生可执行差异");
+    // 部署命令负责执行生成的 diff；此处模拟同一顺序
+    executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .context("场景1 diff 执行失败")?;
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            MySqlConnectOptions::new()
+                .host(&base.host)
+                .port(base.port)
+                .username(&base.user)
+                .password(&base.password)
+                .database(platform_db),
+        )
+        .await?;
+    let kept: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM `users` WHERE `name` = 'must-survive'")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(kept, (1,), "平台库业务数据必须保留");
+
+    let dbs: Vec<(String,)> = sqlx::query_as(
+        "SELECT schema_name FROM information_schema.schemata WHERE schema_name IN (?, ?) ORDER BY schema_name",
+    )
+    .bind(im_db)
+    .bind(custom_db)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(dbs.len(), 2, "bootstrap 必须独立于表差异建齐全部库");
+
+    let im_tables: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?")
+            .bind(im_db)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(im_tables, (1,), "IM schema 补建 1 张表");
+
+    let grants: Vec<(String,)> = sqlx::query_as(
+        "SELECT TABLE_SCHEMA FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = ? GROUP BY TABLE_SCHEMA",
+    )
+    .bind(format!("'{app_user}'@'%'"))
+    .fetch_all(&pool)
+    .await?;
+    // 权限模式中的库名以转义形态存储（`nuwax\_mmi\_...`），比对前还原
+    let grants_text = grants
+        .iter()
+        .map(|(grant,)| grant.replace('\\', ""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for database in [platform_db, im_db, custom_db] {
+        assert!(
+            grants_text.contains(database),
+            "授权必须覆盖声明库 {database}: {grants_text}"
+        );
+    }
+
+    // ── 场景 2：零表差异 + 授权独立（重跑幂等 + bootstrap/授权始终执行） ──
+    let result = run_manifest_migration(executor, &manifest, &docker_root, app_user)
+        .await
+        .context("场景2 重跑失败")?;
+    assert!(
+        !result.has_executable_sql,
+        "收敛后应零表差异（bootstrap/授权仍已独立执行）: {}",
+        result.description
+    );
+
+    // ── 场景 3：双库漂移 → Live Diff 应用；幂等 ──────────────────────────
+    let platform_v2 = format!(
+        "USE `{platform_db}`;\nCREATE TABLE `users` (`id` bigint NOT NULL, `name` varchar(64), `email` varchar(255), PRIMARY KEY (`id`));\n"
+    );
+    let im_v2 = format!(
+        "USE `{im_db}`;\nCREATE TABLE `im_msg` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n\
+         CREATE TABLE `im_conv` (`id` bigint NOT NULL, PRIMARY KEY (`id`));\n"
+    );
+    std::fs::write(docker_root.join("config/platform.sql"), &platform_v2)?;
+    std::fs::write(docker_root.join("config/im.sql"), &im_v2)?;
+    validate_manifest_files(&manifest, &docker_root)?;
+
+    let result = run_manifest_migration(executor, &manifest, &docker_root, app_user)
+        .await
+        .context("场景3 漂移迁移失败")?;
+    assert!(result.has_executable_sql, "双库漂移都应被检出");
+    executor
+        .execute_diff_sql_once(&result.diff_sql)
+        .await
+        .context("场景3 diff 执行失败")?;
+    let email_column: Vec<(String,)> =
+        sqlx::query_as("SHOW COLUMNS FROM `users` WHERE Field = 'email'")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(email_column.len(), 1, "平台库新列已应用");
+    let im_tables: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?")
+            .bind(im_db)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(im_tables, (2,), "IM 库新表已应用");
+
+    let result = run_manifest_migration(executor, &manifest, &docker_root, app_user).await?;
+    assert!(!result.has_executable_sql, "再次重跑应零差异");
+
+    // ── 场景 4（F04）：授权范围精确——相似库名不可访问 + 宽权限收敛 ──────
+    let sibling = platform_db.replacen('_', "1", 1); // nuwax1mmp_* 匹配未转义模式 nuwax_mmp_*
+    executor
+        .execute_single(&format!(
+            "CREATE DATABASE `{sibling}`; \
+             CREATE TABLE `{sibling}`.`users` (`id` bigint NOT NULL, PRIMARY KEY (`id`))"
+        ))
+        .await
+        .context("准备相似库失败")?;
+    // 模拟早期 CLI 的未转义宽授权行（`_` 通配会把相似库也覆盖到）
+    executor
+        .execute_privilege_statements(&[format!(
+            "GRANT ALL PRIVILEGES ON `{}`.* TO '{app_user}'@'%';",
+            platform_db
+        )])
+        .await
+        .context("预置宽授权失败")?;
+
+    run_manifest_migration(executor, &manifest, &docker_root, app_user)
+        .await
+        .context("场景4 收敛迁移失败")?;
+
+    // 以应用账号连接：目标库可访问、相似库必须被拒绝（宽权限行已收敛）
+    let app_pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            MySqlConnectOptions::new()
+                .host(&base.host)
+                .port(base.port)
+                .username(app_user)
+                .password("disposable")
+                .database(platform_db),
+        )
+        .await
+        .context("应用账号连接目标库失败（精确授权必须保留）")?;
+    let kept: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM `users` WHERE `name` = 'must-survive'")
+        .fetch_one(&app_pool)
+        .await
+        .context("应用账号必须能访问声明的目标库")?;
+    assert_eq!(kept, (1,));
+
+    let sibling_pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            MySqlConnectOptions::new()
+                .host(&base.host)
+                .port(base.port)
+                .username(app_user)
+                .password("disposable")
+                .database(&sibling),
+        )
+        .await;
+    match sibling_pool {
+        Ok(sibling_pool) => {
+            let leaked: Result<(i64,), _> = sqlx::query_as("SELECT COUNT(*) FROM `users`")
+                .fetch_one(&sibling_pool)
+                .await;
+            assert!(
+                leaked.is_err(),
+                "相似库（匹配未转义通配模式）必须不可访问——宽权限已被收敛"
+            );
+        }
+        Err(_) => {
+            // 连接被拒（无该库权限）同样证明收敛成功
+        }
+    }
+    Ok(())
+}

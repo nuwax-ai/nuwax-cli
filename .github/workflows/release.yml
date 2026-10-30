@@ -22,10 +22,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate-device-fingerprint:
+    name: Cross-platform device fingerprint checks
+    uses: ./.github/workflows/device-fingerprint-checks.yml
+    permissions:
+      contents: read
+
   # 检查版本号和决定是否需要发布
   check-version:
+    needs: validate-device-fingerprint
     name: Check Version and Decide Release
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       should_release: ${{ steps.version_check.outputs.should_release }}
       version: ${{ steps.version_check.outputs.version }}
@@ -49,6 +58,17 @@ jobs:
 
           echo "📋 检测到版本: ${VERSION}"
           echo "📋 对应标签: ${TAG_NAME}"
+
+          # 正式版发布：tag 版本必须与 nuwax-cli/Cargo.toml 完全一致
+          CARGO_VERSION=$(grep '^version = ' nuwax-cli/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "📋 Cargo.toml 版本: ${CARGO_VERSION}"
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "❌ 正式版发布要求 tag 版本与 nuwax-cli/Cargo.toml 完全一致"
+            echo "   tag 版本: ${VERSION}"
+            echo "   Cargo.toml: ${CARGO_VERSION}"
+            exit 1
+          fi
+          echo "✅ 版本校验通过"
 
           # 检查这个版本的 GitHub Release 是否已经存在
           if gh release view ${TAG_NAME} &>/dev/null; then
@@ -101,17 +121,22 @@ jobs:
             sh -c "cp /output/nuwax-cli /output-dir/"
           ls -la
           file nuwax-cli
-          # Package as file
+          # OSS / 文档 / check-update：解压后直接是 nuwax-cli
           tar czf nuwax-cli-linux-amd64.tar.gz nuwax-cli
-          rm nuwax-cli
-          ls -la nuwax-cli-linux-amd64.tar.gz
-          file nuwax-cli-linux-amd64.tar.gz
+          # npm postinstall（tar --strip-components=1）专用包
+          mkdir -p .pkg/nuwax-cli-bundle
+          cp nuwax-cli .pkg/nuwax-cli-bundle/
+          tar czf nuwax-cli-linux-amd64.npm.tar.gz -C .pkg nuwax-cli-bundle
+          rm -rf nuwax-cli .pkg
+          ls -la nuwax-cli-linux-amd64.tar.gz nuwax-cli-linux-amd64.npm.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nuwax-cli-linux-amd64
-          path: nuwax-cli-linux-amd64.tar.gz
+          path: |
+            nuwax-cli-linux-amd64.tar.gz
+            nuwax-cli-linux-amd64.npm.tar.gz
 
   # Linux ARM64 使用 Docker 构建 (Ubuntu 20.04 on ubuntu-24.04-arm)
   build-linux-aarch64:
@@ -144,14 +169,19 @@ jobs:
           ls -la
           file nuwax-cli
           tar czf nuwax-cli-linux-arm64.tar.gz nuwax-cli
-          rm nuwax-cli
-          ls -la nuwax-cli-linux-arm64.tar.gz
+          mkdir -p .pkg/nuwax-cli-bundle
+          cp nuwax-cli .pkg/nuwax-cli-bundle/
+          tar czf nuwax-cli-linux-arm64.npm.tar.gz -C .pkg nuwax-cli-bundle
+          rm -rf nuwax-cli .pkg
+          ls -la nuwax-cli-linux-arm64.tar.gz nuwax-cli-linux-arm64.npm.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nuwax-cli-linux-arm64
-          path: nuwax-cli-linux-arm64.tar.gz
+          path: |
+            nuwax-cli-linux-arm64.tar.gz
+            nuwax-cli-linux-arm64.npm.tar.gz
 
   # Windows 和 macOS 使用标准 CI
   build:
@@ -212,6 +242,13 @@ jobs:
       - name: Build binary
         run: |
           echo "=== 本地编译 for ${{ matrix.platform.target }} ==="
+          # Windows: 关闭 libduckdb-sys 的 unity build,
+          # 避免在 GitHub Actions Windows runner 上被新 MSVC 编译器 OOM kill
+          # (每个 ub_*.cpp 是聚合多 TU 的单文件,内存峰值极高)
+          if [[ "${{ matrix.platform.os }}" == "windows-latest" ]]; then
+            export LIBDUCKDB_UNITY_BUILD=0
+            echo "Windows: LIBDUCKDB_UNITY_BUILD=0 (OOM 缓解)"
+          fi
           cargo build --release --target ${{ matrix.platform.target }} -p nuwax-cli
         shell: bash
 
@@ -221,6 +258,11 @@ jobs:
           cd target/${{ matrix.platform.target }}/release
           tar czf ../../../${{ matrix.platform.archive_name }}.tar.gz \
             ${{ matrix.platform.bin }}
+          mkdir -p ../../../.pkg/nuwax-cli-bundle
+          cp ${{ matrix.platform.bin }} ../../../.pkg/nuwax-cli-bundle/nuwax-cli
+          tar czf ../../../${{ matrix.platform.archive_name }}.npm.tar.gz \
+            -C ../../../.pkg nuwax-cli-bundle
+          rm -rf ../../../.pkg
           cd -
 
       - name: Package binary (Windows)
@@ -238,6 +280,7 @@ jobs:
           name: ${{ matrix.platform.archive_name }}
           path: |
             ${{ matrix.platform.archive_name }}.tar.gz
+            ${{ matrix.platform.archive_name }}.npm.tar.gz
             ${{ matrix.platform.archive_name }}.zip
           if-no-files-found: ignore
 
@@ -262,7 +305,7 @@ jobs:
           # 创建工作目录
           mkdir -p macos-binaries
           
-          # 提取 x86_64 版本
+          # 提取 x86_64 版本（扁平 tar，解压后直接是 nuwax-cli）
           if [ -f "artifacts/nuwax-cli-macos-amd64/nuwax-cli-macos-amd64.tar.gz" ]; then
             echo "✅ 找到 x86_64 版本"
             cd macos-binaries
@@ -317,16 +360,22 @@ jobs:
         run: |
           cd target/universal-apple-darwin/release
           tar czf ../../../nuwax-cli-macos-universal.tar.gz nuwax-cli
-          cd -
-          
+          cd ../../..
+          mkdir -p .pkg/nuwax-cli-bundle
+          cp target/universal-apple-darwin/release/nuwax-cli .pkg/nuwax-cli-bundle/
+          tar czf nuwax-cli-macos-universal.npm.tar.gz -C .pkg nuwax-cli-bundle
+          rm -rf .pkg
+
           echo "=== 打包完成 ==="
-          ls -la nuwax-cli-macos-universal.tar.gz
+          ls -la nuwax-cli-macos-universal.tar.gz nuwax-cli-macos-universal.npm.tar.gz
 
       - name: Upload universal binary
         uses: actions/upload-artifact@v4
         with:
           name: nuwax-cli-macos-universal
-          path: nuwax-cli-macos-universal.tar.gz
+          path: |
+            nuwax-cli-macos-universal.tar.gz
+            nuwax-cli-macos-universal.npm.tar.gz
 
   # 发布到 GitHub Releases
   release:
@@ -458,6 +507,15 @@ jobs:
       OSS_CDN_BASE: "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com"
       VERSION: ${{ needs.check-version.outputs.version }}
       TAG_NAME: ${{ needs.check-version.outputs.tag_name }}
+      # latest/ 别名目录里的固定文件名，与 latest.json 的 platforms 键一一对应
+      ALIAS_FILES: >-
+        nuwax-cli-macos-arm64.tar.gz
+        nuwax-cli-macos-amd64.tar.gz
+        nuwax-cli-macos-universal.tar.gz
+        nuwax-cli-linux-amd64.tar.gz
+        nuwax-cli-linux-arm64.tar.gz
+        nuwax-cli-windows-amd64.zip
+        nuwax-cli-windows-arm64.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -592,6 +650,31 @@ jobs:
             --access-key-secret "$OSS_ACCESS_KEY_SECRET"
           echo "✅ Uploaded latest.json to versioned and latest/ paths"
 
+      - name: Publish latest alias objects
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          # 在 latest/ 目录补上固定文件名的别名对象（服务端复制，不重复上传），
+          # 官方安装脚本 wget/curl 这个地址即可拿到最新版，不必再手工维护版本号。
+          # 与上一步的 latest.json 指针同时落地，保证指针和二进制永远指向同一版本。
+          for file in $ALIAS_FILES; do
+            stem="${file%.tar.gz}"
+            stem="${stem%.zip}"
+            if [ ! -f "release_assets/${stem}/${file}" ]; then
+              echo "==> Skipped (not built for this release): $file"
+              continue
+            fi
+            echo "Aliasing: $file"
+            ossutil cp --force "${OSS_BUCKET}/nuwax-cli/${TAG_NAME}/${file}" \
+              "${OSS_BUCKET}/nuwax-cli/latest/${file}" \
+              --endpoint "$OSS_ENDPOINT" \
+              --region "$OSS_REGION" \
+              --access-key-id "$OSS_ACCESS_KEY_ID" \
+              --access-key-secret "$OSS_ACCESS_KEY_SECRET"
+            echo "✅ Alias: nuwax-cli/latest/${file}"
+          done
+
       - name: Verify OSS upload
         run: |
           VERIFY_URL="${OSS_CDN_BASE}/nuwax-cli/latest/latest.json"
@@ -605,12 +688,93 @@ jobs:
             exit 1
           fi
 
+          # 别名对象逐个确认：指针发布成功却缺别名，安装脚本会 404
+          for file in $ALIAS_FILES; do
+            stem="${file%.tar.gz}"
+            stem="${stem%.zip}"
+            if [ ! -f "release_assets/${stem}/${file}" ]; then
+              continue
+            fi
+            ALIAS_URL="${OSS_CDN_BASE}/nuwax-cli/latest/${file}"
+            ALIAS_STATUS=$(curl -sS -o /dev/null -I -w "%{http_code}" "$ALIAS_URL")
+            if [ "$ALIAS_STATUS" = "200" ]; then
+              echo "✅ alias verified: ${file}"
+            else
+              echo "❌ alias missing (HTTP ${ALIAS_STATUS}): ${ALIAS_URL}"
+              exit 1
+            fi
+          done
+
+  # 发布 npm latest dist-tag（OSS 上传完成后再发布，安装时从阿里云 OSS 下载）
+  publish-npm-latest:
+    name: Publish to npm (latest dist-tag)
+    runs-on: ubuntu-22.04
+    needs: [check-version, upload-to-oss]
+    if: needs.check-version.outputs.should_release == 'true'
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.check-version.outputs.version }}
+      TAG_NAME: ${{ needs.check-version.outputs.tag_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install cargo-dist
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+          dist --version
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Build npm package via dist
+        shell: bash
+        run: |
+          dist build --tag="v${VERSION}" --artifacts=global --output-format=json > dist-manifest.json
+          echo "dist ran successfully"
+          jq -r '.upload_files[]' dist-manifest.json
+
+      - name: Patch npm package to download from OSS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t PKGS < <(jq -r '.upload_files[] | select(endswith("-npm-package.tar.gz"))' dist-manifest.json)
+          for pkg in "${PKGS[@]}"; do
+            node scripts/patch-npm-oss-package.mjs --channel latest --tag-name "${TAG_NAME}" "${pkg}"
+          done
+
+      - name: Publish npm package (latest)
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t PKGS < <(jq -r '.upload_files[] | select(endswith("-npm-package.tar.gz"))' dist-manifest.json)
+
+          if [ "${#PKGS[@]}" -eq 0 ]; then
+            echo "❌ 未找到 npm package 产物（*-npm-package.tar.gz）"
+            jq -r '.upload_files[]' dist-manifest.json
+            exit 1
+          fi
+
+          for pkg in "${PKGS[@]}"; do
+            echo "==> npm publish --tag latest: ${pkg}"
+            npm publish --access public --tag latest "${pkg}"
+          done
+
   # 清理构建缓存（可选）
   cleanup:
     name: Cleanup
     runs-on: ubuntu-latest
-    needs: [upload-to-oss]
-    if: always()
+    needs: [upload-to-oss, publish-npm-latest]
+    if: needs.upload-to-oss.result == 'success' && needs.publish-npm-latest.result == 'success'
     steps:
       - name: Delete artifacts
         uses: geekyeggo/delete-artifact@v2

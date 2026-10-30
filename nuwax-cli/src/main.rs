@@ -7,7 +7,8 @@ use client_core::container::{detect_compose_command_type, set_compose_command_ty
 use client_core::{DuckError, environment::Environment};
 use nuwax_cli::{
     AutoUpgradeDeployCommand, Cli, CliApp, Commands, UpgradeSubcommand,
-    check_and_install_nuwax_cli_update_early, run_diff_sql, run_init, setup_logging,
+    check_and_install_nuwax_cli_update_early, format_error, format_error_with_env, run_diff_sql,
+    run_init, setup_logging,
 };
 use rust_i18n::set_locale;
 use tracing::{error, info, warn};
@@ -51,13 +52,16 @@ async fn main() {
         warn!("🚀 Starting in Testing Environment...");
     }
 
-    // 设置日志记录
+    // 设置日志记录（日志走 stderr，stdout 留给数据输出）
     setup_logging(cli.verbose);
 
     // `init` 命令是特例，它不需要预先加载配置
     if let Commands::Init { force } = cli.command {
         if let Err(e) = run_init(force).await {
-            error!("❌ Initialization failed: {error}", error = e.to_string());
+            error!(
+                "❌ Initialization failed: {error}",
+                error = format_error(&e)
+            );
             std::process::exit(1);
         }
         return;
@@ -75,7 +79,7 @@ async fn main() {
                 if let Err(e) = nuwax_cli::run_status_details(&app).await {
                     error!(
                         "❌ Failed to get detailed status: {error}",
-                        error = e.to_string()
+                        error = format_error_with_env(&e, app.docker_manager.get_env_file())
                     );
                 }
             }
@@ -83,7 +87,7 @@ async fn main() {
                 // 应用初始化失败，显示友好提示
                 error!(
                     "⚠️  Unable to get full status info: {error}",
-                    error = e.to_string()
+                    error = format_error(&e)
                 );
                 info!("");
                 info!("💡 Possible reasons:");
@@ -112,8 +116,22 @@ async fn main() {
         if let Err(e) = run_diff_sql(old_sql, new_sql, old_version, new_version, output).await {
             error!(
                 "❌ SQL diff comparison failed: {error}",
-                error = e.to_string()
+                error = format_error(&e)
             );
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // `device-info` 命令特殊处理：本机采集，不依赖配置/数据库初始化
+    if let Commands::DeviceInfo {
+        json,
+        apply,
+        refresh,
+    } = cli.command
+    {
+        if let Err(e) = nuwax_cli::run_device_info(json, apply, refresh).await {
+            error!("❌ Device info failed: {error}", error = format_error(&e));
             std::process::exit(1);
         }
         return;
@@ -130,7 +148,7 @@ async fn main() {
         if let Err(e) = check_and_install_nuwax_cli_update_early().await {
             error!(
                 "❌ CLI version check failed: {error}",
-                error = e.to_string()
+                error = format_error(&e)
             );
             std::process::exit(1);
         }
@@ -151,7 +169,7 @@ async fn main() {
         match nuwax_cli::run_download(Some(&cli.config)).await {
             Ok(_) => return,
             Err(e) => {
-                error!("❌ Download failed: {error}", error = e.to_string());
+                error!("❌ Download failed: {error}", error = format_error(&e));
                 std::process::exit(1);
             }
         }
@@ -183,7 +201,7 @@ async fn main() {
             } else {
                 error!(
                     "❌ Application initialization failed: {error}",
-                    error = e.to_string()
+                    error = format_error(&e)
                 );
             }
             std::process::exit(1);
@@ -192,7 +210,10 @@ async fn main() {
 
     // 运行命令
     if let Err(e) = app.run_command(cli.command).await {
-        error!("❌ Operation failed: {error}", error = e.to_string());
+        error!(
+            "❌ Operation failed: {error}",
+            error = format_error_with_env(&e, app.docker_manager.get_env_file())
+        );
         std::process::exit(1);
     }
 }

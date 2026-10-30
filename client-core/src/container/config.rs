@@ -1,13 +1,17 @@
+use super::interpolation::{MissingVariables, interpolate_env, is_whole_reference};
 use super::types::{DockerManager, ServiceConfig};
 use crate::DuckError;
 use crate::container::environment::detect_runtime_environment;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use docker_compose_types as dct;
 use quick_cache::sync::Cache;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use tracing::{debug, info, warn};
+
+#[path = "compose_env.rs"]
+pub(crate) mod compose_env;
 
 // 缓存条目的结构
 #[derive(Debug, Clone)]
@@ -113,6 +117,15 @@ impl DockerManager {
         Ok(compose_config)
     }
 
+    /// 升级包替换同一路径的 Compose 文件后，显式清除旧解析结果。
+    pub fn invalidate_compose_config_cache(&self) {
+        let cache_key = (
+            self.compose_file.display().to_string(),
+            self.env_file.display().to_string(),
+        );
+        COMPOSE_CACHE.remove(&cache_key);
+    }
+
     /// 检查服务是否是一次性任务（解析compose文件和名称模式判断）
     pub async fn is_oneshot_service(&self, service_name: &str) -> Result<bool> {
         // 使用已加载的compose_config，无需重新解析
@@ -165,6 +178,100 @@ impl DockerManager {
         }
 
         Ok(service_names)
+    }
+
+    /// 返回指定服务及其全部 Compose 前置服务。
+    pub fn get_service_dependency_closure(&self, service_name: &str) -> Result<HashSet<String>> {
+        fn visit(
+            name: &str,
+            services: &dct::Services,
+            visited: &mut HashSet<String>,
+        ) -> Result<()> {
+            if !visited.insert(name.to_string()) {
+                return Ok(());
+            }
+
+            let service = services
+                .0
+                .get(name)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| anyhow::anyhow!("Compose service not found: {name}"))?;
+            let dependencies: Vec<&str> = match &service.depends_on {
+                dct::DependsOnOptions::Simple(names) => names.iter().map(String::as_str).collect(),
+                dct::DependsOnOptions::Conditional(conditions) => {
+                    conditions.keys().map(String::as_str).collect()
+                }
+            };
+            for dependency in dependencies {
+                visit(dependency, services, visited)?;
+            }
+            Ok(())
+        }
+
+        let compose = self.load_compose_config()?;
+        let mut visited = HashSet::new();
+        visit(service_name, &compose.services, &mut visited)?;
+        Ok(visited)
+    }
+
+    /// 把非数据库阶段的服务按 depends_on 分层，供 --no-deps 启动时保持依赖顺序。
+    pub fn get_compose_startup_layers(
+        &self,
+        excluded: &HashSet<String>,
+    ) -> Result<Vec<Vec<String>>> {
+        let compose = self.load_compose_config()?;
+        let services = &compose.services.0;
+        let mut pending: HashSet<String> = services
+            .keys()
+            .filter(|name| !excluded.contains(*name))
+            .cloned()
+            .collect();
+        let mut started = excluded.clone();
+        let mut layers = Vec::new();
+
+        while !pending.is_empty() {
+            let mut layer = Vec::new();
+            for name in &pending {
+                let service = services
+                    .get(name)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| anyhow::anyhow!("Compose service not found: {name}"))?;
+                let dependencies: Vec<&str> = match &service.depends_on {
+                    dct::DependsOnOptions::Simple(names) => {
+                        names.iter().map(String::as_str).collect()
+                    }
+                    dct::DependsOnOptions::Conditional(conditions) => {
+                        conditions.keys().map(String::as_str).collect()
+                    }
+                };
+                for dependency in &dependencies {
+                    if !services.contains_key(*dependency) {
+                        return Err(anyhow::anyhow!(
+                            "Compose service {name} depends on missing service {dependency}"
+                        ));
+                    }
+                }
+                if dependencies
+                    .iter()
+                    .all(|dependency| started.contains(*dependency))
+                {
+                    layer.push(name.clone());
+                }
+            }
+            if layer.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Compose services have a dependency cycle: {:?}",
+                    pending
+                ));
+            }
+            layer.sort();
+            for name in &layer {
+                pending.remove(name);
+                started.insert(name.clone());
+            }
+            layers.push(layer);
+        }
+        Ok(layers)
     }
 
     /// 获取 docker-compose 项目名称
@@ -220,29 +327,90 @@ impl DockerManager {
     }
 }
 
+/// Read an environment file without exporting it into this process. A missing file
+/// keeps Compose's existing shell-only configuration support.
+pub(crate) fn load_env_values(env_path: &Path) -> Result<HashMap<String, String>> {
+    if !env_path.exists() {
+        return Ok(HashMap::new());
+    }
+    let source = fs::read_to_string(env_path).with_context(|| {
+        format!(
+            "Failed to read Compose environment file: {}",
+            env_path.display()
+        )
+    })?;
+    compose_env::parse_env_values(&source, &|key| {
+        if crate::constants::device_info::ENV_MANAGED_KEYS.contains(&key) {
+            None
+        } else {
+            std::env::var(key).ok()
+        }
+    })
+    .with_context(|| {
+        format!(
+            "Failed to parse Compose environment file: {}",
+            env_path.display()
+        )
+    })
+}
+
+fn compose_env_value(
+    key: &str,
+    file_values: &HashMap<String, String>,
+    host_value: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    if crate::constants::device_info::ENV_MANAGED_KEYS.contains(&key) {
+        file_values.get(key).cloned()
+    } else {
+        // Match native Compose's shell-before-env-file precedence.
+        host_value(key).or_else(|| file_values.get(key).cloned())
+    }
+}
+
 /// 使用 `docker-compose-types` crate 解析配置文件，并处理 .env 文件中的环境变量
 pub fn load_compose_config_with_env(compose_path: &Path, env_path: &Path) -> Result<dct::Compose> {
-    // 1. 加载 .env 文件
-    dotenvy::from_path_override(env_path).ok(); // .ok() 忽略错误，如果文件不存在或无法解析
-
-    // 2. 读取 docker-compose.yml 文件内容
     let content = fs::read_to_string(compose_path)
         .map_err(|e| DuckError::Docker(format!("Failed to read compose file: {e}")))?;
+    let env_values = load_env_values(env_path)?;
+    load_compose_config_with_env_values(&content, compose_path, &env_values)
+}
 
-    // 3. 替换环境变量
-    // 创建一个闭包，用于从当前环境中查找变量
-    // 创建一个闭包，用于从当前环境中查找变量。它必须返回 Result<Option<String>, E>。
-    // 在这里，我们使用 `Ok` 包装 `Option`，并且错误类型是 `Infallible`，因为 `std::env::var(s).ok()` 不会失败。
-    let context = |s: &str| Ok(std::env::var(s).ok());
-    let expanded_content = shellexpand::env_with_context(&content, context).map_err(
-        |e: shellexpand::LookupError<std::convert::Infallible>| {
-            DuckError::Docker(format!("Failed to expand env vars: {e}"))
-        },
-    )?;
-
-    // 4. 解析 YAML
-    let compose_config: dct::Compose = serde_yaml::from_str(&expanded_content).map_err(|e| {
-        DuckError::Docker(format!("Failed to parse compose file with serde_yaml: {e}"))
+/// 同一套解析，只是两个输入都由调用方给出。
+///
+/// 瘦（registry）通道需要它：候选包的 compose 与合并后的 env 在停服之前都只在内存里，
+/// 而"要拉哪些镜像"必须在那时就定下来。`compose_path` 只用于错误信息。
+pub fn load_compose_config_with_env_values(
+    content: &str,
+    compose_path: &Path,
+    env_values: &HashMap<String, String>,
+) -> Result<dct::Compose> {
+    // Parse syntax before inserting environment data. Otherwise a password's
+    // " #", ": ", quotes or newlines can become YAML syntax and change its value.
+    let mut document: serde_yaml::Value = serde_yaml::from_str(content).map_err(|error| {
+        let location = error
+            .location()
+            .map(|location| format!(" at line {}, column {}", location.line(), location.column()))
+            .unwrap_or_default();
+        DuckError::Docker(format!(
+            "Invalid Compose YAML{}: {}",
+            location,
+            compose_path.display()
+        ))
+    })?;
+    let context = |key: &str| compose_env_value(key, env_values, |key| std::env::var(key).ok());
+    interpolate_compose_value(&mut document, &mut Vec::new(), &context)?;
+    // A deserialization error may contain the offending value (credentials).
+    // Schema coercion errors below identify structural fields without values.
+    // Feed safely serialized scalar data to the schema's YAML deserializer. Its
+    // string fields also accept YAML scalar text (e.g. version: 3.8/expose: 3306),
+    // while Value::into_deserializer would reject those existing configurations.
+    let encoded = serde_yaml::to_string(&document)
+        .context("Failed to encode interpolated Compose configuration")?;
+    let compose_config: dct::Compose = serde_yaml::from_str(&encoded).map_err(|_| {
+        DuckError::Docker(format!(
+            "Invalid interpolated Compose schema: {}",
+            compose_path.display()
+        ))
     })?;
 
     debug!("Successfully parsed docker-compose.yml!");
@@ -257,4 +425,671 @@ pub fn load_compose_config_with_env(compose_path: &Path, env_path: &Path) -> Res
     }
 
     Ok(compose_config)
+}
+
+/// 提取 Compose 里全部服务引用的镜像，去重后按字典序返回。
+///
+/// 只做类型化解析，不用正则：瘦（registry）通道要靠这个集合决定"要拉哪些镜像"，
+/// 漏一个就是停机后 `docker compose up` 现场拉取。没有 `image:` 的服务（只写 `build:`）
+/// 直接拒绝 —— 发布产物里没有构建上下文，客户端也不该在客户机上构建。
+pub fn compose_image_references(compose_path: &Path, env_path: &Path) -> Result<Vec<String>> {
+    let compose = load_compose_config_with_env(compose_path, env_path).with_context(|| {
+        format!(
+            "Failed to read image references from {}",
+            compose_path.display()
+        )
+    })?;
+    image_references_of(&compose)
+}
+
+/// `compose_image_references` 的候选包形式：compose 文本与合并后的 env 值都在内存里。
+pub fn compose_image_references_with_values(
+    content: &str,
+    compose_path: &Path,
+    env_values: &HashMap<String, String>,
+) -> Result<Vec<String>> {
+    let compose = load_compose_config_with_env_values(content, compose_path, env_values)
+        .with_context(|| {
+            format!(
+                "Failed to read image references from {}",
+                compose_path.display()
+            )
+        })?;
+    image_references_of(&compose)
+}
+
+fn image_references_of(compose: &dct::Compose) -> Result<Vec<String>> {
+    let mut missing_image = Vec::new();
+    // BTreeSet 而不是 HashSet：调用方要靠这个序列打日志、断点重跑，每次一致才有意义。
+    let mut references = std::collections::BTreeSet::new();
+    for (name, service) in &compose.services.0 {
+        match service
+            .as_ref()
+            .and_then(|service| service.image.as_deref())
+        {
+            Some(image) if !image.trim().is_empty() => {
+                references.insert(image.trim().to_string());
+            }
+            _ => missing_image.push(name.clone()),
+        }
+    }
+    if !missing_image.is_empty() {
+        missing_image.sort();
+        anyhow::bail!(
+            "Compose services without an image reference cannot be delivered from a registry: {}",
+            missing_image.join(", ")
+        );
+    }
+    Ok(references.into_iter().collect())
+}
+
+fn interpolate_scalar(raw: &str, context: &impl Fn(&str) -> Option<String>) -> Result<String> {
+    interpolate_env(raw, context, MissingVariables::Empty)
+}
+
+fn interpolate_compose_value(
+    value: &mut serde_yaml::Value,
+    path: &mut Vec<String>,
+    context: &impl Fn(&str) -> Option<String>,
+) -> Result<()> {
+    use serde_yaml::Value;
+    match value {
+        Value::String(raw) => {
+            let whole_reference = is_whole_reference(raw);
+            let expanded = interpolate_scalar(raw, context)?;
+            *value = if whole_reference {
+                adapt_compose_scalar(&expanded, path)?
+            } else {
+                Value::String(expanded)
+            };
+        }
+        Value::Sequence(sequence) => {
+            for item in sequence {
+                path.push("[]".to_string());
+                interpolate_compose_value(item, path, context)?;
+                path.pop();
+            }
+        }
+        Value::Mapping(mapping) => {
+            // Native Compose interpolates mapping values, never keys. Dynamic
+            // environment/label names use the KEY=value sequence syntax.
+            for (key, value) in mapping.iter_mut() {
+                path.push(key.as_str().unwrap_or("<mapping-key>").to_string());
+                interpolate_compose_value(value, path, context)?;
+                path.pop();
+            }
+        }
+        Value::Tagged(tagged) => interpolate_compose_value(&mut tagged.value, path, context)?,
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ComposeScalar {
+    Boolean,
+    Signed,
+    SignedOrString,
+    Unsigned,
+    Float,
+    Port,
+    PublishedPort,
+    DeviceCount,
+}
+
+/// Primitive schema positions in docker-compose-types 0.24. Untagged enums
+/// (notably Ports::Long) prevent a generic serde wrapper from reaching their
+/// numeric members. Adapt only these structural fields, never arbitrary strings
+/// in environment, labels, driver options, extensions, commands or build args.
+fn compose_scalar_schema(path: &[String]) -> Option<ComposeScalar> {
+    use ComposeScalar::*;
+    let keys: Vec<&str> = path.iter().map(String::as_str).collect();
+    match keys.as_slice() {
+        ["volumes" | "secrets", _, "external"] => return Some(Boolean),
+        [
+            "networks",
+            _,
+            "attachable" | "enable_ipv6" | "internal" | "external",
+        ] => return Some(Boolean),
+        _ => {}
+    }
+    let service = match keys.as_slice() {
+        ["services", _, tail @ ..] | ["service", tail @ ..] => tail,
+        _ => return None,
+    };
+    match service {
+        ["privileged" | "read_only" | "init" | "stdin_open" | "tty"] => Some(Boolean),
+        ["scale"] => Some(Signed),
+        ["mem_swappiness"] => Some(Port),
+        ["ports", "[]", "target"] => Some(Port),
+        ["ports", "[]", "published"] => Some(PublishedPort),
+        ["deploy", "replicas"] => Some(Signed),
+        ["healthcheck", "retries"] => Some(Signed),
+        ["healthcheck", "disable"] => Some(Boolean),
+        ["depends_on", _, "restart" | "required"] => Some(Boolean),
+        ["deploy", "restart_policy", "max_attempts"] => Some(Signed),
+        ["deploy", "update_config", "parallelism"] => Some(Signed),
+        ["deploy", "update_config", "max_failure_ratio"] => Some(Float),
+        [
+            "deploy",
+            "resources",
+            "reservations" | "limits",
+            "devices",
+            "[]",
+            "count",
+        ] => Some(DeviceCount),
+        ["build", "shm_size"] => Some(Unsigned),
+        ["ulimits", _] | ["ulimits", _, "soft" | "hard"] => Some(SignedOrString),
+        ["volumes", "[]", "read_only"] => Some(Boolean),
+        ["volumes", "[]", "bind", "create_host_path"] => Some(Boolean),
+        ["volumes", "[]", "volume", "nocopy"] => Some(Boolean),
+        ["volumes", "[]", "tmpfs", "size"] => Some(Unsigned),
+        _ => None,
+    }
+}
+
+fn adapt_compose_scalar(expanded: &str, path: &[String]) -> Result<serde_yaml::Value> {
+    use ComposeScalar::*;
+    use serde_yaml::Value;
+    let Some(schema) = compose_scalar_schema(path) else {
+        return Ok(Value::String(expanded.to_string()));
+    };
+    if matches!(schema, DeviceCount) && expanded == "all" {
+        return Ok(Value::String(expanded.to_string()));
+    }
+    let parsed: Option<Value> = serde_yaml::from_str(expanded).ok();
+    let valid = match (schema, &parsed) {
+        (Boolean, Some(Value::Bool(_))) => true,
+        (Signed | SignedOrString, Some(Value::Number(number))) => number.as_i64().is_some(),
+        (Float, Some(Value::Number(number))) => number.as_f64().is_some(),
+        (Unsigned | DeviceCount, Some(Value::Number(number))) => number.as_u64().is_some(),
+        (Port | PublishedPort, Some(Value::Number(number))) => number
+            .as_u64()
+            .is_some_and(|number| number <= u16::MAX as u64),
+        // PublishedPort also accepts a range string, e.g. 3306-3310.
+        (PublishedPort, _) => return Ok(Value::String(expanded.to_string())),
+        (SignedOrString, _) => return Ok(Value::String(expanded.to_string())),
+        _ => false,
+    };
+    anyhow::ensure!(
+        valid,
+        "Invalid numeric or boolean Compose field: {}",
+        path.join(".")
+    );
+    parsed.context("Missing adapted Compose scalar")
+}
+
+#[cfg(test)]
+mod staged_deployment_tests {
+    use super::DockerManager;
+
+    #[test]
+    fn mysql_stage_includes_permission_fix_but_not_backend() -> anyhow::Result<()> {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let manager = DockerManager::with_project(
+            fixtures.join("docker-compose.yml"),
+            fixtures.join(".env"),
+            Some("staged-deploy-check".to_string()),
+        )?;
+        let stage = manager.get_service_dependency_closure("mysql")?;
+        assert!(stage.contains("mysql"));
+        assert!(stage.contains("mysql-permission-fix"));
+        assert!(!stage.contains("backend"));
+        let layers = manager.get_compose_startup_layers(&stage)?;
+        let layer_of = |service: &str| {
+            layers
+                .iter()
+                .position(|layer| layer.iter().any(|name| name == service))
+        };
+        assert!(layer_of("mysql").is_none());
+        assert!(layer_of("mysql-permission-fix").is_none());
+        assert!(layer_of("redis") < layer_of("backend"));
+        assert!(layer_of("milvus") < layer_of("backend"));
+        assert!(layer_of("backend") < layer_of("frontend"));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod isolated_compose_environment_tests {
+    use super::*;
+
+    #[test]
+    fn typed_credentials_match_unset_and_empty_default_operators() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("defaults.env");
+        std::fs::write(&env_path, "NUWAX_TYPED_EMPTY=\n")?;
+        for (expression, expected) in [
+            ("${NUWAX_TYPED_UNSET-fallback}", "fallback"),
+            ("${NUWAX_TYPED_EMPTY-fallback}", ""),
+            ("${NUWAX_TYPED_UNSET:-fallback}", "fallback"),
+            ("${NUWAX_TYPED_EMPTY:-fallback}", "fallback"),
+        ] {
+            std::fs::write(
+                &compose,
+                format!(
+                    "services:\n  mysql:\n    image: mysql:8.0\n    environment:\n      - MYSQL_PASSWORD={expression}\n"
+                ),
+            )?;
+            let config = load_compose_config_with_env(&compose, &env_path)?;
+            let mysql = config.services.0["mysql"].as_ref().unwrap();
+            let dct::Environment::List(values) = &mysql.environment else {
+                anyhow::bail!("Expected list environment");
+            };
+            assert_eq!(values, &[format!("MYSQL_PASSWORD={expected}")]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn nested_whole_references_keep_numeric_schema_and_literal_string_data() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("nested.env");
+        std::fs::write(&env_path, "NUWAX_NESTED_EMPTY=\nNUWAX_NESTED_SET=yes\n")?;
+        std::fs::write(
+            &compose,
+            concat!(
+                "services:\n  mysql:\n    image: mysql:8.0\n",
+                "    privileged: ${NUWAX_NESTED_SET:+${NUWAX_NESTED_UNSET:-true}}\n",
+                "    deploy:\n      replicas: ${NUWAX_NESTED_EMPTY:-${NUWAX_NESTED_UNSET:-2}}\n",
+                "    ports:\n      - target: ${NUWAX_NESTED_EMPTY:-${NUWAX_NESTED_UNSET:-3306}}\n",
+                "        published: ${NUWAX_NESTED_UNSET-${NUWAX_NESTED_OTHER:-13306}}\n",
+                "    environment:\n      TEXT: ${NUWAX_NESTED_UNSET:-$${literal}}\n",
+                "      DEVICE_FIELDS_DISK_SERIAL: ${DEVICE_FIELDS_DISK_SERIAL}\n",
+                "      FALLBACK: ${DEVICE_FIELDS_DISK_SERIAL-missing}\n",
+            ),
+        )?;
+        let config = load_compose_config_with_env(&compose, &env_path)?;
+        let mysql = config.services.0["mysql"].as_ref().unwrap();
+        assert!(mysql.privileged);
+        assert_eq!(mysql.deploy.as_ref().unwrap().replicas, Some(2));
+        let dct::Ports::Long(ports) = &mysql.ports else {
+            anyhow::bail!("Expected long ports");
+        };
+        assert_eq!(ports[0].target, 3306);
+        assert_eq!(ports[0].published, Some(dct::PublishedPort::Single(13306)));
+        let environment = serde_json::to_value(&mysql.environment)?;
+        assert_eq!(environment["TEXT"], "${literal}");
+        assert_eq!(environment["DEVICE_FIELDS_DISK_SERIAL"], "");
+        assert_eq!(environment["FALLBACK"], "missing");
+        Ok(())
+    }
+
+    #[test]
+    fn credential_interpolation_keeps_yaml_punctuation_and_literal_dollars_as_data() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("literal.env");
+        let password = r#"synthetic # literal: "quoted" ${not_a_reference} C:\path\folder"#;
+        std::fs::write(
+            &env_path,
+            format!("NUWAX_YAML_SAFE_PASSWORD='{password}'\n"),
+        )?;
+        std::fs::write(
+            &compose,
+            concat!(
+                "services:\n  mysql:\n    image: mysql:8.0\n",
+                "    environment:\n      - MYSQL_PASSWORD=${NUWAX_YAML_SAFE_PASSWORD}\n",
+                "  backend:\n    image: alpine\n",
+                "    environment:\n      PASSWORD: ${NUWAX_YAML_SAFE_PASSWORD}\n",
+                "    labels:\n      password-text: ${NUWAX_YAML_SAFE_PASSWORD}\n"
+            ),
+        )?;
+        let config = load_compose_config_with_env(&compose, &env_path)?;
+        let mysql = config.services.0["mysql"].as_ref().unwrap();
+        let dct::Environment::List(values) = &mysql.environment else {
+            anyhow::bail!("Expected list environment");
+        };
+        assert_eq!(values, &[format!("MYSQL_PASSWORD={password}")]);
+        let backend = config.services.0["backend"].as_ref().unwrap();
+        let environment = serde_json::to_value(&backend.environment)?;
+        assert_eq!(environment["PASSWORD"].as_str(), Some(password));
+        let labels = serde_json::to_value(&backend.labels)?;
+        assert_eq!(labels["password-text"].as_str(), Some(password));
+        Ok(())
+    }
+
+    #[test]
+    fn whole_references_use_schema_types_without_coercing_string_data() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("schema.env");
+        std::fs::write(
+            &env_path,
+            concat!(
+                "NUWAX_SCHEMA_FLAG=true\nNUWAX_SCHEMA_REPLICAS=2\n",
+                "NUWAX_SCHEMA_TARGET=3306\nNUWAX_SCHEMA_PUBLISHED=13306\n",
+                "NUWAX_SCHEMA_RANGE=23306-23308\n"
+            ),
+        )?;
+        std::fs::write(
+            &compose,
+            concat!(
+                "services:\n  mysql:\n    image: ${NUWAX_SCHEMA_REPLICAS}\n",
+                "    privileged: ${NUWAX_SCHEMA_FLAG}\n    read_only: ${NUWAX_SCHEMA_FLAG}\n",
+                "    deploy:\n      replicas: ${NUWAX_SCHEMA_REPLICAS}\n",
+                "    ports:\n      - target: ${NUWAX_SCHEMA_TARGET}\n        published: ${NUWAX_SCHEMA_PUBLISHED}\n",
+                "      - target: ${NUWAX_SCHEMA_TARGET}\n        published: ${NUWAX_SCHEMA_RANGE}\n",
+                "    environment:\n      FLAG: ${NUWAX_SCHEMA_FLAG}\n      COUNT: ${NUWAX_SCHEMA_REPLICAS}\n",
+                "    labels:\n      privileged: ${NUWAX_SCHEMA_FLAG}\n      replicas: ${NUWAX_SCHEMA_REPLICAS}\n",
+                "    command: ['${NUWAX_SCHEMA_FLAG}', '${NUWAX_SCHEMA_REPLICAS}']\n"
+            ),
+        )?;
+        let config = load_compose_config_with_env(&compose, &env_path)?;
+        let mysql = config.services.0["mysql"].as_ref().unwrap();
+        assert_eq!(mysql.image.as_deref(), Some("2"));
+        assert!(mysql.privileged && mysql.read_only);
+        assert_eq!(mysql.deploy.as_ref().unwrap().replicas, Some(2));
+        let dct::Ports::Long(ports) = &mysql.ports else {
+            anyhow::bail!("Expected long ports");
+        };
+        assert_eq!(ports[0].target, 3306);
+        assert_eq!(ports[0].published, Some(dct::PublishedPort::Single(13306)));
+        assert_eq!(
+            ports[1].published,
+            Some(dct::PublishedPort::Range("23306-23308".to_string()))
+        );
+        let environment = serde_json::to_value(&mysql.environment)?;
+        let labels = serde_json::to_value(&mysql.labels)?;
+        assert_eq!(environment["FLAG"].as_str(), Some("true"));
+        assert_eq!(environment["COUNT"].as_str(), Some("2"));
+        assert_eq!(labels["privileged"].as_str(), Some("true"));
+        assert_eq!(labels["replicas"].as_str(), Some("2"));
+        assert_eq!(
+            serde_json::to_value(&mysql.command)?,
+            serde_json::json!(["true", "2"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn existing_yaml_scalar_string_fields_still_deserialize() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        std::fs::write(
+            &compose,
+            "version: 3.8\nservices:\n  backend:\n    image: 123\n    expose: [3306]\n",
+        )?;
+        let config = load_compose_config_with_env(&compose, &directory.path().join("missing.env"))?;
+        assert_eq!(config.version.as_deref(), Some("3.8"));
+        let backend = config.services.0["backend"].as_ref().unwrap();
+        assert_eq!(backend.image.as_deref(), Some("123"));
+        assert_eq!(backend.expose, ["3306"]);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_schema_reference_does_not_disclose_its_value() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("invalid.env");
+        let private_value = "synthetic-private-value";
+        std::fs::write(&env_path, format!("NUWAX_BAD_PORT={private_value}\n"))?;
+        std::fs::write(
+            &compose,
+            "services:\n  mysql:\n    image: mysql:8.0\n    ports:\n      - target: ${NUWAX_BAD_PORT}\n",
+        )?;
+        let error = load_compose_config_with_env(&compose, &env_path).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("ports"));
+        assert!(!message.contains(private_value));
+        Ok(())
+    }
+
+    #[test]
+    fn mapping_keys_remain_literal_while_values_and_sequence_keys_interpolate() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("keys.env");
+        std::fs::write(
+            &env_path,
+            "NUWAX_LABEL_ONE=duplicate\nNUWAX_LABEL_TWO=duplicate\n",
+        )?;
+        std::fs::write(
+            &compose,
+            concat!(
+                "services:\n  backend:\n    image: alpine\n    labels:\n",
+                "      '${NUWAX_LABEL_ONE}': '${NUWAX_LABEL_TWO}'\n",
+                "      '${NUWAX_LABEL_TWO}': second\n",
+                "    environment:\n      '${NUWAX_LABEL_ONE}': '${NUWAX_LABEL_TWO}'\n",
+                "  sequence:\n    image: alpine\n",
+                "    environment: ['${NUWAX_LABEL_ONE}=${NUWAX_LABEL_TWO}']\n",
+                "    labels: ['${NUWAX_LABEL_ONE}=${NUWAX_LABEL_TWO}']\n"
+            ),
+        )?;
+        let config = load_compose_config_with_env(&compose, &env_path)?;
+        let backend = config.services.0["backend"].as_ref().unwrap();
+        let labels = serde_json::to_value(&backend.labels)?;
+        assert_eq!(labels["${NUWAX_LABEL_ONE}"], "duplicate");
+        assert_eq!(labels["${NUWAX_LABEL_TWO}"], "second");
+        let environment = serde_json::to_value(&backend.environment)?;
+        assert_eq!(environment["${NUWAX_LABEL_ONE}"], "duplicate");
+        let sequence = config.services.0["sequence"].as_ref().unwrap();
+        assert_eq!(
+            serde_json::to_value(&sequence.environment)?,
+            serde_json::json!(["duplicate=duplicate"])
+        );
+        assert_eq!(
+            serde_json::to_value(&sequence.labels)?,
+            serde_json::json!(["duplicate=duplicate"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn windows_utf8_bom_is_accepted_without_exporting_values() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("windows.env");
+        std::fs::write(
+            &path,
+            "\u{feff}DEVICE_ID=v1:bom\r\nDEVICE_INFO_OS=windows\r\n",
+        )?;
+        let values = load_env_values(&path)?;
+        assert_eq!(values["DEVICE_ID"], "v1:bom");
+        assert_eq!(values["DEVICE_INFO_OS"], "windows");
+        Ok(())
+    }
+
+    #[test]
+    fn native_host_precedence_is_preserved_except_for_managed_device_values() {
+        let values = HashMap::from([
+            ("MYSQL_PASSWORD".to_string(), "from-file".to_string()),
+            ("DEVICE_ID".to_string(), "v1:from-file".to_string()),
+        ]);
+        assert_eq!(
+            compose_env_value("MYSQL_PASSWORD", &values, |_| Some("from-host".to_string())),
+            Some("from-host".to_string())
+        );
+        assert_eq!(
+            compose_env_value("DEVICE_ID", &values, |_| Some("v1:old-host".to_string())),
+            Some("v1:from-file".to_string())
+        );
+        assert_eq!(
+            compose_env_value("DEVICE_FIELDS_DISK_SERIAL", &values, |_| Some(
+                "old-disk".to_string()
+            )),
+            None
+        );
+        assert_eq!(
+            compose_env_value("MYSQL_PASSWORD", &values, |_| None),
+            Some("from-file".to_string())
+        );
+    }
+
+    #[test]
+    fn file_interpolation_is_local_and_custom_files_do_not_cross_contaminate() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let key = format!(
+            "NUWAX_COMPOSE_{}",
+            directory
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .replace(['-', '.'], "_")
+        );
+        assert!(std::env::var_os(&key).is_none());
+        let compose = directory.path().join("compose.yml");
+        std::fs::write(
+            &compose,
+            format!(
+                "services:\n  backend:\n    image: alpine:${{{key}}}\n    environment:\n      - DEVICE_FIELDS_DISK_SERIAL=${{DEVICE_FIELDS_DISK_SERIAL}}\n"
+            ),
+        )?;
+        let first = directory.path().join("one.env");
+        let second = directory.path().join("two.env");
+        std::fs::write(&first, format!("{key}=first\n"))?;
+        std::fs::write(&second, format!("{key}=second\n"))?;
+        let one = load_compose_config_with_env(&compose, &first)?;
+        let two = load_compose_config_with_env(&compose, &second)?;
+        assert_eq!(
+            one.services.0["backend"].as_ref().unwrap().image.as_deref(),
+            Some("alpine:first")
+        );
+        assert_eq!(
+            two.services.0["backend"].as_ref().unwrap().image.as_deref(),
+            Some("alpine:second")
+        );
+        assert!(std::env::var_os(&key).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn invalidation_reloads_a_warm_cache_after_file_repair() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = directory.path().join("compose.yml");
+        let env_path = directory.path().join("custom.env");
+        std::fs::write(
+            &compose,
+            "services:\n  backend:\n    image: alpine:${DEVICE_INFO_FINGERPRINT_VERSION}\n",
+        )?;
+        std::fs::write(&env_path, "DEVICE_INFO_FINGERPRINT_VERSION=1\n")?;
+        let manager = DockerManager::with_project(compose, env_path.clone(), None)?;
+        assert_eq!(
+            manager.load_compose_config()?.services.0["backend"]
+                .as_ref()
+                .unwrap()
+                .image
+                .as_deref(),
+            Some("alpine:1")
+        );
+        std::fs::write(&env_path, "DEVICE_INFO_FINGERPRINT_VERSION=2\n")?;
+        manager.invalidate_compose_config_cache();
+        assert_eq!(
+            manager.load_compose_config()?.services.0["backend"]
+                .as_ref()
+                .unwrap()
+                .image
+                .as_deref(),
+            Some("alpine:2")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_environment_is_reported_instead_of_partially_exported() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("invalid.env");
+        std::fs::write(&path, "DEVICE_ID=valid\nBAD=\"unfinished\n")?;
+        assert!(load_env_values(&path).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod image_reference_tests {
+    use super::*;
+
+    fn write(directory: &Path, name: &str, text: &str) -> Result<std::path::PathBuf> {
+        let path = directory.join(name);
+        fs::write(&path, text)?;
+        Ok(path)
+    }
+
+    #[test]
+    fn image_references_are_resolved_after_interpolation_and_deduplicated() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = write(
+            directory.path(),
+            "compose.yml",
+            concat!(
+                "services:\n",
+                "  im:\n    image: ${NUWAX_TEST_REGISTRY}/nuwax/nuwax-im:0.0.120\n",
+                "  gateway:\n    image: ${NUWAX_TEST_REGISTRY}/nuwax/nuwax-im:0.0.120\n",
+                "  mysql:\n    image: mysql:8.0\n",
+            ),
+        )?;
+        let env = write(
+            directory.path(),
+            "delivery.env",
+            "NUWAX_TEST_REGISTRY=registry.example.cn\n",
+        )?;
+        assert_eq!(
+            compose_image_references(&compose, &env)?,
+            vec![
+                "mysql:8.0".to_string(),
+                "registry.example.cn/nuwax/nuwax-im:0.0.120".to_string()
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_memory_form_and_the_file_form_agree_on_every_reference() -> Result<()> {
+        // 候选包走文本形式、已部署走文件形式；两条路必须给出同一个集合，
+        // 否则"按候选包拉镜像、按磁盘 compose 起服务"会拉到不同的东西。
+        let directory = tempfile::tempdir()?;
+        let compose = write(
+            directory.path(),
+            "compose.yml",
+            concat!(
+                "services:\n",
+                "  im:\n    image: ${NUWAX_TEST_REGISTRY}/nuwax/nuwax-im:0.0.120\n",
+                "  mysql:\n    image: mysql:8.0\n",
+                "  front:\n    image: registry.example.cn/nuwax/agent-platform-front:0.0.120\n",
+            ),
+        )?;
+        let env = write(
+            directory.path(),
+            "parity.env",
+            "NUWAX_TEST_REGISTRY=registry.example.cn\n",
+        )?;
+        let from_file = compose_image_references(&compose, &env)?;
+        let from_memory = compose_image_references_with_values(
+            &fs::read_to_string(&compose)?,
+            &compose,
+            &load_env_values(&env)?,
+        )?;
+        assert_eq!(from_file, from_memory);
+        assert_eq!(from_file.len(), 3);
+        // 顺序契约：调用方按这个序列打进度日志、断点重跑
+        let mut ascending = from_file.clone();
+        ascending.sort();
+        assert_eq!(from_file, ascending);
+        Ok(())
+    }
+
+    #[test]
+    fn services_without_an_image_are_refused_not_silently_skipped() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let compose = write(
+            directory.path(),
+            "compose.yml",
+            concat!(
+                "services:\n",
+                "  mysql:\n    image: mysql:8.0\n",
+                "  builder:\n    build:\n      context: ./builder\n",
+                "  also-builder:\n    build: ./other\n",
+            ),
+        )?;
+        let env = write(directory.path(), "delivery.env", "")?;
+        let error = compose_image_references(&compose, &env)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("without an image reference"), "{error}");
+        assert!(error.contains("also-builder, builder"), "{error}");
+        Ok(())
+    }
 }

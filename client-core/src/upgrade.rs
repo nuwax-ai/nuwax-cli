@@ -1,9 +1,10 @@
 use crate::{
     api::ApiClient,
-    config::AppConfig,
+    config::{AppConfig, DockerChannel},
     database::Database,
     upgrade_strategy::{UpgradeStrategy, UpgradeStrategyManager},
 };
+use anyhow::Context as _;
 use anyhow::Result;
 use std::{path::PathBuf, sync::Arc};
 use tracing::{debug, info};
@@ -71,16 +72,28 @@ impl UpgradeManager {
     }
 
     /// 检查docker应用升级策略
-    pub async fn check_for_updates(&self, force_full: bool) -> Result<UpgradeStrategy> {
+    ///
+    /// `channel` 决定读取哪条发布通道的清单：命令决定通道，不读取本机配置，
+    /// 这样离线命令在 registry 部署过的机器上依然能取到离线全量清单。
+    pub async fn check_for_updates(
+        &self,
+        force_full: bool,
+        channel: DockerChannel,
+    ) -> Result<UpgradeStrategy> {
         info!("Checking for service updates...");
         let current_version = &self.config.get_docker_versions();
         debug!("Current version: {}", current_version);
-        let enhanced_service_manifest = self.api_client.get_enhanced_service_manifest().await?;
+        let enhanced_service_manifest = self
+            .api_client
+            .get_service_manifest(channel)
+            .await
+            .with_context(|| format!("Failed to read the {} service manifest", channel.as_str()))?;
 
         let upgrade_strategy_manager = UpgradeStrategyManager::new(
             current_version.to_string(),
             force_full,
             enhanced_service_manifest,
+            channel,
         );
         let upgrade_strategy: UpgradeStrategy = upgrade_strategy_manager.determine_strategy()?;
 

@@ -20,6 +20,12 @@ pub mod docker {
     /// 应用程序目录名
     pub const APP_DIR_NAME: &str = "app";
 
+    /// IM 应用宿主产物目录（双 jar，必须同包同版）
+    pub const IM_APP_DIR_NAME: &str = "im-app";
+
+    /// 资料库应用宿主产物目录（前端 dist）
+    pub const REPO_COLLAB_APP_DIR_NAME: &str = "repo-collab-app";
+
     /// 配置目录名
     pub const CONFIG_DIR_NAME: &str = "config";
 
@@ -192,6 +198,18 @@ pub mod docker {
         Path::new(".").join(DOCKER_DIR_NAME).join(APP_DIR_NAME)
     }
 
+    /// 获取 IM 应用宿主产物目录路径（跨平台）
+    pub fn get_im_app_dir_path() -> PathBuf {
+        Path::new(".").join(DOCKER_DIR_NAME).join(IM_APP_DIR_NAME)
+    }
+
+    /// 获取资料库应用宿主产物目录路径（跨平台）
+    pub fn get_repo_collab_app_dir_path() -> PathBuf {
+        Path::new(".")
+            .join(DOCKER_DIR_NAME)
+            .join(REPO_COLLAB_APP_DIR_NAME)
+    }
+
     /// 获取配置目录路径（跨平台）
     pub fn get_config_dir_path() -> PathBuf {
         Path::new(".").join(DOCKER_DIR_NAME).join(CONFIG_DIR_NAME)
@@ -235,23 +253,36 @@ pub mod docker {
 
     /// 升级时需要保留的目录列表（不会被删除或覆盖）
     ///
-    /// 这些目录包含用户数据或运行时生成的重要文件，在升级过程中必须保护：
+    /// 这些目录和配置文件包含用户数据或运行时配置，在升级过程中必须保护：
     /// - `upload`: 用户上传的文件
     /// - `project_workspace`: 项目工作空间
+    /// - `computer-project-workspace`: 计算机项目工作空间
+    /// - `computer-cache`: npm/pnpm/bun/uv 等运行时缓存（包含正常的包管理器链接）
     /// - `project_zips`: 项目压缩包
     /// - `project_nginx`: Nginx配置
     /// - `project_init`: 项目初始化文件
     /// - `uv_cache`: UV缓存目录
     /// - `data`: 数据库和持久化数据
-    pub const EXCLUDE_DIRS: [&str; 8] = [
+    /// - `app-workspace`: 应用工作空间
+    /// - `userapp-workspace`: 用户应用的开发、数据、日志及 Agent 持久化工作空间
+    /// - `backups`: 定时生成的数据库及 Redis 备份
+    /// - `.env`: 用户数据库凭据、服务端口及其他部署配置
+    /// - `logs`: 容器挂载的持久化服务日志
+    pub const EXCLUDE_DIRS: [&str; 14] = [
         "upload",
         "project_workspace",
         "computer-project-workspace",
+        "computer-cache",
         "project_zips",
         "project_nginx",
         "project_init",
         "uv_cache",
         "data",
+        "app-workspace",
+        "userapp-workspace",
+        BACKUPS_DIR_NAME,
+        ".env",
+        "logs",
     ];
 }
 
@@ -265,6 +296,10 @@ pub mod api {
 
     /// Docker版本JSON URL环境变量（最高优先级，允许自定义docker版本JSON地址）
     pub const NUWAX_API_DOCKER_VERSION_URL_ENV: &str = "NUWAX_API_DOCKER_VERSION_URL";
+
+    /// registry 瘦通道 Docker 版本 JSON URL 环境变量（最高优先级，仅作用于 registry 通道）
+    pub const NUWAX_API_DOCKER_REGISTRY_VERSION_URL_ENV: &str =
+        "NUWAX_API_DOCKER_REGISTRY_VERSION_URL";
 
     /// 生产环境API服务器地址
     const PRODUCTION_BASE_URL: &str = "https://api-version.nuwax.com";
@@ -362,6 +397,20 @@ pub mod api {
 
         /// Docker版本JSON (OSS) - 测试/发布环境
         pub const DOCKER_VERSION_OSS_BETA: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/beta/latest.json";
+
+        /// registry 瘦通道版本JSON (OSS) - 生产环境（与 latest.json 同目录，发布侧多传一个文件）
+        pub const DOCKER_REGISTRY_VERSION_OSS_PROD: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/registry.json";
+
+        /// registry 瘦通道版本JSON (OSS) - 测试/发布环境
+        pub const DOCKER_REGISTRY_VERSION_OSS_BETA: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/beta/registry.json";
+
+        /// CLI 版本检查 JSON (OSS) - 生产环境
+        pub const CLI_VERSION_OSS_PROD: &str =
+            "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-cli/latest/latest.json";
+
+        /// CLI 版本检查 JSON (OSS) - 测试环境
+        pub const CLI_VERSION_OSS_BETA: &str =
+            "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-cli/beta/latest.json";
 
         /// Docker完整服务包下载端点
         pub const DOCKER_DOWNLOAD_FULL: &str =
@@ -537,18 +586,26 @@ pub mod timeout {
 
     /// 服务验证前等待时间（让服务稳定）
     pub const SERVICE_VERIFY_WAIT: u64 = 5;
+
+    /// 瘦通道单个镜像引用从仓库拉取的超时时间。镜像层可能上 GB，
+    /// 但这个调用发生在停服之前，超时只能放弃部署，不能拖成"看起来卡死"。
+    pub const REGISTRY_PULL_TIMEOUT: u64 = 3600;
+
+    /// 瘦通道停服前的仓库可达性预检超时时间
+    pub const REGISTRY_PROBE_TIMEOUT: u64 = 60;
 }
 
 /// SQL 相关常量
 pub mod sql {
-    /// SQL 差异执行默认重试次数
+    /// 兼容旧调用方；DDL 执行器不再进行整批重试。
+    #[deprecated(note = "DDL batches are not safely retryable")]
     pub const DEFAULT_RETRY_COUNT: u8 = 3;
 
     /// MySQL 容器默认映射端口
     pub const DEFAULT_MYSQL_CONTAINER_PORT: u16 = 13306;
 
-    /// MySQL 服务等待超时（秒）- 用于等待 MySQL 容器就绪
-    pub const MYSQL_READY_TIMEOUT: u64 = 60;
+    /// MySQL SQL 连接等待超时（秒），包含首次初始化脚本执行时间。
+    pub const MYSQL_READY_TIMEOUT: u64 = 300;
 
     /// 其他服务启动等待超时（秒）- SQL 升级后等待 Java 等服务
     pub const OTHER_SERVICES_TIMEOUT: u64 = 120;
@@ -556,26 +613,29 @@ pub mod sql {
     /// 临时 SQL 目录名
     pub const TEMP_SQL_DIR: &str = "temp_sql";
 
-    /// 旧版本 SQL 文件名
-    pub const OLD_SQL_FILE: &str = "init_mysql_old.sql";
-
-    /// 新版本 SQL 文件名
-    pub const NEW_SQL_FILE: &str = "init_mysql_new.sql";
-
     /// 差异 SQL 文件名
     pub const DIFF_SQL_FILE: &str = "upgrade_diff.sql";
 
-    /// 当前 SQL 文件路径
-    pub const CURRENT_SQL_PATH: &str = "docker/config/init_mysql.sql";
+    /// Schema 模板清单：Live Diff 逐库对比的目标 DDL。
+    /// 每个文件对应一个数据库（靠文件内唯一的 `USE` 语句归属库），
+    /// 纯数据文件（如 init_mysql_data.sql）不属于此清单。
+    /// 注意：这是 legacy 路径（包内无 mysql-schema-manifest.json 时使用）。
+    pub const SCHEMA_SQL_FILES: &[&str] = &["docker/config/init_mysql.sql"];
+
+    /// Optional legacy templates become mandatory when present or mounted by Compose.
+    /// New packages declare all databases through mysql-schema-manifest.json.
+    pub const OPTIONAL_SCHEMA_SQL_FILES: &[&str] = &["config/init_mysql_im.sql"];
+
+    /// 包内 MySQL schema 清单（mysql-schema-manifest-v1 契约入口）；
+    /// 存在即启用 manifest 路径，不存在走 legacy 固定清单
+    pub const SCHEMA_MANIFEST_PATH: &str = "docker/config/mysql-schema-manifest.json";
+
+    /// 包内交付清单（DELIVERY_MANIFEST.json v1：产物/SQL/Compose hash 与发布身份）
+    pub const DELIVERY_MANIFEST_PATH: &str = "docker/DELIVERY_MANIFEST.json";
 
     /// 关键升级文件列表（增量升级时必须强制更新）
     /// 这些文件对于数据库升级至关重要，必须始终保持最新版本
-    pub const CRITICAL_UPGRADE_FILES: &[&str] = &[
-        "config/init_mysql.sql",
-        // 未来可以添加其他关键文件，例如：
-        // "config/schema.json",
-        // "config/migration_rules.yml",
-    ];
+    pub const CRITICAL_UPGRADE_FILES: &[&str] = &["config/init_mysql.sql"];
 
     /// 目录清理最大重试次数
     pub const MAX_CLEANUP_ATTEMPTS: usize = 3;
@@ -729,4 +789,81 @@ pub mod version {
 pub mod updates {
     /// 默认检查频率
     pub const DEFAULT_CHECK_FREQUENCY: &str = "daily";
+}
+
+/// 设备指纹相关常量（设计文档：docs/DEVICE_FINGERPRINT_DESIGN.md）
+pub mod device_info {
+    use std::path::{Path, PathBuf};
+
+    /// 数据目录名（与其他模块的状态持久化目录约定一致）
+    pub const DATA_DIR_NAME: &str = "data";
+
+    /// 冻结文件名
+    pub const FINGERPRINT_FILE_NAME: &str = "device_fingerprint.json";
+
+    /// 指纹算法版本（对应 device_id 前缀 "v1"）
+    pub const FP_VERSION: usize = 1;
+
+    /// device_id 前缀
+    pub const DEVICE_ID_PREFIX: &str = "v1";
+
+    /// canonical 串的域分隔前缀（防与其他 SHA-256 用途产生意义混淆）
+    pub const CANONICAL_DOMAIN: &str = "nuwax-device-fp-v1";
+
+    /// .env 注入的环境变量键名（Java 侧经 yml 占位符 + Spring 宽松绑定读取 device.*）。
+    /// 采用逐字段变量（而非 JSON 字符串），Java 侧零解析、纯原生 map/POJO 绑定；
+    /// 缺失字段不写键，yml 占位符默认空串
+    pub const ENV_KEY_DEVICE_ID: &str = "DEVICE_ID";
+    // device.fields.* 逐字段哈希
+    pub const ENV_KEY_FIELD_MACHINE_ID: &str = "DEVICE_FIELDS_MACHINE_ID";
+    pub const ENV_KEY_FIELD_DMI_UUID: &str = "DEVICE_FIELDS_DMI_UUID";
+    pub const ENV_KEY_FIELD_DISK_SERIAL: &str = "DEVICE_FIELDS_DISK_SERIAL";
+    pub const ENV_KEY_FIELD_PRIMARY_MAC: &str = "DEVICE_FIELDS_PRIMARY_MAC";
+    // device.info.* 展示信息
+    pub const ENV_KEY_INFO_HOSTNAME: &str = "DEVICE_INFO_HOSTNAME";
+    pub const ENV_KEY_INFO_OS: &str = "DEVICE_INFO_OS";
+    pub const ENV_KEY_INFO_ARCH: &str = "DEVICE_INFO_ARCH";
+    pub const ENV_KEY_INFO_CPU_MODEL: &str = "DEVICE_INFO_CPU_MODEL";
+    pub const ENV_KEY_INFO_CPU_CORES: &str = "DEVICE_INFO_CPU_CORES";
+    pub const ENV_KEY_INFO_MEMORY_GB: &str = "DEVICE_INFO_MEMORY_GB";
+    pub const ENV_KEY_INFO_FINGERPRINT_VERSION: &str = "DEVICE_INFO_FINGERPRINT_VERSION";
+    pub const ENV_KEY_INFO_COLLECTED_AT: &str = "DEVICE_INFO_COLLECTED_AT";
+    pub const ENV_KEY_INFO_WSL: &str = "DEVICE_INFO_WSL";
+    pub const ENV_KEY_INFO_CONTAINERIZED: &str = "DEVICE_INFO_CONTAINERIZED";
+
+    /// Exact keys owned by the CLI. Other host environment variables keep their usual precedence.
+    pub const ENV_MANAGED_KEYS: [&str; 15] = [
+        ENV_KEY_DEVICE_ID,
+        ENV_KEY_FIELD_MACHINE_ID,
+        ENV_KEY_FIELD_DMI_UUID,
+        ENV_KEY_FIELD_DISK_SERIAL,
+        ENV_KEY_FIELD_PRIMARY_MAC,
+        ENV_KEY_INFO_HOSTNAME,
+        ENV_KEY_INFO_OS,
+        ENV_KEY_INFO_ARCH,
+        ENV_KEY_INFO_CPU_MODEL,
+        ENV_KEY_INFO_CPU_CORES,
+        ENV_KEY_INFO_MEMORY_GB,
+        ENV_KEY_INFO_FINGERPRINT_VERSION,
+        ENV_KEY_INFO_COLLECTED_AT,
+        ENV_KEY_INFO_WSL,
+        ENV_KEY_INFO_CONTAINERIZED,
+    ];
+
+    /// .env 中受管理区块的注释标记（存在则不重复插入）
+    pub const ENV_MANAGED_MARKER: &str =
+        "# --- Managed by nuwax-cli: device fingerprint, DO NOT EDIT ---";
+
+    /// 身份字段名（canonical 拼接顺序，亦是 DEVICE_FIELDS JSON 的键）
+    pub const FIELD_MACHINE_ID: &str = "machine_id";
+    pub const FIELD_DMI_UUID: &str = "dmi_uuid";
+    pub const FIELD_DISK_SERIAL: &str = "disk_serial";
+    pub const FIELD_PRIMARY_MAC: &str = "primary_mac";
+
+    /// 获取冻结文件路径（跨平台）
+    pub fn get_fingerprint_file_path() -> PathBuf {
+        Path::new(".")
+            .join(DATA_DIR_NAME)
+            .join(FINGERPRINT_FILE_NAME)
+    }
 }

@@ -31,6 +31,9 @@ pub async fn handle_auto_backup(app: &mut CliApp, command: &AutoBackupCommand) -
 pub async fn run_auto_backup(app: &mut CliApp) -> Result<()> {
     info!("Starting auto backup process");
 
+    // Reject unsupported archive/env layouts before stopping the selected stack.
+    client_core::backup_release::deployment_root(&app.docker_manager)?;
+
     let backup_start_time = chrono::Utc::now();
     let mut backup_success = false;
 

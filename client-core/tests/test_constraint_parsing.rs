@@ -34,8 +34,8 @@ fn test_constraint_unique_syntax() {
         "索引名应该是 uk_space_user"
     );
     assert_eq!(unique_idx.columns.len(), 2);
-    assert_eq!(unique_idx.columns[0], "space_id");
-    assert_eq!(unique_idx.columns[1], "user_id");
+    assert_eq!(unique_idx.columns[0].name, "space_id");
+    assert_eq!(unique_idx.columns[1].name, "user_id");
 }
 
 #[test]

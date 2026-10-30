@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::{
     api_types::{EnhancedServiceManifest, PatchPackageInfo},
     architecture::Architecture,
+    config::DockerChannel,
     constants::docker::get_compose_file_path,
     constants::docker::get_docker_work_dir,
     version::Version,
@@ -17,6 +18,8 @@ pub enum DownloadType {
     Full,
     /// 增量升级
     Patch,
+    /// registry 瘦通道的全量升级：包内不含 `docker/images/*.tar`
+    Registry,
 }
 
 impl Display for DownloadType {
@@ -24,6 +27,7 @@ impl Display for DownloadType {
         match self {
             DownloadType::Full => write!(f, "full"),
             DownloadType::Patch => write!(f, "patch"),
+            DownloadType::Registry => write!(f, "registry"),
         }
     }
 }
@@ -100,20 +104,33 @@ pub struct UpgradeStrategyManager {
     force_full: bool,
     ///当前客户端架构
     architecture: Architecture,
+    ///全量包所属通道（离线 full / registry 瘦包），决定下载目录与缓存身份
+    full_download_type: DownloadType,
 }
 
 impl UpgradeStrategyManager {
     /// 创建新的升级策略管理器
+    ///
+    /// `channel` 决定全量包属于哪条发布通道：两条通道会为同一版本号发布不同的包，
+    /// 下载目录与缓存收据身份必须区分开，否则瘦包会覆盖离线包、让另一条通道读到错误的收据。
+    /// 增量（`DownloadType::Patch`）不由这里表达，它只属于离线通道，
+    /// 所以参数用的是 `DockerChannel` 而不是 `DownloadType`。
     pub fn new(
         current_version: String,
         force_full: bool,
         manifest: EnhancedServiceManifest,
+        channel: DockerChannel,
     ) -> Self {
+        let full_download_type = match channel {
+            DockerChannel::Images => DownloadType::Full,
+            DockerChannel::Registry => DownloadType::Registry,
+        };
         Self {
             manifest,
             current_version,
             force_full,
             architecture: Architecture::detect(),
+            full_download_type,
         }
     }
 
@@ -162,6 +179,14 @@ impl UpgradeStrategyManager {
             }
             crate::version::VersionComparison::PatchUpgradeable => {
                 // 可以进行增量升级
+                if self.full_download_type == DownloadType::Registry {
+                    // registry 通道只发布瘦全量包：补丁包走的是离线通道的缓存目录，
+                    // 误发布到瘦通道清单会让两条通道共用同一个包收据，宁可拒绝执行。
+                    return Err(anyhow::anyhow!(
+                        "The registry channel does not support incremental patch packages; \
+                         publish a registry full package instead"
+                    ));
+                }
                 if !self.has_patch_for_architecture() {
                     info!(
                         "No incremental upgrade package for current architecture, selecting full upgrade strategy"
@@ -192,30 +217,51 @@ impl UpgradeStrategyManager {
                 "Using architecture-specific full package: {}",
                 &platform_info.url
             );
+            let published = platform_info.published_sha256(
+                self.manifest
+                    .packages
+                    .as_ref()
+                    .map(|packages| &packages.full),
+            )?;
             Ok(UpgradeStrategy::FullUpgrade {
                 url: platform_info.url.clone(),
-                hash: "external".to_string(), // 平台包通常没有预设哈希
+                hash: self.required_full_hash(published.as_deref(), &platform_info.url)?,
                 signature: platform_info.signature.clone(),
                 target_version: self.manifest.version.clone(),
-                download_type: DownloadType::Full,
+                download_type: self.full_download_type.clone(),
+            })
+        } else if let Some(package_info) = &self.manifest.packages {
+            let full_info = &package_info.full;
+            debug!("Using generic full package: {}", &full_info.url);
+            Ok(UpgradeStrategy::FullUpgrade {
+                url: full_info.url.clone(),
+                hash: self.required_full_hash(Some(full_info.hash.as_str()), &full_info.url)?,
+                signature: full_info.signature.clone(),
+                target_version: self.manifest.version.clone(),
+                download_type: self.full_download_type.clone(),
             })
         } else {
-            if let Some(package_info) = &self.manifest.packages {
-                let full_info = &package_info.full;
-                debug!("Using generic full package: {}", &full_info.url);
-                Ok(UpgradeStrategy::FullUpgrade {
-                    url: full_info.url.clone(),
-                    hash: full_info.hash.clone(),
-                    signature: full_info.signature.clone(),
-                    target_version: self.manifest.version.clone(),
-                    download_type: DownloadType::Full,
-                })
-            } else {
-                //未找到对应架构的全量升级包，这里主动报错
-                Err(anyhow::anyhow!(
-                    "Full upgrade package for corresponding architecture not found"
-                ))
-            }
+            //未找到对应架构的全量升级包，这里主动报错
+            Err(anyhow::anyhow!(
+                "Full upgrade package for corresponding architecture not found"
+            ))
+        }
+    }
+
+    /// 全量包的发布方 SHA。两条通道的原始文本都先过 `package_cache::normalize_sha256`，
+    /// 让 `external` 占位、空值、`sha256:` 前缀和 64 位十六进制只有一份判定规则。
+    ///
+    /// registry 瘦包必须给出可用的 SHA：瘦部署跳过 `docker load`，下载完整性是唯一能证明
+    /// "解出来的就是发布的那份"的环节，拿不到就拒绝开始部署。离线通道保持历史行为
+    /// （缺省填 `external` 占位，下游同样解释为"不校验"）。
+    fn required_full_hash(&self, published: Option<&str>, package: &str) -> Result<String> {
+        match crate::package_cache::normalize_sha256(published)? {
+            Some(hash) => Ok(hash),
+            None if self.full_download_type == DownloadType::Registry => Err(anyhow::anyhow!(
+                "registry package {package} publishes no SHA-256; \
+                 refusing an unverified slim download"
+            )),
+            None => Ok("external".to_string()),
         }
     }
 
@@ -314,10 +360,12 @@ mod tests {
             }),
             platforms: Some(PlatformPackages {
                 x86_64: Some(PlatformPackageInfo {
+                    hash: None,
                     signature: "x86_64_signature".to_string(),
                     url: "https://example.com/x86_64/docker.zip".to_string(),
                 }),
                 aarch64: Some(PlatformPackageInfo {
+                    hash: None,
                     signature: "aarch64_signature".to_string(),
                     url: "https://example.com/aarch64/docker.zip".to_string(),
                 }),
@@ -392,8 +440,12 @@ mod tests {
         // 设置测试环境
         let _temp_dir = setup_test_environment();
 
-        let manager =
-            UpgradeStrategyManager::new("0.0.13.2".to_string(), false, create_test_manifest());
+        let manager = UpgradeStrategyManager::new(
+            "0.0.13.2".to_string(),
+            false,
+            create_test_manifest(),
+            DockerChannel::Images,
+        );
 
         // 当前版本与服务器版本相同
         let strategy = manager.determine_strategy().unwrap();
@@ -406,8 +458,12 @@ mod tests {
         // 设置测试环境
         let _temp_dir = setup_test_environment();
 
-        let manager =
-            UpgradeStrategyManager::new("0.0.13.4".to_string(), false, create_test_manifest());
+        let manager = UpgradeStrategyManager::new(
+            "0.0.13.4".to_string(),
+            false,
+            create_test_manifest(),
+            DockerChannel::Images,
+        );
 
         // 当前版本比服务器版本新
         let strategy = manager.determine_strategy().unwrap();
@@ -420,8 +476,12 @@ mod tests {
         // 设置测试环境
         let _temp_dir = setup_test_environment();
 
-        let manager =
-            UpgradeStrategyManager::new("0.0.12".to_string(), false, create_test_manifest());
+        let manager = UpgradeStrategyManager::new(
+            "0.0.12".to_string(),
+            false,
+            create_test_manifest(),
+            DockerChannel::Images,
+        );
 
         // 不同基础版本，需要全量升级
         let strategy = manager.determine_strategy().unwrap();
@@ -432,11 +492,152 @@ mod tests {
                 target_version,
                 ..
             } => {
-                assert_eq!(url, "https://example.com/aarch64/docker.zip");
+                assert_eq!(
+                    url,
+                    format!(
+                        "https://example.com/{}/docker.zip",
+                        Architecture::detect().as_str()
+                    )
+                );
                 assert_eq!(target_version, "0.0.13.2".parse::<Version>().unwrap());
             }
             _ => panic!("应该选择全量升级策略"),
         }
+    }
+
+    /// 两条通道会为同一版本号发布不同的包：registry 策略必须自带 registry 下载类型，
+    /// 下载目录与缓存收据才不会和离线包混用
+    #[test]
+    fn registry_channel_stamps_full_package_with_registry_download_type() {
+        let mut manifest = create_test_manifest();
+        match Architecture::detect() {
+            Architecture::X86_64 => {
+                manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .x86_64
+                    .as_mut()
+                    .unwrap()
+                    .hash = Some("a".repeat(64))
+            }
+            Architecture::Aarch64 => {
+                manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .aarch64
+                    .as_mut()
+                    .unwrap()
+                    .hash = Some("a".repeat(64))
+            }
+            _ => panic!("test host architecture unsupported"),
+        }
+        let manager = UpgradeStrategyManager::new(
+            "0.0.12".to_string(),
+            false,
+            manifest,
+            DockerChannel::Registry,
+        );
+        let UpgradeStrategy::FullUpgrade {
+            url, download_type, ..
+        } = manager.select_full_upgrade_strategy().unwrap()
+        else {
+            panic!("应该选择全量升级策略");
+        };
+        assert_eq!(download_type, DownloadType::Registry);
+        assert_eq!(download_type.to_string(), "registry");
+        assert_eq!(
+            url,
+            format!(
+                "https://example.com/{}/docker.zip",
+                Architecture::detect().as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn registry_channel_refuses_an_incremental_patch_package() {
+        let _temp_dir = setup_test_environment();
+        let manager = UpgradeStrategyManager::new(
+            "0.0.13".to_string(),
+            false,
+            create_test_manifest(),
+            DockerChannel::Registry,
+        );
+        let error = manager.determine_strategy().unwrap_err().to_string();
+        assert!(
+            error.contains("registry channel does not support incremental patch"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// 瘦包跳过 docker load，SHA 是唯一的下载完整性证明：清单不给就必须拒绝
+    #[test]
+    fn registry_channel_requires_a_published_package_sha() {
+        let manager = UpgradeStrategyManager::new(
+            "0.0.12".to_string(),
+            false,
+            create_test_manifest(),
+            DockerChannel::Registry,
+        );
+        let error = manager.select_full_upgrade_strategy().unwrap_err();
+        assert!(
+            error.to_string().contains("publishes no SHA-256"),
+            "unexpected error: {error}"
+        );
+
+        // 离线通道保持历史行为：没有可用 SHA 时填 external 占位继续部署
+        let offline = UpgradeStrategyManager::new(
+            "0.0.12".to_string(),
+            false,
+            create_test_manifest(),
+            DockerChannel::Images,
+        )
+        .select_full_upgrade_strategy()
+        .unwrap();
+        let UpgradeStrategy::FullUpgrade { hash, .. } = offline else {
+            panic!("应该选择全量升级策略");
+        };
+        assert_eq!(hash, "external");
+
+        let mut manifest = create_test_manifest();
+        let digest = "c".repeat(64);
+        match Architecture::detect() {
+            Architecture::X86_64 => {
+                manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .x86_64
+                    .as_mut()
+                    .unwrap()
+                    .hash = Some(digest.clone());
+            }
+            Architecture::Aarch64 => {
+                manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .aarch64
+                    .as_mut()
+                    .unwrap()
+                    .hash = Some(digest.clone());
+            }
+            _ => panic!("test host architecture unsupported"),
+        }
+        let manager = UpgradeStrategyManager::new(
+            "0.0.12".to_string(),
+            false,
+            manifest,
+            DockerChannel::Registry,
+        );
+        let UpgradeStrategy::FullUpgrade { hash, .. } =
+            manager.select_full_upgrade_strategy().unwrap()
+        else {
+            panic!("应该选择全量升级策略");
+        };
+        assert_eq!(hash, digest);
     }
 
     #[test]
@@ -444,8 +645,12 @@ mod tests {
         // 设置测试环境
         let _temp_dir = setup_test_environment();
 
-        let manager =
-            UpgradeStrategyManager::new("0.0.13".to_string(), false, create_test_manifest());
+        let manager = UpgradeStrategyManager::new(
+            "0.0.13".to_string(),
+            false,
+            create_test_manifest(),
+            DockerChannel::Images,
+        );
 
         // 相同基础版本，可以增量升级
         let strategy = manager.determine_strategy().unwrap();
@@ -463,12 +668,127 @@ mod tests {
         // 设置测试环境
         let _temp_dir = setup_test_environment();
 
-        let manager =
-            UpgradeStrategyManager::new("0.0.13.2".to_string(), true, create_test_manifest());
+        let manager = UpgradeStrategyManager::new(
+            "0.0.13.2".to_string(),
+            true,
+            create_test_manifest(),
+            DockerChannel::Images,
+        );
 
         // 强制全量升级，即使可以增量升级
         let strategy = manager.determine_strategy().unwrap();
 
         assert!(matches!(strategy, UpgradeStrategy::FullUpgrade { .. }));
+    }
+
+    #[test]
+    fn cache_identity_uses_selected_platform_sha_and_url_matched_legacy_fallback() {
+        let mut manifest = create_test_manifest();
+        let platform = match Architecture::detect() {
+            Architecture::X86_64 => manifest
+                .platforms
+                .as_mut()
+                .unwrap()
+                .x86_64
+                .as_mut()
+                .unwrap(),
+            Architecture::Aarch64 => manifest
+                .platforms
+                .as_mut()
+                .unwrap()
+                .aarch64
+                .as_mut()
+                .unwrap(),
+            _ => panic!("test host architecture unsupported"),
+        };
+        platform.hash = Some("a".repeat(64));
+        let manager =
+            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DockerChannel::Images);
+        let UpgradeStrategy::FullUpgrade { hash, .. } =
+            manager.select_full_upgrade_strategy().unwrap()
+        else {
+            panic!("expected full upgrade");
+        };
+        assert_eq!(hash, "a".repeat(64));
+
+        let mut manifest = create_test_manifest();
+        manifest.packages.as_mut().unwrap().full.hash = "b".repeat(64);
+        let platform = match Architecture::detect() {
+            Architecture::X86_64 => manifest
+                .platforms
+                .as_mut()
+                .unwrap()
+                .x86_64
+                .as_mut()
+                .unwrap(),
+            Architecture::Aarch64 => manifest
+                .platforms
+                .as_mut()
+                .unwrap()
+                .aarch64
+                .as_mut()
+                .unwrap(),
+            _ => panic!("test host architecture unsupported"),
+        };
+        platform.url = manifest.packages.as_ref().unwrap().full.url.clone();
+        let manager =
+            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DockerChannel::Images);
+        let UpgradeStrategy::FullUpgrade { hash, .. } =
+            manager.select_full_upgrade_strategy().unwrap()
+        else {
+            panic!("expected full upgrade");
+        };
+        assert_eq!(hash, "b".repeat(64));
+
+        let manifest = create_test_manifest();
+        let manager =
+            UpgradeStrategyManager::new("0.0.12.0".into(), false, manifest, DockerChannel::Images);
+        let UpgradeStrategy::FullUpgrade { hash, .. } =
+            manager.select_full_upgrade_strategy().unwrap()
+        else {
+            panic!("expected full upgrade");
+        };
+        // Generic full.url differs from both platform URLs: no cross-arch digest.
+        assert_eq!(hash, "external");
+    }
+
+    #[test]
+    fn platform_digest_sentinels_do_not_hide_a_valid_same_url_generic_digest() {
+        for placeholder in [None, Some(String::new()), Some("external".to_owned())] {
+            let mut manifest = create_test_manifest();
+            manifest.packages.as_mut().unwrap().full.hash = "b".repeat(64);
+            let url = manifest.packages.as_ref().unwrap().full.url.clone();
+            let platform = match Architecture::detect() {
+                Architecture::X86_64 => manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .x86_64
+                    .as_mut()
+                    .unwrap(),
+                Architecture::Aarch64 => manifest
+                    .platforms
+                    .as_mut()
+                    .unwrap()
+                    .aarch64
+                    .as_mut()
+                    .unwrap(),
+                _ => panic!("test host architecture unsupported"),
+            };
+            platform.hash = placeholder;
+            platform.url = url;
+            let manager = UpgradeStrategyManager::new(
+                "0.0.12.0".into(),
+                false,
+                manifest,
+                DockerChannel::Images,
+            );
+            let UpgradeStrategy::FullUpgrade { hash, .. } =
+                manager.select_full_upgrade_strategy().unwrap()
+            else {
+                panic!("expected full upgrade");
+            };
+            assert_eq!(hash, "b".repeat(64));
+        }
     }
 }
