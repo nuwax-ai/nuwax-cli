@@ -949,11 +949,11 @@ mod tests {
         );
         let (override_url, override_source) = manifest_url_for(
             DockerChannel::Registry,
-            Some("http://192.168.32.117/registry.json"),
+            Some("http://192.0.2.117/registry.json"),
             &offline,
             endpoints,
         );
-        assert_eq!(override_url, "http://192.168.32.117/registry.json");
+        assert_eq!(override_url, "http://192.0.2.117/registry.json");
         assert_eq!(override_source, "env NUWAX_API_DOCKER_REGISTRY_VERSION_URL");
     }
 

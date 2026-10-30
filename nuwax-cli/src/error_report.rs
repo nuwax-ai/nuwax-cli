@@ -398,7 +398,7 @@ fn redact_known_secret(source: &str, secret: &str) -> String {
         return source.replace(secret, REDACTED);
     }
     // Tiny configured values such as TOKEN=1 must not destroy errno 13, host
-    // 192.168.32.131 or unrelated filesystem names. Labelled values were already
+    // 192.0.2.131 or unrelated filesystem names. Labelled values were already
     // redacted above; unlabelled short values are hidden as standalone tokens.
     let mut output = String::with_capacity(source.len());
     let mut previous = 0;
@@ -632,11 +632,11 @@ mod tests {
         let env = directory.path().join("operator.env");
         std::fs::write(&env, "API_TOKEN=1\n")?;
         let error = anyhow!(
-            "Permission denied (os error 13), host 192.168.32.131:8091; API_TOKEN=1; rejected standalone '1'; /tmp/data/1/file"
+            "Permission denied (os error 13), host 192.0.2.131:8091; API_TOKEN=1; rejected standalone '1'; /tmp/data/1/file"
         );
         let output = format_error_with_env(&error, &env);
         assert!(output.contains("os error 13"));
-        assert!(output.contains("192.168.32.131:8091"));
+        assert!(output.contains("192.0.2.131:8091"));
         assert!(output.contains("/tmp/data/1/file"));
         assert!(!output.contains("API_TOKEN=1"));
         assert!(!output.contains("standalone '1'"));
