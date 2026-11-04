@@ -19,7 +19,7 @@ use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Return required references evaluated when no variables have been supplied.
 /// The shared Compose interpreter handles escaped dollars and selected words.
@@ -1100,7 +1100,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_verification_passes_and_rejects_tampered_artifacts() {
+    fn delivery_verification_passes_and_warns_on_tampered_artifacts() {
         let directory = tempfile::tempdir().expect("tempdir");
         let (docker_dir, manifest) = write_delivery_workspace(directory.path());
         verify_delivery_manifest(&manifest, &docker_dir, Some("amd64"))
@@ -1108,14 +1108,15 @@ mod tests {
         // 架构不匹配
         assert!(verify_delivery_manifest(&manifest, &docker_dir, Some("arm64")).is_err());
 
-        // 混版：替换一个 jar（hash 不再匹配交付清单）
+        // 混版：替换一个 jar（hash 不再匹配交付清单）——告警不拒绝
+        // （2026-10-29 用户决定：手改/漂移不拦升级与备份，留痕即可）
         std::fs::write(
             docker_dir.join("im-app/nuwax-im-gateway-bootstrap.jar"),
             b"jar-mixed",
         )
         .expect("jar");
-        let error = verify_delivery_manifest(&manifest, &docker_dir, Some("amd64")).unwrap_err();
-        assert!(error.to_string().contains("gateway"), "{error}");
+        verify_delivery_manifest(&manifest, &docker_dir, Some("amd64"))
+            .expect("drift must not block");
     }
 
     #[test]
@@ -1380,7 +1381,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// 校验交付清单与磁盘一致（同包同版证明）：Compose/MySQL 清单文件/组件产物的
-/// SHA256 必须与实际文件一致；`local_architecture` 给定时须与清单架构一致。
+/// SHA256 与实际文件比对；`local_architecture` 给定时须与清单架构一致。
+///
+/// **不一致降级为告警**（2026-10-29 用户决定，与身份漂移告警同一方向）：磁盘文件
+/// 被手工修改（端口适配、老内核 security_opt 等）是用户的自由，升级会用新版本
+/// 文件覆盖并以告警留痕——拦截只会阻塞用户却没有给自愈方案（用户无法轻易还原
+/// 到任意历史版本的原始字节）。架构不匹配仍硬失败（部署物理前置）。
 pub fn verify_delivery_manifest(
     manifest: &DeliveryManifest,
     docker_root: &Path,
@@ -1397,23 +1403,24 @@ pub fn verify_delivery_manifest(
     }
 
     let mut checked = 0usize;
+    let mut warnings: Vec<String> = Vec::new();
     let compose_path = docker_root.join(&manifest.compose.path);
     let actual = file_sha256(&compose_path)?;
     if actual != manifest.compose.sha256 {
-        bail!(
+        warnings.push(format!(
             "compose {} hash mismatch: delivery manifest recorded {}, disk has {actual}",
             compose_path.display(),
             manifest.compose.sha256
-        );
+        ));
     }
     checked += 1;
 
     for (path, expected) in &manifest.mysql.files {
         let actual = file_sha256(&docker_root.join(path))?;
         if actual != *expected {
-            bail!(
+            warnings.push(format!(
                 "mysql file {path} hash mismatch: delivery manifest recorded {expected}, disk has {actual}"
-            );
+            ));
         }
         checked += 1;
     }
@@ -1422,27 +1429,43 @@ pub fn verify_delivery_manifest(
         for (path, expected) in &component.artifacts {
             let full = docker_root.join(path);
             if !full.is_file() || std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0) == 0 {
-                bail!(
+                warnings.push(format!(
                     "component artifact {path} recorded in DELIVERY_MANIFEST is missing or empty"
-                );
+                ));
+                continue;
             }
             let actual = file_sha256(&full)?;
             if actual != *expected {
-                bail!(
+                warnings.push(format!(
                     "component artifact {path} hash mismatch: delivery manifest recorded {expected}, disk has {actual}"
-                );
+                ));
             }
             checked += 1;
         }
     }
 
     // release_sha256：按构建侧同样的规范形（键排序、紧凑分隔、UTF-8 直通）重算
-    verify_release_identity(manifest)?;
+    if let Err(error) = verify_release_identity(manifest) {
+        warnings.push(format!("release_sha256 mismatch: {error}"));
+    }
 
-    info!(
-        files_checked = checked,
-        "Delivery manifest verified against disk"
-    );
+    if !warnings.is_empty() {
+        for warning in &warnings {
+            warn!("⚠️ Delivery drift: {warning}");
+        }
+        warn!(
+            "⚠️ Disk delivery files differ from the recorded manifest (possibly modified \
+             after deployment). The upgrade/deploy will overwrite them with the new \
+             release — back up modified files first (e.g. {}) if you need to keep \
+             local edits.",
+            compose_path.display()
+        );
+    } else {
+        info!(
+            files_checked = checked,
+            "Delivery manifest verified against disk"
+        );
+    }
     Ok(())
 }
 
