@@ -315,7 +315,7 @@ nuwax-cli device-info --apply --refresh   # 忽略冻结重新采集后写入（
 ## 10. 密钥协议建议（Java 侧，另行立项，此处仅接口约定）
 
 - 密钥格式：`Base64(Ed25519签名 || JSON{device_id, field_hashes?, expiry, features, customer})`，Java 内置公钥**验签**，并校验 payload 内设备标识与注入值一致；
-- 周期性在线心跳可选（复用 eco-market / market-api.nuwax.com 的客户端注册通道），签名保离线可用、心跳保可吊销；
+- 周期性在线心跳可选（签名保离线可用、心跳保可吊销）。注意：本 CLI 原先的客户端注册/认证通道（`api-version.nuwax.com` 的 `/api/v1/clients/register` + `X-Client-ID`）已于 2026-11 随服务器下线整体删除，版本清单改为固定读阿里云 OSS；如需心跳，得另建新通道，不能再假设存在 `client_id`。
 - Java 侧匹配策略按 §4.3，阈值可配置。
 
 ## 11. 风险与已知边界

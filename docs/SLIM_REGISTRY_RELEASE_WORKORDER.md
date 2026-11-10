@@ -29,7 +29,7 @@
 ## 2. 客户端会怎么判（这些是硬约束，违反 = 部署在停服前失败）
 
 瘦通道子命令是 `auto-upgrade-deploy registry-deploy`，读 `docker-version/{env}/registry.json`
-（[constants.rs:402,405](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/constants.rs#L402)），
+（[constants.rs:310,313](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/constants.rs#L310)），
 下载瘦包后在**停服之前**按包内 compose 引用拉镜像（[registry_images.rs:278](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/registry_images.rs#L278)）。
 
 | # | 客户端规则 | 报错原文（用于反查） | 代码 |

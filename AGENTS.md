@@ -78,7 +78,7 @@ RUST_LOG=debug cargo run -- status
 - **BackupManager** (`backup.rs`): Data backup and restoration with compression
 - **DockerServiceManager** (`docker_service/manager.rs`): Docker container lifecycle management via Bollard API
 - **DatabaseManager** (`database_manager.rs`): Embedded DuckDB for state persistence and analytics
-- **ApiClient** (`api.rs` + `authenticated_client.rs`): Remote API communication for version checks and downloads
+- **ApiClient** (`api.rs`): Reads the version manifest from Aliyun OSS (prod/beta by `NUWAX_CLI_ENV`) and downloads the packages it points to. No server-side API: the client registration/authentication layer was removed together with the retired `api-version.nuwax.com` server.
 - **SqlDiff** (`sql_diff/`): SQL schema diff engine for MySQL DDL comparison and migration generation
 - **Ducker** (`commands/ducker.rs`): Integrated Docker TUI (terminal UI) for container management
 - **Architecture** (`architecture.rs`): Multi-architecture support (x86_64/aarch64)

@@ -44,9 +44,6 @@ pub enum DuckError {
     #[error("Upgrade error: {0}")]
     Upgrade(String),
 
-    #[error("Client is not registered")]
-    ClientNotRegistered,
-
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
 

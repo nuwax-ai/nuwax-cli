@@ -60,7 +60,7 @@ RUST_LOG=debug cargo run -- status
 - **BackupManager**: Manages data backups and restoration with compression
 - **DockerManager**: Docker container lifecycle management via Bollard API
 - **DatabaseManager**: State persistence using DuckDB
-- **ApiClient**: Remote API communication for version checks and downloads
+- **ApiClient**: Reads the version manifest from Aliyun OSS and downloads the packages it points to (no server-side API)
 
 ### Key Patterns
 - **Workspace Architecture**: Shared dependencies in root Cargo.toml, package-specific overrides

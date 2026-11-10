@@ -243,7 +243,7 @@ pub async fn run_download_with_config(config: &AppConfig) -> Result<()> {
     info!("=====================");
 
     // 2. 创建 API 客户端
-    let api_client = ApiClient::new(Some("offline-download".to_string()), None);
+    let api_client = ApiClient::new();
 
     // 3. 获取最新版本信息
     let manifest = api_client.get_enhanced_service_manifest().await?;

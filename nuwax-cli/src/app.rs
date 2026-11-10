@@ -1,8 +1,7 @@
 use anyhow::Result;
 use client_core::{
-    api::ApiClient, authenticated_client::AuthenticatedClient, backup::BackupManager,
-    config::AppConfig, constants::config, container::DockerManager, database::Database,
-    upgrade::UpgradeManager,
+    api::ApiClient, backup::BackupManager, config::AppConfig, constants::config,
+    container::DockerManager, database::Database, upgrade::UpgradeManager,
 };
 use rust_i18n::t;
 use std::path::{Path, PathBuf};
@@ -18,7 +17,6 @@ pub struct CliApp {
     pub config: Arc<AppConfig>,
     pub database: Arc<Database>,
     pub api_client: Arc<ApiClient>,
-    pub authenticated_client: Arc<AuthenticatedClient>,
     pub docker_manager: Arc<DockerManager>,
     pub backup_manager: Arc<BackupManager>,
     pub upgrade_manager: Arc<UpgradeManager>,
@@ -62,17 +60,8 @@ impl CliApp {
             ));
         }
 
-        // 创建认证客户端（自动处理注册和认证）
-        let server_base_url = client_core::constants::api::get_base_url();
-        let authenticated_client =
-            Arc::new(AuthenticatedClient::new(database.clone(), server_base_url).await?);
-
-        // 获取用于API请求的客户端ID（只使用服务端返回的client_id）
-        let client_id = database.get_api_client_id().await?;
-        let api_client = Arc::new(ApiClient::new(
-            client_id.clone(),
-            Some(authenticated_client.clone()),
-        ));
+        // 创建API客户端（版本清单固定从阿里云 OSS 读取）
+        let api_client = Arc::new(ApiClient::new());
 
         // 创建其他管理器
         let docker_manager = Arc::new(DockerManager::with_project(
@@ -98,7 +87,6 @@ impl CliApp {
             config,
             database,
             api_client,
-            authenticated_client,
             docker_manager,
             backup_manager,
             upgrade_manager,

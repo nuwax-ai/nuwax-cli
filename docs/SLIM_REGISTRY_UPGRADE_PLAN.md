@@ -71,15 +71,18 @@ CI 只是多传一个 key，目录权限/生命周期都不用改。复用现有
 ### 3.1 manifest URL 解析（PR-2 已实现）
 
 优先级按通道各有一套，规则集中在纯函数 `manifest_url_for`
-（[api.rs:850](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/api.rs#L850)）：
+（[api.rs:215](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/api.rs#L215)）：
 
 | 通道 | env 覆盖 | beta | prod | OSS 失败 |
 |---|---|---|---|---|
-| images（离线，默认） | `NUWAX_API_DOCKER_VERSION_URL` | `docker-version/beta/latest.json` | `docker-version/prod/latest.json` | 降级到 API |
+| images（离线，默认） | `NUWAX_API_DOCKER_VERSION_URL` | `docker-version/beta/latest.json` | `docker-version/prod/latest.json` | **直接失败** |
 | registry（瘦） | `NUWAX_API_DOCKER_REGISTRY_VERSION_URL` | `docker-version/beta/registry.json` | `docker-version/prod/registry.json` | **直接失败** |
 
 beta 判定沿用现有的 `NUWAX_CLI_ENV=test|testing`（注意不是 `NUWAX_API_DOCKER_ENV`）。
-registry 不降级到 API：API 端点只提供离线全量清单，降级过去等于让瘦部署静默拿到带 tar 的包。
+
+> 2026-11-10 更新：自建 API 服务器（`api-version.nuwax.com`）已下线，images 通道原本
+> "降级到 API"的兜底跟注册/认证客户端一并删除；当时 "registry 不降级到 API" 的理由
+> （API 端点只提供离线全量清单，降级会让瘦部署静默拿到带 tar 的包）现在对两个通道都成立。
 
 `ApiClient::get_service_manifest(channel)` 是新入口，`get_enhanced_service_manifest()`
 保留为"离线通道"的薄封装，调用点零改动。

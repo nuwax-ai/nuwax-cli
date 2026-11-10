@@ -1,40 +1,8 @@
 use crate::version::Version;
 use anyhow::Result;
 use chrono;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{collections::HashMap, str::FromStr};
-
-// ============================================================================
-// 基础API结构
-// ============================================================================
-
-/// 客户端注册请求
-#[derive(Debug, Serialize)]
-pub struct ClientRegisterRequest {
-    pub os: String,
-    pub arch: String,
-}
-
-/// 注册客户端响应
-#[derive(Debug, Deserialize)]
-pub struct RegisterClientResponse {
-    pub client_id: String,
-}
-
-/// 公告信息
-#[derive(Debug, Deserialize)]
-pub struct Announcement {
-    pub id: i64,
-    pub level: String,
-    pub content: String,
-    pub created_at: String,
-}
-
-/// 公告列表响应
-#[derive(Debug, Deserialize)]
-pub struct AnnouncementsResponse {
-    pub announcements: Vec<Announcement>,
-}
 
 // ============================================================================
 // 服务清单结构（传统格式）
@@ -176,30 +144,6 @@ pub struct ReplaceOperations {
 // 版本和升级相关
 // ============================================================================
 
-/// Docker版本检查响应
-#[derive(Deserialize, Debug)]
-pub struct DockerVersionResponse {
-    pub current_version: String,
-    pub latest_version: String,
-    pub has_update: bool,
-    pub release_notes: Option<String>,
-}
-
-/// Docker版本列表响应
-#[derive(Deserialize, Debug)]
-pub struct DockerVersionListResponse {
-    pub versions: Vec<DockerVersion>,
-}
-
-/// Docker版本信息
-#[derive(Deserialize, Debug)]
-pub struct DockerVersion {
-    pub version: String,
-    pub release_date: String,
-    pub notes: String,
-    pub is_latest: bool,
-}
-
 /// 下载文件的哈希信息,用于下载文件的哈希验证
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct DownloadHashInfo {
@@ -228,54 +172,6 @@ impl FromStr for DownloadHashInfo {
             ))
         }
     }
-}
-
-// ============================================================================
-// 上报和遥测相关
-// ============================================================================
-
-/// 服务升级历史上报请求
-#[derive(Debug, Serialize)]
-pub struct ServiceUpgradeReport {
-    pub from_version: String,
-    pub to_version: String,
-    pub status: String,
-    pub details: String,
-}
-
-/// 客户端自升级历史上报请求
-#[derive(Debug, Serialize)]
-pub struct ClientUpgradeReport {
-    pub from_version: String,
-    pub to_version: String,
-    pub status: String,
-    pub details: String,
-}
-
-/// 服务升级历史上报请求
-#[derive(Serialize)]
-pub struct ServiceUpgradeHistoryRequest {
-    pub service_name: String,
-    pub from_version: String,
-    pub to_version: String,
-    pub status: String,
-    pub details: Option<String>,
-}
-
-/// 客户端自升级历史上报请求
-#[derive(Serialize)]
-pub struct ClientSelfUpgradeHistoryRequest {
-    pub from_version: String,
-    pub to_version: String,
-    pub status: String,
-    pub details: Option<String>,
-}
-
-/// 遥测数据上报请求
-#[derive(Serialize)]
-pub struct TelemetryRequest {
-    pub event_type: String,
-    pub data: serde_json::Value,
 }
 
 // ============================================================================

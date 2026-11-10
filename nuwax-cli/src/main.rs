@@ -33,14 +33,18 @@ async fn main() {
     // 解析命令行参数
     let cli = Cli::parse();
 
+    // 设置日志记录（日志走 stderr，stdout 留给数据输出）
+    // 必须先于环境提示：否则下面提示里的 warn! 会因 tracing 订阅者尚未安装而被丢弃
+    setup_logging(cli.verbose);
+
     // 检测环境并显示提示
     let environment = Environment::from_env();
     if environment.is_testing() {
         warn!("⚠️  RUNNING IN TESTING MODE");
         warn!("   Environment: {env}", env = environment.display_name());
         warn!(
-            "   API Endpoint: {url}",
-            url = client_core::constants::api::get_base_url()
+            "   Version manifest (beta): {url}",
+            url = client_core::constants::api::endpoints::DOCKER_VERSION_OSS_BETA
         );
         warn!("   Configuration: config-test.toml (if exists)");
         warn!("   Use Ctrl+C to cancel if this is not intended");
@@ -51,9 +55,6 @@ async fn main() {
 
         warn!("🚀 Starting in Testing Environment...");
     }
-
-    // 设置日志记录（日志走 stderr，stdout 留给数据输出）
-    setup_logging(cli.verbose);
 
     // `init` 命令是特例，它不需要预先加载配置
     if let Commands::Init { force } = cli.command {

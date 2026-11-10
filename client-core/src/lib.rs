@@ -18,7 +18,6 @@ pub mod environment;
 pub use api_types::*;
 pub mod architecture;
 pub mod atomic_file;
-pub mod authenticated_client;
 pub mod backup;
 pub mod backup_release;
 pub mod config;

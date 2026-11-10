@@ -130,23 +130,6 @@ impl Database {
             .await
     }
 
-    /// 更新客户端ID（服务端返回的ID）
-    pub async fn update_client_id(&self, client_id: &str) -> Result<()> {
-        self.manager.set_config("client_id", client_id).await
-    }
-
-    /// 获取客户端ID（服务端返回的ID）
-    pub async fn get_client_id(&self) -> Result<Option<String>> {
-        self.manager.get_config("client_id").await
-    }
-
-    /// 获取用于API请求的客户端标识（只使用服务端返回的client_id）
-    pub async fn get_api_client_id(&self) -> Result<Option<String>> {
-        // 只使用服务端返回的client_id，不使用本地UUID
-        // 因为服务端不认识本地UUID，会导致401错误
-        self.get_client_id().await
-    }
-
     /// 通用配置项获取
     pub async fn get_config(&self, key: &str) -> Result<Option<String>> {
         self.manager.get_config(key).await

@@ -3524,7 +3524,7 @@ mod tests {
             None,
         )?;
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let api = client_core::api::ApiClient::new(None, None);
+        let api = client_core::api::ApiClient::new();
         let cache = directory.path().join("cache");
         let selected_env = directory.path().join("operator.env");
         for _ in 0..2 {

@@ -288,12 +288,6 @@ pub mod docker {
 
 /// API服务相关常量
 pub mod api {
-    use crate::environment::Environment;
-    use url::Url;
-
-    /// 环境变量名称：自定义 API 服务器地址
-    pub const NUWAX_API_BASE_URL_ENV: &str = "NUWAX_API_BASE_URL";
-
     /// Docker版本JSON URL环境变量（最高优先级，允许自定义docker版本JSON地址）
     pub const NUWAX_API_DOCKER_VERSION_URL_ENV: &str = "NUWAX_API_DOCKER_VERSION_URL";
 
@@ -301,97 +295,11 @@ pub mod api {
     pub const NUWAX_API_DOCKER_REGISTRY_VERSION_URL_ENV: &str =
         "NUWAX_API_DOCKER_REGISTRY_VERSION_URL";
 
-    /// 生产环境API服务器地址
-    const PRODUCTION_BASE_URL: &str = "https://api-version.nuwax.com";
-
-    /// 测试环境API服务器地址
-    const TESTING_BASE_URL: &str = "http://192.168.32.226:3000";
-
-    /// 验证 URL 格式是否有效（使用 url crate）
-    fn is_valid_url(url: &str) -> bool {
-        Url::parse(url).is_ok_and(|parsed_url| {
-            // 确保是 http 或 https 协议
-            matches!(parsed_url.scheme(), "http" | "https")
-        })
-    }
-
-    /// 获取当前环境的API基础URL
+    /// 版本清单端点
     ///
-    /// 优先级顺序：
-    /// 1. NUWAX_API_BASE_URL 环境变量（最高优先级，允许自定义服务器地址）
-    /// 2. NUWAX_CLI_ENV=test/testing → TESTING_BASE_URL
-    /// 3. 默认 → PRODUCTION_BASE_URL
-    ///
-    /// 当使用自定义 URL 时，会记录 info 级别日志。
-    /// 如果自定义 URL 格式无效，会记录 warn 级别日志并回退到原有逻辑。
-    ///
-    /// # Examples
-    /// ```
-    /// use client_core::constants::api::get_base_url;
-    ///
-    /// // 获取当前配置的 base URL
-    /// let url = get_base_url();
-    /// println!("API Base URL: {}", url);
-    /// ```
-    pub fn get_base_url() -> String {
-        // 优先检查自定义 API 服务器地址
-        if let Ok(custom_url) = std::env::var(NUWAX_API_BASE_URL_ENV) {
-            if is_valid_url(&custom_url) {
-                tracing::info!("Using custom API server: {}", custom_url);
-                return custom_url;
-            } else {
-                tracing::warn!(
-                    "Invalid NUWAX_API_BASE_URL: '{}'. Expected to start with http:// or https://. Falling back to environment mode.",
-                    custom_url
-                );
-            }
-        }
-
-        // 回退到原有逻辑
-        match Environment::from_env() {
-            Environment::Test => TESTING_BASE_URL.to_string(),
-            Environment::Production => PRODUCTION_BASE_URL.to_string(),
-        }
-    }
-
-    /// 获取当前环境的API基础URL（动态分配）
-    ///
-    /// 此函数是 get_base_url() 的别名，保持向后兼容
-    pub fn get_base_url_dynamic() -> String {
-        get_base_url()
-    }
-
-    /// 获取生产环境API基础URL（用于特殊场景）
-    pub const fn get_production_base_url() -> &'static str {
-        PRODUCTION_BASE_URL
-    }
-
-    /// 获取测试环境API基础URL（用于特殊场景）
-    pub const fn get_testing_base_url() -> &'static str {
-        TESTING_BASE_URL
-    }
-
-    /// API版本前缀
-    pub const VERSION_PREFIX: &str = "/api/v1";
-
-    /// API端点路径
+    /// 全部为阿里云 OSS 上的固定 JSON 地址，按 `NUWAX_CLI_ENV` 区分 prod/beta。
+    /// 原指向自建 API 服务器（api-version.nuwax.com）的端点已随服务器下线一并移除。
     pub mod endpoints {
-        /// 客户端注册端点
-        pub const CLIENT_REGISTER: &str = "/api/v1/clients/register";
-
-        /// 公告获取端点
-        pub const ANNOUNCEMENTS: &str = "/api/v1/clients/announcements";
-
-        /// Docker版本检查端点
-        pub const DOCKER_CHECK_VERSION: &str = "/api/v1/docker/checkVersion";
-
-        /// Docker版本列表更新端点
-        pub const DOCKER_UPDATE_VERSION_LIST: &str = "/api/v1/docker/updateVersionList";
-
-        /// Docker版本获取端点 (用于降级fallback)
-        pub const DOCKER_UPGRADE_VERSION_LATEST: &str =
-            "/api/v1/docker/upgrade/versions/latest.json";
-
         /// Docker版本JSON (OSS) - 生产环境
         pub const DOCKER_VERSION_OSS_PROD: &str = "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/docker-version/prod/latest.json";
 
@@ -411,23 +319,6 @@ pub mod api {
         /// CLI 版本检查 JSON (OSS) - 测试环境
         pub const CLI_VERSION_OSS_BETA: &str =
             "https://nuwa-packages.oss-rg-china-mainland.aliyuncs.com/nuwax-cli/beta/latest.json";
-
-        /// Docker完整服务包下载端点
-        pub const DOCKER_DOWNLOAD_FULL: &str =
-            "/api/v1/clients/downloads/docker/services/full/latest";
-
-        /// 客户端自升级历史端点
-        pub const CLIENT_SELF_UPGRADE_HISTORY: &str = "/api/v1/clients/self-upgrade-history";
-
-        /// 服务升级历史端点（包含占位符）
-        pub const SERVICE_UPGRADE_HISTORY: &str =
-            "/api/v1/clients/services/{service_name}/upgrade-history";
-
-        /// 遥测数据上报端点
-        pub const TELEMETRY: &str = "/api/v1/clients/telemetry";
-
-        /// OpenAPI文档端点
-        pub const OPENAPI_DOCS: &str = "/api-docs/openapi.json";
     }
 
     /// HTTP相关常量
@@ -440,43 +331,6 @@ pub mod api {
 
         /// User-Agent头
         pub const USER_AGENT: &str = "nuwax-cli/1.0";
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn test_get_base_url_production_default() {
-            unsafe {
-                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
-                std::env::remove_var("NUWAX_CLI_ENV");
-            }
-            assert_eq!(get_base_url(), PRODUCTION_BASE_URL);
-        }
-
-        #[test]
-        fn test_get_base_url_testing_env() {
-            unsafe {
-                std::env::remove_var(NUWAX_API_BASE_URL_ENV);
-                std::env::set_var("NUWAX_CLI_ENV", "testing");
-            }
-            assert_eq!(get_base_url(), TESTING_BASE_URL);
-            unsafe {
-                std::env::remove_var("NUWAX_CLI_ENV");
-            }
-        }
-
-        #[test]
-        fn test_is_valid_url() {
-            assert!(is_valid_url("http://example.com"));
-            assert!(is_valid_url("https://example.com"));
-            assert!(is_valid_url("http://localhost:8080"));
-            assert!(is_valid_url("https://192.168.1.1:3000"));
-            assert!(!is_valid_url("ftp://example.com"));
-            assert!(!is_valid_url("example.com"));
-            assert!(!is_valid_url(""));
-        }
     }
 }
 

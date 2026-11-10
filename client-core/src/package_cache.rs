@@ -944,7 +944,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let sha = hash(&body);
         let request = identity(&server, Some(&sha), "full");
-        let api = crate::api::ApiClient::new(None, None);
+        let api = crate::api::ApiClient::new();
         let first = api
             .download_service_package(directory.path(), &request)
             .await

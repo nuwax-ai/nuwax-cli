@@ -58,7 +58,7 @@ bucket `nuwa-packages`，endpoint `oss-rg-china-mainland`，公网基址
 
 `registry.json` 的读取地址是**编译期常量**，发布位置没有选择余地：
 `docker-version/prod/registry.json` 与 `docker-version/beta/registry.json`
-（[constants.rs:402,405](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/constants.rs#L402)）。
+（[constants.rs:310,313](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/constants.rs#L310)）。
 
 ---
 
