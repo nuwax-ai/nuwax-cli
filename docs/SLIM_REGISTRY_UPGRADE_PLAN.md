@@ -17,7 +17,7 @@
 
 要解决的问题（实测数据，x86_64 生产包）：
 - 下载 15,166,545,257 B ≈ 14.1 GiB，其中绝大部分是 `docker/images/*.tar`
-- 每次部署**无条件** `docker load` 全部 tar（[image_loader.rs:267](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/image_loader.rs#L267) 无跳过逻辑），耗时数十分钟
+- 每次部署**无条件** `docker load` 全部 tar（[image_loader.rs:267](../nuwax-cli/src/docker_service/image_loader.rs#L267) 无跳过逻辑），耗时数十分钟
 - 峰值磁盘 ~42 GiB
 
 结论：只减下载字节数不够，**load 步骤必须一起干掉**。本方案两个都解决。
@@ -45,7 +45,7 @@ auto-upgrade-deploy run                 auto-upgrade-deploy <新子命令>
 与 fat zip 完全同构，仅去掉 `docker/images/*.tar`。
 
 > PR-1 已把 `check_environment` 的"images 目录必须存在"改成按通道判断
-> （[manager.rs:141-152](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/manager.rs#L141-L152)），
+> （[manager.rs:141-152](../nuwax-cli/src/docker_service/manager.rs#L141-L152)），
 > registry 通道不再要求这个目录，所以 slim zip 不必为它保留空目录项。
 
 ### 2.2 registry manifest
@@ -61,7 +61,7 @@ CI 只是多传一个 key，目录权限/生命周期都不用改。复用现有
 ### 2.3 新子命令
 
 `auto-upgrade-deploy registry`（暂定名，见 §8 待确认项）。参数与 `Run` 一致：
-`--port` / `--config` / `--project`。在 [cli.rs:45-88](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/cli.rs#L45-L88)
+`--port` / `--config` / `--project`。在 [cli.rs:45-88](../nuwax-cli/src/cli.rs#L45-L88)
 的 `AutoUpgradeDeployCommand` 加一个 variant。
 
 ---
@@ -71,7 +71,7 @@ CI 只是多传一个 key，目录权限/生命周期都不用改。复用现有
 ### 3.1 manifest URL 解析（PR-2 已实现）
 
 优先级按通道各有一套，规则集中在纯函数 `manifest_url_for`
-（[api.rs:215](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/api.rs#L215)）：
+（[api.rs:215](../client-core/src/api.rs#L215)）：
 
 | 通道 | env 覆盖 | beta | prod | OSS 失败 |
 |---|---|---|---|---|
@@ -90,18 +90,18 @@ beta 判定沿用现有的 `NUWAX_CLI_ENV=test|testing`（注意不是 `NUWAX_AP
 ### 3.2 slim zip 的 SHA
 
 **prod `latest.json` 现在 `platforms.*.hash` 是 null**，被
-[package_cache.rs:56 normalize_sha256](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/package_cache.rs#L56)
+[package_cache.rs:56 normalize_sha256](../client-core/src/package_cache.rs#L56)
 归一成 `"external"`，等于**下载完整性完全不校验**（beta 有真 SHA）。瘦通道包虽小，但没有 SHA 就 pull
 十几个 GB 的镜像是拿客户环境赌。所以 PR-1 要顺手把 prod manifest 的 `hash` 补上（CI 侧一行）。
 
-PR-2 已在客户端加了不对称的门槛（[upgrade_strategy.rs required_full_hash](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/upgrade_strategy.rs)）：
+PR-2 已在客户端加了不对称的门槛（[upgrade_strategy.rs required_full_hash](../client-core/src/upgrade_strategy.rs)）：
 registry 通道下清单里缺 `hash`/`hash == "external"` 直接报错，不做静默降级；images 通道维持原样
 （否则今天所有离线升级都会被新校验打断）。**即：瘦通道发布侧必须先补 SHA，否则子命令拉不到包 —— 这是有意的。**
 
 ### 3.3 镜像身份：`DELIVERY_MANIFEST.json` v1 直接复用，不用升 contract
 
 关键发现：现有 v1 已经有我们需要的字段，而且**从来没被读过**——
-[preflight.rs:1326-1335](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/container/preflight.rs#L1326-L1335)：
+[preflight.rs:1326-1335](../client-core/src/container/preflight.rs#L1326-L1335)：
 
 ```rust
 pub struct DeliveryComponent {
@@ -114,12 +114,12 @@ pub struct DeliveryComponent {
 }
 ```
 
-对照 fixture（[delivery-from-producer.json](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/tests/fixtures/delivery-from-producer.json)）：
+对照 fixture（[delivery-from-producer.json](../client-core/tests/fixtures/delivery-from-producer.json)）：
 - `target` = `nuwax-docker-images-registry.cn-hangzhou.cr.aliyuncs.com/nuwax/nuwax-im:latest` —— 正是完整镜像引用
 - `artifacts` 只列应用产物（`im-app/*.jar`、`repo-collab-app/dist/index.js`），**不含 `images/*.tar`**
 
 所以：瘦通道的 `DELIVERY_MANIFEST.json` 继续 `contract_version: 1`，`verify_delivery_manifest`
-（哈希磁盘文件，[preflight.rs:1384](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/container/preflight.rs#L1384)）
+（哈希磁盘文件，[preflight.rs:1384](../client-core/src/container/preflight.rs#L1384)）
 一行不改就能跑；只需把 `target` 从"发布侧写了没人看"变成**部署前的交叉校验依据**。
 
 > 待核实：真实生产 `DELIVERY_MANIFEST.json` 的 `artifacts` 是否也没列 tar。若列了，slim 包必须同步剔除
@@ -128,7 +128,7 @@ pub struct DeliveryComponent {
 
 ### 3.4 生产 compose 的镜像引用现状
 
-[build-agent-docker/docker/docker-compose.yml](file:///Volumes/soddy/git_workspace/build-agent-docker/docker/docker-compose.yml)，
+`build-agent-docker/docker/docker-compose.yml`（与本仓库并列 checkout），
 25 处 `image:` **全字面量，无变量**（去重后 17 个引用，即客户端拉取循环真正迭代的条数）：
 
 - 可变 `:latest`，6 个，全是自研应用：`agent-platform-front`、`agent-platform-backend`、`mcp-proxy`、
@@ -142,7 +142,7 @@ CLI 要不要改写 `.env`"整块逻辑**删除**。
 
 推论（残留风险）：`latest` 可被覆盖。失败模式两种：
 - 升级记的是 `0.0.120`，pull 到的是当天 `latest` 指向的别的构建，而
-  [update_config_version, auto_upgrade_deploy.rs:254](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/auto_upgrade_deploy.rs#L254)
+  [update_config_version, auto_upgrade_deploy.rs:254](../nuwax-cli/src/commands/auto_upgrade_deploy.rs#L254)
   老实写入 120 → 账实不符
 - 回滚时旧 compose 引用的仍是 `latest` → **回滚后跑的还是新镜像**，回滚只覆盖包内产物
 
@@ -156,22 +156,22 @@ CLI 侧不猜：pull 完用 `config_id`（或 OCI index `image_id`）比对本�
 
 两条通道会为**同一个版本号**发布不同的包，而缓存路径原本是
 `<download_dir>/<base_version>/<download_type>/`，`download_type` 恒为 `"full"`，
-文件名又固定是 `docker-<arch>.zip`（[package_cache.rs:226-230](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/package_cache.rs#L226-L230)
+文件名又固定是 `docker-<arch>.zip`（[package_cache.rs:226-230](../client-core/src/package_cache.rs#L226-L230)
 的收据校验会拒绝别的文件名）。所以瘦包和离线包会落进同一个目录、抢同一个
 `package-cache.json`：轻则另一条通道读到"identity does not match"硬错误，重则在 prod
 没有发布 SHA（`"external"` → 不校验）时**用错包**。
 
 处理：`DownloadType` 增加 `Registry`（Display `"registry"`），由策略对象携带，
 下载目录与 `PackageIdentity` 都从它派生 —— 两个调用点
-（[update.rs:118](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/update.rs#L118)、
-[docker_service.rs:594](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/docker_service.rs#L594)）
+（[update.rs:118](../nuwax-cli/src/commands/update.rs#L118)、
+[docker_service.rs:594](../nuwax-cli/src/commands/docker_service.rs#L594)）
 原先硬编码 `"full"`，已一并改为跟随策略。瘦包因此落在 `<download_dir>/<version>/registry/`。
 
 ---
 
 ## 4. 新子命令执行时序
 
-对照现有 `run_auto_upgrade_deploy`（[auto_upgrade_deploy.rs:942](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/auto_upgrade_deploy.rs#L942)）
+对照现有 `run_auto_upgrade_deploy`（[auto_upgrade_deploy.rs:942](../nuwax-cli/src/commands/auto_upgrade_deploy.rs#L942)）
 的 9 步，只有两处顺序/内容不同（**加粗**）：
 
 | 步 | 现有 `run` | 新命令 |
@@ -194,14 +194,14 @@ CLI 侧不猜：pull 完用 `config_id`（或 OCI index `image_id`）比对本�
 两条通道都在停服前写：瘦通道在镜像拉齐之后（拉不齐就不改状态），胖通道同样要改，
 否则 `registry` 状态的机器跑 `run` 时胖包的 tar 不会被加载。
 
-第 9 步的细节：`prepare_services`（[manager.rs:76-107](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/manager.rs#L76-L107)）
+第 9 步的细节：`prepare_services`（[manager.rs:76-107](../nuwax-cli/src/docker_service/manager.rs#L76-L107)）
 的 step5 `load_images` 和 step6 `setup_image_tags_with_ducker_validation` 是唯一与镜像相关的两步，
 其余（挂载目录、MySQL 配置权限、脚本权限）瘦通道一样需要。
 **PR-1 落地用的是配置状态 `versions.docker_channel`（`Images` / `Registry`）而不是给
 `prepare_services` 加 `ImageAcquisition` 参数**——通道是必须持久化的部署事实（§5.1、6.5），
 从配置读可以让签名全部不变；见 §6 PR-1 的偏差记录。
 
-step 6 的 `setup_image_tags_with_mappings`（[image_loader.rs:333](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/image_loader.rs#L333)）
+step 6 的 `setup_image_tags_with_mappings`（[image_loader.rs:333](../nuwax-cli/src/docker_service/image_loader.rs#L333)）
 现在是"把 load 出来的名字去掉 `-amd64/-arm64` 后缀 re-tag"，**从不读 compose**。瘦通道里镜像名就是
 compose 里的引用，不需要 retag —— 这正是 `Registry` 通道要跳过它的原因。
 
@@ -215,32 +215,32 @@ compose 里的引用，不需要 retag —— 这正是 `Registry` 通道要跳�
 
 ### 5.1 切到瘦通道后，`docker/images/*.tar` 会被清掉
 
-`apply_inner`（[package_replace.rs:780-883](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/utils/package_replace.rs#L780-L883)）
+`apply_inner`（[package_replace.rs:780-883](../nuwax-cli/src/utils/package_replace.rs#L780-L883)）
 的语义是：把**旧的受管文件**全部 rename 进 backup，再把 staged 文件 rename 进来。`images` 不在
-`EXCLUDE_DIRS`（[constants.rs:271-286](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/constants.rs#L271-L286)）
+`EXCLUDE_DIRS`（[constants.rs:271-286](../client-core/src/constants.rs#L271-L286)）
 里，而 slim 包不提供新 tar → 旧 tar 被移除且无对应物。磁盘上白捡回 ~14 GiB，但：
 
 - 之后若 `run`（胖通道）会用
-  `scan_architecture_images`（[image_loader.rs:205/250](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/image_loader.rs#L205)）
+  `scan_architecture_images`（[image_loader.rs:205/250](../nuwax-cli/src/docker_service/image_loader.rs#L205)）
   找不到 tar 而报错
 
 所以**通道是配置状态，不能靠目录嗅探**。要显式记 `versions.docker_channel`，且两个子命令各自只认自己的通道，
 切换须由用户显式执行。PR-1 先把这个字段建出来（默认 `images`，行为不变）。
 
 ⚠️ 落这个字段有个坑：`config.toml` 不是 `toml::to_string` 写的，是拿
-`client-core/templates/config.toml.template` 做占位符替换（[config.rs:336-345](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/config.rs#L336-L345)）。
+`client-core/templates/config.toml.template` 做占位符替换（[config.rs:336-345](../client-core/src/config.rs#L336-L345)）。
 只加 struct 字段而不加 template 占位符 + 对应 `.replace()`，字段会在保存时**静默丢失**。
 
 ### 5.2 文件回滚 ≠ 镜像回滚
 
-`recover_error`（[package_replace.rs:1018](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/utils/package_replace.rs#L1018)）
+`recover_error`（[package_replace.rs:1018](../nuwax-cli/src/utils/package_replace.rs#L1018)）
 只还原文件，不动 docker 状态。瘦通道里浮动 `:latest` 引用回滚后拉到的还是 registry 当前的最新，
 **镜像不随回滚回退**（§3.4 已列为接受的产品属性，不是缺陷）；有凭据的两个组件则会在停服前直接失败，
 因为它们拉到的内容与旧包凭据对不上。有凭据的引用因此不能只靠回滚还原文件。
 本地旧镜像层仍在（**PR-3 明确禁止在部署链路里 `docker image prune` / `rmi`**）。
 
 MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`；之后失败 =
-`retain_for_recovery`（[auto_upgrade_deploy.rs:1083](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/auto_upgrade_deploy.rs#L1083)），
+`retain_for_recovery`（[auto_upgrade_deploy.rs:1083](../nuwax-cli/src/commands/auto_upgrade_deploy.rs#L1083)），
 永不自动回滚。另外提醒：`run` 目前**不做数据备份**（`backup::run_list_backups` 只被 `status` 用），
 瘦通道同样不做 —— 不在本方案范围内，但要知道。
 
@@ -282,7 +282,7 @@ MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`�
 ### PR-3｜pull-before-stop 模块（本方案的技术核心）✅ 已完成
 **新增** `nuwax-cli/src/docker_service/registry_images.rs`：
 1. 从 **staged 包**里的 compose（不是磁盘旧文件）取引用：
-   `load_compose_config_with_env`（[config.rs:371](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/container/config.rs#L371)）
+   `load_compose_config_with_env`（[config.rs:371](../client-core/src/container/config.rs#L371)）
    已能拿到 typed `services[*].image`，用它，**不要用正则**
    —— 落地偏差：候选包的 compose 与合并后的 env 在停服前**只存在于内存**，原函数要求两个磁盘路径，
    因此拆出 `load_compose_config_with_env_values(content, path, env_values)` 作为原语，
@@ -296,14 +296,14 @@ MySQL 的既有边界不变：MySQL 起来之前失败 = 完整 `recover_error`�
      2026-10-20 用户决定：这些镜像的语义就是"取 registry 当前最新"，CLI 不执法。
      PR-3 原本拒绝"无凭据 + 可覆盖引用"，该分支连同 `reference_is_immutable` 已删除。
 3. 逐引用 `pull`（失败重试 N 次；带进度日志）。`pull_images()`
-   （[image.rs:62](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/container/image.rs#L62)）
+   （[image.rs:62](../client-core/src/container/image.rs#L62)）
    是 `docker compose pull`，但它读磁盘 compose —— 停服前磁盘还是旧 compose，**不能用**，
    要么按引用逐个 `docker pull`，要么对 staged 目录做 `compose -f <staged> pull`。倾向前者（可控、可校验）
    —— 按前者落地：新增 `DockerManager::pull_image(reference)`，走
    `run_docker_command_with_timeout`（新增，`REGISTRY_PULL_TIMEOUT` 1h，超时显式 kill 子进程）。
 4. 每个引用落地后 `docker inspect` 取 config digest，与 `config_id` 比对，不符即失败
    —— 本地身份接受 `config_id` **或** `image_id`，与
-   [backup_release.rs:327-333](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/backup_release.rs#L327-L333)
+   [backup_release.rs:327-333](../client-core/src/backup_release.rs#L327-L333)
    的既有语义一致（containerd 存储驱动下 `docker image inspect .Id` 返回的是 OCI index digest，
    不是 config digest；只用 `config_id` 会在这一类主机上假失败）。
 5. **跳过传输只发生在凭据命中时**：无凭据引用（含浮动 `:latest`）每次都执行 pull —— 本地已有

@@ -46,13 +46,13 @@ done
 实测结果：`docker image inspect .Id` == `imagetools` 的 **index Digest**（`43958c93…`）；而两个架构包里的
 `image_id` 分别是 `d2d45c3f…`（amd64 包）和 `8132eada…`（arm64 包）——**不同**，所以它不可能是 index 摘要，
 它是每架构的 manifest 摘要。来源在
-[scripts/build/component_delivery.py:99-109](file:///Volumes/zhitai/git_workspace/build-agent-docker/scripts/build/component_delivery.py#L99)
+`build-agent-docker/scripts/build/component_delivery.py:99-109`
 的 `inspect_image()`：取的是 `docker image inspect <ref>` 的根 `.Id`。
 
 客户端接受规则见
-[nuwax-cli/src/docker_service/registry_images.rs:407](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/registry_images.rs#L407)：
+[nuwax-cli/src/docker_service/registry_images.rs:407](../nuwax-cli/src/docker_service/registry_images.rs#L407)：
 `identity == receipt.config_id || identity == receipt.image_id`；`identity` 取法见
-[client-core/src/container/image.rs:103](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/container/image.rs#L103)
+[client-core/src/container/image.rs:103](../client-core/src/container/image.rs#L103)
 （`docker image inspect --format {{.Id}}`，注释里已写明"经典存储给 config digest，containerd 可能给 OCI index digest"）。
 
 **要改成什么**：
@@ -63,7 +63,7 @@ done
 | `config_id` | 每架构 config blob 摘要 ✅ 保持不变 | 不变 | 经典 overlay2 客户机 `.Id` = config digest，靠它匹配 |
 
 两字段合起来才同时覆盖两种镜像存储；只留一个必然在另一类机器上失败。
-你们已经有算这个值的代码：`pinned_remote()`（[同文件 :134-143](file:///Volumes/zhitai/git_workspace/build-agent-docker/scripts/build/component_delivery.py#L134)）
+你们已经有算这个值的代码：`pinned_remote()`（`build-agent-docker/scripts/build/component_delivery.py:134-143`）
 对 `skopeo inspect --raw` 的**原始字节**取 sha256，得到的正是仓库侧该引用的 digest（多架构时=index digest）。
 瘦包路径下把它的结果写进 `image_id` 即可，别再加新字段（客户端 `deny_unknown_fields`，加字段两边都要改）。
 注意 `pinned_remote()` 返回的是 `repo@sha256:…` 引用形态，而 `image_id` 要的是 digest 段

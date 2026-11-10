@@ -81,7 +81,7 @@ for (line_idx, line) in lines.iter().enumerate() {
 
 重新测试升级命令：
 ```bash
-cd /Volumes/soddy/20251031-docker
+cd <你的部署目录>   # 含 config.toml 与 docker/ 的项目根目录
 NUWAX_CLI_ENV=test nuwax-cli auto-upgrade-deploy run --port 8091
 ```
 

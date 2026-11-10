@@ -50,7 +50,7 @@ bucket `nuwa-packages`，endpoint `oss-rg-china-mainland`，公网基址
 | 用途 | 现有键形态 | 出处 |
 |---|---|---|
 | 胖包对象 | `docker/{YYYYMMDDHHMMSS}/docker-{arch}.zip` | `nuwax-ossutil upload-docker` 自动生成；beta 与 prod 的 `latest.json` **当前指向同一个时间戳目录** |
-| 胖通道清单 | `docker-version/{beta,prod}/latest.json`（可覆盖的指针） | [sync-docker-version-to-oss.yml:116](file:///Volumes/zhitai/git_workspace/nuwax-cli/.github/workflows/sync-docker-version-to-oss.yml#L116) |
+| 胖通道清单 | `docker-version/{beta,prod}/latest.json`（可覆盖的指针） | [sync-docker-version-to-oss.yml:116](../.github/workflows/sync-docker-version-to-oss.yml#L116) |
 | 清单历史 | `docker-version/history/{env}/{YYYYMMDD-HHMMSS}.json` | 同上 :126 |
 
 工具能力（已核 `--help`）：`nuwax-ossutil upload --remote <任意前缀>` 可指定目录，
@@ -58,7 +58,7 @@ bucket `nuwa-packages`，endpoint `oss-rg-china-mainland`，公网基址
 
 `registry.json` 的读取地址是**编译期常量**，发布位置没有选择余地：
 `docker-version/prod/registry.json` 与 `docker-version/beta/registry.json`
-（[constants.rs:310,313](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/constants.rs#L310)）。
+（[constants.rs:310,313](../client-core/src/constants.rs#L310)）。
 
 ---
 
@@ -80,7 +80,7 @@ nuwa-packages/
    与胖通道现有习惯完全一致（同一份产物，环境靠清单分）。晋级 = 改指针，不重传大文件。
 2. **回滚 = 从 `history/` 取上一份 registry.json 覆盖指针**，对象目录不动。
 3. 不复用 `docker/{ts}/` 放瘦包，是因为发布 CI 的上传步骤是"把 artifacts 里所有 `*.zip` 收进 `./upload/`
-   再 `upload-docker`"（[package-docker.yml:690-715](file:///Volumes/zhitai/git_workspace/build-agent-docker/.gitea/workflows/package-docker.yml#L690)）。
+   再 `upload-docker`"（`build-agent-docker/.gitea/workflows/package-docker.yml:690-715`）。
    瘦包一旦进同一个 job，就会被**无审批地**顺带上传，且 URL 长得像胖包，人工填清单容易拿错。
    分前缀后，瘦包上传必须是一条显式命令，即一次显式审批。
 4. 保留策略：`docker-slim/` 留最近 5 个目录（≈5 GiB，相对胖包 14 GiB/版可忽略），更早的按季度清理;
@@ -92,7 +92,7 @@ nuwa-packages/
 上传命令（beta，需你授权后执行）：
 
 ```bash
-cd /Volumes/zhitai/git_workspace/build-agent-docker
+cd ../build-agent-docker   # 与 nuwax-cli 并列 checkout
 TS=$(date +%Y%m%d%H%M%S)
 nuwax-ossutil upload --remote "docker-slim/$TS" \
   packages/docker-slim-x86_64.zip packages/docker-slim-x86_64.zip.sha256 \
@@ -125,7 +125,7 @@ done
 
 - `platforms.*.hash` 必填真值（架构词汇 `x86_64`/`aarch64`，与交付清单的 `amd64`/`arm64` 是两套，别混）。
 - `patch` 必须 `null` 或缺省，出现 patch 块直接失败
-  （[upgrade_strategy.rs:182-188](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/upgrade_strategy.rs#L182)）。
+  （[upgrade_strategy.rs:182-188](../client-core/src/upgrade_strategy.rs#L182)）。
 - 有 `platforms` 时走分架构分支，`packages.full` 只为兼容人读，可留可不留，留就要一致。
 - 发布文件仍然落在 `nuwax-cli/docker-versions/{env}/registry.json`，随 tag 同步上 OSS（改 workflow 是下一步，见 §6）。
 
@@ -156,7 +156,7 @@ P1/P2 都保留它。
 | # | 选项 | 我的推荐 | 代价 |
 |---|---|---|---|
 | **D1** 瘦包前缀 | A `docker-slim/{ts}/`（新前缀，显式上传）／B 复用 `docker/{ts}/`（工具零改动，但 CI 顺带上传、URL 易混） | **A** | 一条新上传命令；工具不用改 |
-| **D2** `registry.json` 的版本号 | A 与胖通道同一条发布序列（`0.0.124`…，同一构建同一号）／B 独立序列跟 compose 构建号（`0.1.372`…） | **A + 客户端加 `--force-full`** | A 有个真实的坑：客户端 `UpgradeArgs{force:false}` 是硬编码（[auto_upgrade_deploy.rs:1072-1074](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/auto_upgrade_deploy.rs#L1072)），同一版本号跨通道切换会被判 `NoUpgrade`，**什么都不做** —— 即"从胖切瘦"在已装该版本的机器上不会生效。加 `--force-full`（`run` 与 `registry-deploy` 各一个 flag，默认 false，现行为不变）是客户端一处小改动，我这边可以做。B 不需要改代码，但以后运维要习惯两个编号并存、`status` 显示的版本随通道变化 |
+| **D2** `registry.json` 的版本号 | A 与胖通道同一条发布序列（`0.0.124`…，同一构建同一号）／B 独立序列跟 compose 构建号（`0.1.372`…） | **A + 客户端加 `--force-full`** | A 有个真实的坑：客户端 `UpgradeArgs{force:false}` 是硬编码（[auto_upgrade_deploy.rs:1072-1074](../nuwax-cli/src/commands/auto_upgrade_deploy.rs#L1072)），同一版本号跨通道切换会被判 `NoUpgrade`，**什么都不做** —— 即"从胖切瘦"在已装该版本的机器上不会生效。加 `--force-full`（`run` 与 `registry-deploy` 各一个 flag，默认 false，现行为不变）是客户端一处小改动，我这边可以做。B 不需要改代码，但以后运维要习惯两个编号并存、`status` 显示的版本随通道变化 |
 | **D3** beta 成功路径 | P1 / P2 / P3（§4） | **P1**（先扩 components，再一次性 push-prod 演练，需你明确授权推生产仓） | P1 有一次生产 `:latest` 覆盖窗口 |
 | **D4** registry.json 上 OSS 的方式 | A 扩展现有 `sync-docker-version-to-oss.yml`：同一个 tag 触发，`latest.json` 照传，`registry.json` 存在才传（缺失就跳过，不影响纯胖发布），历史快照写 `history/{env}/{ts}-registry.json`／B 新建独立 workflow + 独立 tag 前缀 | **A** | A 改一个文件、一次发布动作同时处理两份清单；B 隔离更彻底但发布要打两个 tag，容易漏 |
 

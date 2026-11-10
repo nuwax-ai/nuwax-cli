@@ -5,7 +5,7 @@
 > 清单真相源迁至 `build-agent-docker/docker-versions/`（见其 `migration.json`，source_commit=604b879），
 > nuwax-cli 的 `docker-versions/` 已冻结勿编辑；tag `docker-registry-version-*` 打在 build-agent-docker。
 > 客户端命令入口是 `auto-upgrade-deploy registry-deploy`（瘦通道机器的升级用这条，不是 `run`）。
-**目标一句话**：在 `/Volumes/zhitai/git_workspace/build-agent-docker` 新增一条"瘦包"打包与上传路径，产出
+**目标一句话**：在 `build-agent-docker` 仓库（与本仓库并列 checkout）新增一条"瘦包"打包与上传路径，产出
 `docker-slim-{x86_64,aarch64}.zip`（与今天的胖包**同一份 compose、同一份 DELIVERY_MANIFEST、同样齐全的非镜像产物，
 只少 `docker/images/*.tar`**）；现有胖包的行为、文件名、清单、上传方式**一律不改**。
 
@@ -29,34 +29,34 @@
 ## 2. 客户端会怎么判（这些是硬约束，违反 = 部署在停服前失败）
 
 瘦通道子命令是 `auto-upgrade-deploy registry-deploy`，读 `docker-version/{env}/registry.json`
-（[constants.rs:310,313](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/constants.rs#L310)），
-下载瘦包后在**停服之前**按包内 compose 引用拉镜像（[registry_images.rs:278](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/registry_images.rs#L278)）。
+（[constants.rs:310,313](../client-core/src/constants.rs#L310)），
+下载瘦包后在**停服之前**按包内 compose 引用拉镜像（[registry_images.rs:278](../nuwax-cli/src/docker_service/registry_images.rs#L278)）。
 
 | # | 客户端规则 | 报错原文（用于反查） | 代码 |
 |---|---|---|---|
-| 1 | `registry.json` 里 `packages.full.hash` / `platforms.*.hash` 必须是真 64 hex；`null` 或 `"external"` **直接拒绝下载** | `registry package … publishes no SHA-256; refusing an unverified slim download` | [upgrade_strategy.rs `required_full_hash`](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/upgrade_strategy.rs) |
-| 2 | `registry.json` 的 `patch` 必须缺省或 `null`，出现 patch 块直接失败 | `The registry channel does not support incremental patch packages; …` | [upgrade_strategy.rs:182-188](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/upgrade_strategy.rs#L182) |
-| 3 | 瘦包必须含 `DELIVERY_MANIFEST.json`，否则拒绝 | `The registry channel needs the candidate package's DELIVERY_MANIFEST.json …use the offline channel` | [registry_images.rs:164-168](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/registry_images.rs#L164) |
-| 4 | 清单至少要有 **1 个**登记身份的组件（现在生成器写 repo-collab + nuwax-im，满足） | `The registry channel needs DELIVERY_MANIFEST component image identities; the candidate package declares none` | [registry_images.rs:106-111](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/registry_images.rs#L106) |
-| 5 | 清单每个 `components.*.target` 必须与包内 compose 的 `image:` 字符串**逐字节相等**（含全域名与 tag） | `DELIVERY_MANIFEST images are absent from the candidate Compose: …` | [registry_images.rs:114-125](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/registry_images.rs#L114) |
-| 6 | `image_id`/`config_id` 只接受紧凑写法 `sha256:<64hex>` 或裸 `<64hex>`；带空格、`external`、空串都拒 | `… is not a sha256 digest: … (the registry channel requires real digests, not placeholders)` | [registry_images.rs:45-56](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/registry_images.rs#L45) |
-| 7 | 清单 `architecture` 用 docker 词汇 `amd64`/`arm64`（与包内 `ARCH_INFO` 的 `x86_64` 是**两套词汇**，别混） | `DELIVERY_MANIFEST architecture '…' does not match this host ('…')` | [registry_images.rs:69-74](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/registry_images.rs#L69) |
-| 8 | 客户端会**重算** `release_sha256`（键码点排序 + 紧凑分隔符 + UTF-8 直通，payload 不含 `release_sha256` 自身）；compose/mysql/artifacts 三类哈希逐个对盘校验，artifact 缺失或 0 字节即失败 | `DELIVERY_MANIFEST release_sha256 mismatch: files do not form the declared release` / `component artifact … is missing or empty` | [preflight.rs:1384-1470](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/container/preflight.rs#L1384) |
-| 9 | 清单结构是 `deny_unknown_fields`：`contract_version/architecture/components/mysql/compose/release_sha256` 六个顶层键，组件七个字段。**不要加任何新字段**（例如 `"slim": true`）——加了老 CLI 直接解析失败 | `DELIVERY_MANIFEST.json is not a valid v1 document` | [preflight.rs:1311-1349](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/container/preflight.rs#L1311) |
-| 10 | 拉到本地的镜像若与清单凭据不符（tag 在封包后被覆盖重推），**停服前失败**，服务继续跑旧版本 | `Image … does not match its delivery receipt: expected config … local store has …` | [registry_images.rs:379-410](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/registry_images.rs#L379) |
-| 11 | 清单没登记的引用（mysql/redis/minio/alpine… 以及任何自研镜像只要没进 components）按 compose 原样 `pull`，浮动 `:latest` 每次都重新拉（**这是 2026-10-20 定下的语义，不要改成固定 digest**） | — | [registry_images.rs:316-330](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/registry_images.rs#L316) |
-| 12 | 瘦包解出来的 `docker/` 目录形状按 `FullUpgrade` 全量替换，`images` **不在受保护目录清单**里（[constants.rs:271-283](file:///Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/constants.rs#L271)）→ 瘦包一旦装上，机器上历史 tar 会被清掉 | — | — |
-| 13 | registry 通道下 `prepare_services` 跳过 `docker load` 与 retag（[manager.rs:100-114](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/manager.rs#L100)），也不再强制 `docker/images` 存在（[manager.rs:148](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/docker_service/manager.rs#L148)） | — | — |
+| 1 | `registry.json` 里 `packages.full.hash` / `platforms.*.hash` 必须是真 64 hex；`null` 或 `"external"` **直接拒绝下载** | `registry package … publishes no SHA-256; refusing an unverified slim download` | [upgrade_strategy.rs `required_full_hash`](../client-core/src/upgrade_strategy.rs) |
+| 2 | `registry.json` 的 `patch` 必须缺省或 `null`，出现 patch 块直接失败 | `The registry channel does not support incremental patch packages; …` | [upgrade_strategy.rs:182-188](../client-core/src/upgrade_strategy.rs#L182) |
+| 3 | 瘦包必须含 `DELIVERY_MANIFEST.json`，否则拒绝 | `The registry channel needs the candidate package's DELIVERY_MANIFEST.json …use the offline channel` | [registry_images.rs:164-168](../nuwax-cli/src/docker_service/registry_images.rs#L164) |
+| 4 | 清单至少要有 **1 个**登记身份的组件（现在生成器写 repo-collab + nuwax-im，满足） | `The registry channel needs DELIVERY_MANIFEST component image identities; the candidate package declares none` | [registry_images.rs:106-111](../nuwax-cli/src/docker_service/registry_images.rs#L106) |
+| 5 | 清单每个 `components.*.target` 必须与包内 compose 的 `image:` 字符串**逐字节相等**（含全域名与 tag） | `DELIVERY_MANIFEST images are absent from the candidate Compose: …` | [registry_images.rs:114-125](../nuwax-cli/src/docker_service/registry_images.rs#L114) |
+| 6 | `image_id`/`config_id` 只接受紧凑写法 `sha256:<64hex>` 或裸 `<64hex>`；带空格、`external`、空串都拒 | `… is not a sha256 digest: … (the registry channel requires real digests, not placeholders)` | [registry_images.rs:45-56](../nuwax-cli/src/docker_service/registry_images.rs#L45) |
+| 7 | 清单 `architecture` 用 docker 词汇 `amd64`/`arm64`（与包内 `ARCH_INFO` 的 `x86_64` 是**两套词汇**，别混） | `DELIVERY_MANIFEST architecture '…' does not match this host ('…')` | [registry_images.rs:69-74](../nuwax-cli/src/docker_service/registry_images.rs#L69) |
+| 8 | 客户端会**重算** `release_sha256`（键码点排序 + 紧凑分隔符 + UTF-8 直通，payload 不含 `release_sha256` 自身）；compose/mysql/artifacts 三类哈希逐个对盘校验，artifact 缺失或 0 字节即失败 | `DELIVERY_MANIFEST release_sha256 mismatch: files do not form the declared release` / `component artifact … is missing or empty` | [preflight.rs:1384-1470](../client-core/src/container/preflight.rs#L1384) |
+| 9 | 清单结构是 `deny_unknown_fields`：`contract_version/architecture/components/mysql/compose/release_sha256` 六个顶层键，组件七个字段。**不要加任何新字段**（例如 `"slim": true`）——加了老 CLI 直接解析失败 | `DELIVERY_MANIFEST.json is not a valid v1 document` | [preflight.rs:1311-1349](../client-core/src/container/preflight.rs#L1311) |
+| 10 | 拉到本地的镜像若与清单凭据不符（tag 在封包后被覆盖重推），**停服前失败**，服务继续跑旧版本 | `Image … does not match its delivery receipt: expected config … local store has …` | [registry_images.rs:379-410](../nuwax-cli/src/docker_service/registry_images.rs#L379) |
+| 11 | 清单没登记的引用（mysql/redis/minio/alpine… 以及任何自研镜像只要没进 components）按 compose 原样 `pull`，浮动 `:latest` 每次都重新拉（**这是 2026-10-20 定下的语义，不要改成固定 digest**） | — | [registry_images.rs:316-330](../nuwax-cli/src/docker_service/registry_images.rs#L316) |
+| 12 | 瘦包解出来的 `docker/` 目录形状按 `FullUpgrade` 全量替换，`images` **不在受保护目录清单**里（[constants.rs:271-283](../client-core/src/constants.rs#L271)）→ 瘦包一旦装上，机器上历史 tar 会被清掉 | — | — |
+| 13 | registry 通道下 `prepare_services` 跳过 `docker load` 与 retag（[manager.rs:100-114](../nuwax-cli/src/docker_service/manager.rs#L100)），也不再强制 `docker/images` 存在（[manager.rs:148](../nuwax-cli/src/docker_service/manager.rs#L148)） | — | — |
 
 **瘦包读取入口的相对路径**：客户端按 `docker/` 前缀归一后取 `docker-compose.yml`、`DELIVERY_MANIFEST.json`、`.env`
-（[utils/mod.rs:540-586](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/utils/mod.rs#L540)）——即 zip 内的
+（[utils/mod.rs:540-586](../nuwax-cli/src/utils/mod.rs#L540)）——即 zip 内的
 `docker/docker-compose.yml`、`docker/DELIVERY_MANIFEST.json`、`docker/.env`。**瘦包必须保持这个前缀**（与胖包一致即可）。
 
 ---
 
 ## 3. 现状（我已核过行号，直接照此改）
 
-- 打包 staging 与 zip：[makefiles/04-package.mk](file:///Volumes/zhitai/git_workspace/build-agent-docker/makefiles/04-package.mk)
+- 打包 staging 与 zip：`build-agent-docker/makefiles/04-package.mk`
   —— `prepare-compose-package` 宏 :100-116（含 6 行 `--required-tar` :104-109），`zip-package*` :119-150
   （`cd packages/x86_64 && 7z a -tzip -mx=6 -mmt=12 ../docker-x86_64.zip docker` + `archive_checksum.py`）。
 - 真正的"必须有 tar"闸门只有一处：`scripts/build/component_delivery.py` 的 `prepare/_prepare_locked`
@@ -67,7 +67,7 @@
 - 交付清单**已经在生成**：字段与第 2 节契约一致，digest 已是紧凑写法（见胖包
   `packages/x86_64/docker/DELIVERY_MANIFEST.json`）。瘦包沿用即可，**不要新写一份生成器**。
 - compose 内 `image:` 全是**字面量全域名**，无 `${}`：`…/nuwax/agent-platform-front:latest`、
-  `…/nuwax/repo-collab:latest`、`…/nuwax/nuwax-im:latest` 等（[docker/docker-compose.yml:5,47,143,619,915,988,1071](file:///Volumes/zhitai/git_workspace/build-agent-docker/docker/docker-compose.yml#L5)）。
+  `…/nuwax/repo-collab:latest`、`…/nuwax/nuwax-im:latest` 等（`build-agent-docker/docker/docker-compose.yml:5,47,143,619,915,988,1071`）。
   这对瘦通道正好：客户端只读 `services.*.image`，不认 `build:`/`deploy.image`。
 - zip 内已有目录项（`docker/images/` 等 93 个目录项），`7z -tzip` 天然写目录项。
 - 上传：`.gitea/workflows/package-docker.yml:674-715`，`nuwax-ossutil upload-docker ./upload/`
@@ -76,7 +76,7 @@
   `beta/latest.json:17,22` 有真 hash，**prod 无 hash**（`packages.full.hash = "external"`）。
 
 ⚠️ 先读一处再动手：CI 的 thin-package 分支会写 `PACKAGE_IMAGE_POLICY.json`
-（[package-docker.yml:302](file:///Volumes/zhitai/git_workspace/build-agent-docker/.gitea/workflows/package-docker.yml#L302)）。
+（`build-agent-docker/.gitea/workflows/package-docker.yml:302`）。
 如果它已经是"按策略省 tar"的机制，就在它上面加瘦包模式，**不要再造第二个策略文件**。
 
 ---
@@ -153,7 +153,7 @@ python3 -c "import hashlib,zipfile;z=zipfile.ZipFile('packages/docker-slim-x86_6
 而瘦包靠客户机去 ACR 拉 compose 里写的 `…/nuwax/xxx:latest`。
 
 - compose 硬编码生产命名空间 `nuwax`；`EXPORT_ALIYUN_NAMESPACE ?= $(ALIYUN_NAMESPACE_PROD)`
-  （[makefiles/00-vars.mk:118](file:///Volumes/zhitai/git_workspace/build-agent-docker/makefiles/00-vars.mk#L118)）。
+  （`build-agent-docker/makefiles/00-vars.mk:118`）。
 - 而 `make push-test`、`ALIYUN_NAMESPACE ?= $(ALIYUN_NAMESPACE_TEST)`（:80）推的是 `nuwax-test`。
 - ⇒ **beta 演练若只 `push-test`，客户机上瘦部署会去拉生产命名空间的旧 `:latest`**：轻则装出与本次发布不符的构建
   （清单凭据不匹配 → 停服前失败），重则（该组件没进 components 时）静默装成生产仓里别人推的内容。

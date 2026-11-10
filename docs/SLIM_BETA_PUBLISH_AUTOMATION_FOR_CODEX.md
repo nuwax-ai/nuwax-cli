@@ -4,7 +4,7 @@
 > `makefiles/27-compose-release.mk` + `scripts/registry/beta_release.py`（EXECUTE 默认 dry，只到
 > "可审阅 JSON"，人工 commit/tag，CI `docker-version-beta.yml` 翻公网指针）。beta 瘦通道首发 0.0.136
 > （tag `docker-registry-version-beta/v0.0.136`）。权威流程见那边 `skills/compose-release/SKILL.md` §4。
-给你（codex）的任务是**先勘察、再出方案**，不是直接改代码。请读 `/Volumes/zhitai/git_workspace/build-agent-docker`
+给你（codex）的任务是**先勘察、再出方案**，不是直接改代码。请读 `build-agent-docker` 仓库（下文以 `../build-agent-docker` 引用，需与本仓库并列 checkout）
 的真实 Make/脚本定义，回答 §5 的每个问题，然后按 §6 交付一份实施计划。
 
 ---
@@ -114,8 +114,10 @@ prod/latest.json  version 0.0.90   platforms.{x86_64,aarch64} keys = [signature,
 
 ## 4. 勘察任务（全部只读，可以直接复制执行）
 
+以下命令从本仓库根目录执行，`../build-agent-docker` 与 `../nuwax-cli` 假定两仓库并列 checkout。
+
 ```bash
-cd /Volumes/zhitai/git_workspace/build-agent-docker
+cd ../build-agent-docker
 # 4.1 现有瘦包发布脚本到底做了什么、产物落哪、有没有碰过上传
 sed -n '1,288p' scripts/registry/slim_publish.py
 make package-slim-publish-plan                      # 只读预览，不上传不 push
@@ -131,11 +133,11 @@ grep -rn "latest.json\|docker-versions\|version-patch" makefiles/ scripts/ scrip
 grep -rn "^[a-z0-9_-]*:" makefiles/15-version.mk makefiles/08-ci.mk | head -40
 
 # 4.4 tag 触发的清单同步在另一个仓库，确认它现在管什么（只读）
-sed -n '1,162p' /Volumes/zhitai/git_workspace/nuwax-cli/.github/workflows/sync-docker-version-to-oss.yml
+sed -n '1,162p' ../nuwax-cli/.github/workflows/sync-docker-version-to-oss.yml
 
 # 4.5 客户端读清单的地址与"hash 是硬门槛"这两条，逐字核一遍
-sed -n '395,410p' /Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/constants.rs
-grep -n "external\|required_full_hash\|NoUpgrade" /Volumes/zhitai/git_workspace/nuwax-cli/client-core/src/upgrade_strategy.rs | head -20
+sed -n '302,322p' ../nuwax-cli/client-core/src/constants.rs
+grep -n "external\|required_full_hash\|NoUpgrade" ../nuwax-cli/client-core/src/upgrade_strategy.rs | head -20
 
 # 4.6 OSS 现状只读确认（不产生任何写入）
 nuwax-ossutil list --prefix docker/20261022071920
@@ -158,7 +160,7 @@ nuwax-ossutil --help; nuwax-ossutil upload --help; nuwax-ossutil upload-docker -
 | # | 问题 | 我这边的默认倾向（供参考，不是命令） |
 |---|---|---|
 | **Q1** | **beta 的版本号计数器放哪个仓库？** `latest.json` 的 `0.0.124` 目前手改在 `nuwax-cli/docker-versions/beta/`。如果 make 命令在 `build-agent-docker` 里，它要去读/写**另一个仓库**的文件，然后由那边的 tag 触发同步。可行但你得说清怎么定位那个仓库、要不要 `--nuwax-cli-repo` 参数、跨仓库提交怎么办。**或者**：清单文件本身也搬进 `build-agent-docker` 生成、直接 `nuwax-ossutil upload` 上 OSS，不再走 `nuwax-cli` 的 tag 同步 | 二选一，我需要一个明确推荐 |
-| **Q2** | 瘦包清单 `registry.json` 的**版本号**用哪条序列：跟胖通道同号（`0.0.125`…）还是独立（`0.1.374`…）？坑在这里：客户端 `auto-upgrade-deploy` 里 `UpgradeArgs{force:false, check:false}` 是**硬编码**（[nuwax-cli/src/commands/auto_upgrade_deploy.rs:1072-1075](file:///Volumes/zhitai/git_workspace/nuwax-cli/nuwax-cli/src/commands/auto_upgrade_deploy.rs#L1072)），同一版本号在两条通道之间切换会被判 `NoUpgrade`、**什么都不做**。选同序列就要我在客户端加 `--force-full`；选独立序列不用改代码，但以后 `status` 显示的版本会随通道跳变 | 我倾向"同序列 + 客户端加 `--force-full`"，这决定权在我，你只需告诉我脚本按哪种渲染 |
+| **Q2** | 瘦包清单 `registry.json` 的**版本号**用哪条序列：跟胖通道同号（`0.0.125`…）还是独立（`0.1.374`…）？坑在这里：客户端 `auto-upgrade-deploy` 里 `UpgradeArgs{force:false, check:false}` 是**硬编码**（[nuwax-cli/src/commands/auto_upgrade_deploy.rs:1072-1075](../nuwax-cli/src/commands/auto_upgrade_deploy.rs#L1072)），同一版本号在两条通道之间切换会被判 `NoUpgrade`、**什么都不做**。选同序列就要我在客户端加 `--force-full`；选独立序列不用改代码，但以后 `status` 显示的版本会随通道跳变 | 我倾向"同序列 + 客户端加 `--force-full`"，这决定权在我，你只需告诉我脚本按哪种渲染 |
 | **Q3** | `upload-docker` 自动生成 `docker/{ts}/` 的时间戳，怎么让脚本**拿到它实际用的那个 ts** 再回填清单 URL？如果工具不打印/不可预测，就必须改用 `upload --remote docker/$TS`（脚本自己 `date +%Y%m%d%H%M%S`）。给出你的读码结论 | 我倾向脚本自己定 ts、只用 `upload --remote`，两条通道对称 |
 | **Q4** | 回读校验怎么做断言：`curl -sS <url>` 再算 sha256，对 23 GiB 的胖包要多久、要不要改用 OSS 返回的 ETag/CRC 代替？瘦包 500 MiB 必须逐字节回读（瘦通道 hash 是硬门槛）。胖通道要不要回读由你权衡后建议 | 瘦包：必须回读；胖包：给建议 |
 | **Q5** | 清单里 `signature` 字段现在填什么（我看到两份文件都是空串/占位）？有没有我遗漏的签名流程？脚本该原样保留还是能生成 | 沿用现值，别自己发明 |
