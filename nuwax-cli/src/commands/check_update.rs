@@ -45,6 +45,13 @@ pub fn get_cli_api_url() -> String {
     }
 }
 
+/// 创建 HTTP 客户端。根证书来自系统加内置的 Mozilla 根证书，系统没装 CA 证书时也能用。
+fn create_http_client() -> Result<reqwest::Client> {
+    client_core::http_client::client_builder()
+        .build()
+        .context(t!("check_update.create_client_failed"))
+}
+
 /// GitHub Release API 响应结构
 #[derive(Debug, Deserialize)]
 pub struct GitHubRelease {
@@ -223,7 +230,7 @@ impl UpdateSourceManager {
 
     /// 从版本检查服务器获取版本信息
     async fn fetch_from_version_server(&self) -> Result<GitHubRelease> {
-        let client = reqwest::Client::new();
+        let client = create_http_client()?;
         let url = get_cli_api_url();
 
         info!("📡 Checking latest version: {url}", url = url.as_str());
@@ -261,7 +268,7 @@ impl UpdateSourceManager {
     /// 从GitHub获取版本信息
     async fn fetch_from_github(&self) -> Result<GitHubRelease> {
         let repo = GitHubRepo::default();
-        let client = reqwest::Client::new();
+        let client = create_http_client()?;
         let url = repo.latest_release_url();
 
         info!("📡 Checking latest version: {url}", url = url.as_str());
@@ -616,7 +623,7 @@ pub async fn should_install(target_version: Option<&str>, force: bool) -> Result
 
 /// 下载并安装新版本
 pub async fn install_release(url: &str, version: &str) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = create_http_client()?;
 
     // 创建临时目录
     let temp_dir = std::env::temp_dir().join("nuwax-cli-updates");

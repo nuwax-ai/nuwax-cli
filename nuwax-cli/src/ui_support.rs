@@ -215,7 +215,7 @@ where
     let task_id = format!("download_{}", chrono::Utc::now().timestamp());
 
     // 创建HTTP客户端
-    let client = reqwest::Client::new();
+    let client = client_core::http_client::client_builder().build()?;
 
     // 开始下载进度报告
     let mut progress = DownloadProgress {

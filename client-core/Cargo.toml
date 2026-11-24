@@ -21,6 +21,7 @@ futures-util = { workspace = true }
 
 # HTTP 客户端
 reqwest = { workspace = true, features = ["json", "stream"] }
+webpki-root-certs = { workspace = true }
 
 # 数据库
 # sqlx = { workspace = true, features = ["migrate", "uuid", "chrono"] }

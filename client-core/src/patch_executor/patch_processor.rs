@@ -32,7 +32,7 @@ impl PatchProcessor {
         })?;
 
         // 创建带超时的HTTP客户端
-        let http_client = Client::builder()
+        let http_client = crate::http_client::client_builder()
             .timeout(std::time::Duration::from_secs(300)) // 5分钟超时
             .build()
             .map_err(|e| {

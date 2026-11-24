@@ -361,6 +361,7 @@ check_update:
   all_sources_failed: "所有更新源都不可用"
   checking_version: "📡 正在检查最新版本: %{url}"
   connect_server_failed: "无法连接到版本检查服务器"
+  create_client_failed: "创建 HTTP 客户端失败"
   server_api_failed: "版本检查服务器API请求失败: %{status} - %{error}"
   parse_server_response_failed: "解析版本检查服务器API响应失败"
   connect_github_failed: "无法连接到GitHub API"

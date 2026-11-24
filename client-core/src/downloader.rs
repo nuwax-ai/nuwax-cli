@@ -268,7 +268,7 @@ pub struct FileDownloader {
 impl FileDownloader {
     /// 创建新的文件下载器
     pub fn new(config: DownloaderConfig) -> Self {
-        let client = Client::builder()
+        let client = crate::http_client::client_builder()
             .timeout(Duration::from_secs(config.timeout_seconds))
             .user_agent(crate::constants::api::http::USER_AGENT) // 🆕 添加User-Agent ⭐
             .build()
@@ -283,7 +283,7 @@ impl FileDownloader {
 
     /// 创建支持自定义HTTP客户端的下载器（用于认证场景）⭐
     pub fn new_with_custom_client(config: DownloaderConfig, custom_client: Client) -> Self {
-        let fallback_client = Client::builder()
+        let fallback_client = crate::http_client::client_builder()
             .timeout(Duration::from_secs(config.timeout_seconds))
             .user_agent(crate::constants::api::http::USER_AGENT) // 🆕 添加User-Agent ⭐
             .build()

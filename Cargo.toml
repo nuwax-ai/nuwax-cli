@@ -90,6 +90,8 @@ reqwest = { version = "0.13", features = [
 
 # TLS 加密提供者 - 使用 ring 替代 aws-lc-rs，避免 Ubuntu 20.04 GCC 编译器兼容性问题
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# 编译进二进制的 Mozilla 根证书：系统没装 CA 证书时（精简安装的 Linux）仍能校验 HTTPS
+webpki-root-certs = "1.0"
 
 http = "1.5"
 

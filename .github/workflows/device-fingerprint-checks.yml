@@ -7,6 +7,7 @@ name: Device fingerprint checks
       - 'client-core/src/device_info/**'
       - 'client-core/src/container/**'
       - 'client-core/src/constants.rs'
+      - 'client-core/src/http_client.rs'
       - 'client-core/src/mysql_executor.rs'
       - 'client-core/src/mysql_manifest.rs'
       - 'client-core/src/backup.rs'
@@ -27,6 +28,7 @@ name: Device fingerprint checks
       - 'client-core/src/device_info/**'
       - 'client-core/src/container/**'
       - 'client-core/src/constants.rs'
+      - 'client-core/src/http_client.rs'
       - 'client-core/src/mysql_executor.rs'
       - 'client-core/src/mysql_manifest.rs'
       - 'client-core/src/backup.rs'
@@ -122,3 +124,6 @@ jobs:
           cargo test --locked -p nuwax-cli --lib utils::env_merge::tests
           cargo test --locked -p nuwax-cli --lib utils::package_replace::tests -- --test-threads=1
           cargo test --locked -p nuwax-cli --lib commands::auto_upgrade_deploy::tests -- --test-threads=1
+      # HTTP 客户端在系统根证书之外合并了内置根证书；Windows/macOS 的平台校验器只在运行时走到，三个系统都要跑
+      - name: Test HTTP client with bundled root certificates
+        run: cargo test --locked -p client-core --lib http_client::tests

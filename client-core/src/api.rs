@@ -33,7 +33,7 @@ impl ApiClient {
     /// 创建新的 API 客户端
     pub fn new() -> Self {
         Self {
-            client: Client::builder()
+            client: crate::http_client::client_builder()
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("Failed to create HTTP client with timeout"),

@@ -361,6 +361,7 @@ check_update:
   all_sources_failed: "All update sources are unavailable"
   checking_version: "📡 Checking latest version: %{url}"
   connect_server_failed: "Cannot connect to version check server"
+  create_client_failed: "Failed to create HTTP client"
   server_api_failed: "Version check server API request failed: %{status} - %{error}"
   parse_server_response_failed: "Failed to parse version check server API response"
   connect_github_failed: "Cannot connect to GitHub API"
