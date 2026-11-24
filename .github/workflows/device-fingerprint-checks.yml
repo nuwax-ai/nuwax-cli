@@ -18,6 +18,7 @@ name: Device fingerprint checks
       - 'nuwax-cli/src/utils/**'
       - 'nuwax-cli/src/commands/docker_service.rs'
       - 'nuwax-cli/src/commands/auto_upgrade_deploy.rs'
+      - 'nuwax-cli/src/commands/check_update.rs'
       - '**/Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/device-fingerprint-checks.yml'
@@ -39,6 +40,7 @@ name: Device fingerprint checks
       - 'nuwax-cli/src/utils/**'
       - 'nuwax-cli/src/commands/docker_service.rs'
       - 'nuwax-cli/src/commands/auto_upgrade_deploy.rs'
+      - 'nuwax-cli/src/commands/check_update.rs'
       - '**/Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/device-fingerprint-checks.yml'
@@ -127,3 +129,6 @@ jobs:
       # HTTP 客户端在系统根证书之外合并了内置根证书；Windows/macOS 的平台校验器只在运行时走到，三个系统都要跑
       - name: Test HTTP client with bundled root certificates
         run: cargo test --locked -p client-core --lib http_client::tests
+      # 自升级按扩展名区分 tar.gz / zip / exe；Windows 的 zip 包曾被当成 exe 直接覆盖上去
+      - name: Test self-update package handling
+        run: cargo test --locked -p nuwax-cli --lib commands::check_update::tests

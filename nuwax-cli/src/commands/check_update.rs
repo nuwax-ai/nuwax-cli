@@ -761,6 +761,38 @@ pub async fn install_release(url: &str, version: &str) -> Result<()> {
     Ok(())
 }
 
+/// 下载文件的安装方式
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallSource {
+    /// tar.gz 压缩包：Linux、macOS 的发布包
+    TarGz,
+    /// zip 压缩包：Windows 的发布包
+    Zip,
+    /// 未打包的可执行文件
+    Executable,
+}
+
+/// 根据下载文件名判断安装方式。
+///
+/// 只认扩展名。以前还有一条「文件名包含 nuwax-cli 就当可执行文件」的兜底，
+/// Windows 的发布包 `nuwax-cli-windows-amd64.zip` 正好命中它，整个 zip 被盖到
+/// exe 上，升级后程序起不来。认不出的格式宁可报错。
+fn install_source(download_name: &str) -> Result<InstallSource> {
+    let lower = download_name.to_ascii_lowercase();
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        Ok(InstallSource::TarGz)
+    } else if lower.ends_with(".zip") {
+        Ok(InstallSource::Zip)
+    } else if lower.ends_with(".exe") {
+        Ok(InstallSource::Executable)
+    } else {
+        Err(anyhow::anyhow!(
+            "{}",
+            t!("check_update.unsupported_format", format = download_name)
+        ))
+    }
+}
+
 /// 安装下载的文件
 async fn install_downloaded_file(
     download_path: &PathBuf,
@@ -772,17 +804,10 @@ async fn install_downloaded_file(
         .and_then(|n| n.to_str())
         .unwrap_or("");
 
-    if download_name.ends_with(".tar.gz") || download_name.ends_with(".tgz") {
-        // 处理压缩包
-        install_from_archive(download_path, current_exe, version).await
-    } else if download_name.ends_with(".exe") || download_name.contains("nuwax-cli") {
-        // 直接可执行文件
-        install_executable(download_path, current_exe).await
-    } else {
-        Err(anyhow::anyhow!(
-            "{}",
-            t!("check_update.unsupported_format", format = download_name)
-        ))
+    match install_source(download_name)? {
+        InstallSource::TarGz => install_from_archive(download_path, current_exe, version).await,
+        InstallSource::Zip => install_from_zip(download_path, current_exe).await,
+        InstallSource::Executable => install_executable(download_path, current_exe).await,
     }
 }
 
@@ -859,7 +884,34 @@ async fn install_executable(download_path: &PathBuf, current_exe: &PathBuf) -> R
     }
 }
 
-/// 从压缩包安装
+/// 解压用的临时目录。每次先清空，避免上次解压失败留下的文件被当成本次的程序。
+fn extraction_dir() -> Result<PathBuf> {
+    let temp_dir = std::env::temp_dir().join("nuwax-cli-extract");
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir)?;
+    }
+    std::fs::create_dir_all(&temp_dir)?;
+    Ok(temp_dir)
+}
+
+/// 在解压目录里找出可执行文件并安装；无论成败都清理解压目录。
+async fn install_extracted_executable(extract_dir: &Path, current_exe: &PathBuf) -> Result<()> {
+    let installed = match find_executable_in_dir(extract_dir) {
+        Ok(executable_path) => install_executable(&executable_path, current_exe).await,
+        Err(error) => Err(error),
+    };
+
+    if let Err(e) = std::fs::remove_dir_all(extract_dir) {
+        warn!(
+            "Failed to cleanup extract directory: {error}",
+            error = e.to_string()
+        );
+    }
+
+    installed
+}
+
+/// 从 tar.gz 压缩包安装
 async fn install_from_archive(
     archive_path: &Path,
     current_exe: &PathBuf,
@@ -867,8 +919,7 @@ async fn install_from_archive(
 ) -> Result<()> {
     use std::process::Command;
 
-    let temp_dir = std::env::temp_dir().join("nuwax-cli-extract");
-    std::fs::create_dir_all(&temp_dir)?;
+    let temp_dir = extraction_dir()?;
 
     info!("📦 Extracting archive...");
 
@@ -893,25 +944,36 @@ async fn install_from_archive(
         ));
     }
 
-    // 查找可执行文件
-    let executable_path = find_executable_in_dir(&temp_dir)?;
+    install_extracted_executable(&temp_dir, current_exe).await
+}
 
-    // 安装可执行文件
-    install_executable(&executable_path, current_exe).await?;
+/// 从 zip 压缩包安装（Windows 的发布包）
+async fn install_from_zip(archive_path: &Path, current_exe: &PathBuf) -> Result<()> {
+    let temp_dir = extraction_dir()?;
 
-    // 清理解压目录
-    if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
-        warn!(
-            "Failed to cleanup extract directory: {error}",
-            error = e.to_string()
-        );
-    }
+    info!("📦 Extracting archive...");
 
-    Ok(())
+    extract_zip(archive_path, &temp_dir)?;
+
+    install_extracted_executable(&temp_dir, current_exe).await
+}
+
+/// 把 zip 解压到目标目录。zip 库会拒绝越界的路径（zip-slip）。
+fn extract_zip(archive_path: &Path, destination: &Path) -> Result<()> {
+    std::fs::File::open(archive_path)
+        .map_err(anyhow::Error::from)
+        .and_then(|file| zip::ZipArchive::new(file).map_err(anyhow::Error::from))
+        .and_then(|mut archive| archive.extract(destination).map_err(anyhow::Error::from))
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{}",
+                t!("check_update.extract_failed", error = error.to_string())
+            )
+        })
 }
 
 /// 在目录中查找可执行文件
-fn find_executable_in_dir(dir: &PathBuf) -> Result<PathBuf> {
+fn find_executable_in_dir(dir: &Path) -> Result<PathBuf> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -1045,4 +1107,86 @@ async fn get_version_download_url(version: &str) -> Result<String> {
             t!("check_update.no_version_download_url", version = version)
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::io::Write;
+
+    #[test]
+    fn install_source_is_decided_by_extension_only() {
+        let cases = [
+            ("nuwax-cli-linux-amd64.tar.gz", InstallSource::TarGz),
+            ("nuwax-cli-macos-universal.tgz", InstallSource::TarGz),
+            // 回归用例：Windows 的发布包曾经被当成可执行文件，整个 zip 被盖到 exe 上
+            ("nuwax-cli-windows-amd64.zip", InstallSource::Zip),
+            ("nuwax-cli-windows-arm64.ZIP", InstallSource::Zip),
+            ("nuwax-cli.exe", InstallSource::Executable),
+        ];
+        for (download_name, expected) in cases {
+            assert!(
+                matches!(install_source(download_name), Ok(actual) if actual == expected),
+                "expected {expected:?} for download name: {download_name}"
+            );
+        }
+
+        // 认不出的格式必须报错，不能因为名字里有 nuwax-cli 就当成可执行文件
+        for download_name in ["nuwax-cli-windows-amd64", "nuwax-cli", "README.txt"] {
+            assert!(
+                install_source(download_name).is_err(),
+                "expected an unsupported-format error for: {download_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn zip_install_picks_the_executable_inside_the_archive_not_the_archive() {
+        let dir = tempfile::tempdir().expect("temp dir for test");
+        let archive = dir.path().join("nuwax-cli-windows-amd64.zip");
+        let extract_dir = dir.path().join("extract");
+        let executable: &[u8] = b"this is the executable, not the archive";
+        write_zip(
+            &archive,
+            &[
+                ("README.txt", b"not an executable".as_slice()),
+                ("nuwax-cli.exe", executable),
+            ],
+        );
+
+        extract_zip(&archive, &extract_dir).expect("zip should extract");
+
+        let found = find_executable_in_dir(&extract_dir).expect("executable inside the archive");
+        assert_eq!(found.file_name(), Some(OsStr::new("nuwax-cli.exe")));
+        assert_eq!(
+            std::fs::read(&found).expect("read the extracted executable"),
+            executable
+        );
+    }
+
+    #[test]
+    fn zip_without_an_executable_is_rejected() {
+        let dir = tempfile::tempdir().expect("temp dir for test");
+        let archive = dir.path().join("nuwax-cli-windows-amd64.zip");
+        let extract_dir = dir.path().join("extract");
+        write_zip(&archive, &[("README.txt", b"not an executable".as_slice())]);
+
+        extract_zip(&archive, &extract_dir).expect("zip should extract");
+
+        assert!(find_executable_in_dir(&extract_dir).is_err());
+    }
+
+    fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(path).expect("create the zip for test");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, contents) in entries {
+            archive
+                .start_file(*name, options)
+                .expect("start a zip entry");
+            archive.write_all(contents).expect("write a zip entry");
+        }
+        archive.finish().expect("finish the zip");
+    }
 }
