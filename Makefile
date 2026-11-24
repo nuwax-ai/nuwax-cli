@@ -17,7 +17,7 @@ help:
 	@echo "  make package-linux       - Build and package Linux (x86_64 + arm64) binaries"
 	@echo "  make package-linux-x86    - Build and package Linux x86_64 binary only"
 	@echo "  make package-linux-arm64 - Build and package Linux ARM64 binary only"
-	@echo "  make package-docker      - Build Linux x86_64 binary using Docker (Ubuntu 22.04)"
+	@echo "  make package-docker      - Build Linux x86_64 binary using Docker (Debian 10, glibc 2.28)"
 	@echo ""
 	@echo "Linux Build Dependencies:"
 	@echo "  sudo apt-get update && sudo apt-get install -y --no-install-recommends \\"

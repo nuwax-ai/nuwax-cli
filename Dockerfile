@@ -1,15 +1,21 @@
-# Ubuntu 20.04 based Rust build environment for nuwax-cli
-# 使用 Ubuntu 20.04 构建，确保与 Ubuntu 20.04+ 系统兼容
+# Debian 10 (buster) based Rust build environment for nuwax-cli
+# 使用 Debian 10 构建，把产物的 glibc 基线钉在 2.28：
+#   可在 UOS、Deepin 20、Debian 10、CentOS/RHEL 8 及更新的系统上运行（要求 GLIBC 2.28+）
+#   CentOS 7 / RHEL 7（glibc 2.17）不支持
 
-FROM ubuntu:20.04
+FROM debian:10
 
 # 设置环境
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DEBCONF_NONINTERACTIVE_SEEN=true
 
 # 安装构建依赖
-# gcc-multilib 仅在 x86_64 架构时安装
-RUN apt-get update && apt-get install -y \
+# buster 已停止维护，软件包只保留在归档源上；归档的 Release 文件已过期，需要关闭有效期检查。
+# 基础镜像里没有 CA 证书，rustup 走 HTTPS 下载需要 ca-certificates。
+RUN sed -i 's|http://deb.debian.org/debian-security|http://archive.debian.org/debian-security|; s|http://deb.debian.org/debian|http://archive.debian.org/debian|' /etc/apt/sources.list \
+    && sed -i '/buster-updates/d' /etc/apt/sources.list \
+    && echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99archive \
+    && apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     libglib2.0-dev \
@@ -19,6 +25,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     git \
     cmake \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # 使用 rustup 官方安装 Rust

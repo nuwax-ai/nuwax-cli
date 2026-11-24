@@ -89,7 +89,7 @@ jobs:
             echo "is_new_version=true" >> $GITHUB_OUTPUT
           fi
 
-  # Linux x86_64 使用 Docker 构建 (Ubuntu 20.04)
+  # Linux x86_64 使用 Docker 构建 (Debian 10，glibc 2.28)
   build-linux-x86_64:
     name: Build Linux-x86_64 (Docker)
     runs-on: ubuntu-22.04
@@ -138,7 +138,7 @@ jobs:
             nuwax-cli-linux-amd64.tar.gz
             nuwax-cli-linux-amd64.npm.tar.gz
 
-  # Linux ARM64 使用 Docker 构建 (Ubuntu 20.04 on ubuntu-24.04-arm)
+  # Linux ARM64 使用 Docker 构建 (Debian 10，glibc 2.28，原生 ARM runner)
   build-linux-aarch64:
     name: Build Linux-aarch64 (Docker)
     runs-on: ubuntu-24.04-arm
@@ -426,8 +426,8 @@ jobs:
             - 系统会自动选择合适的架构运行
           
           #### 🐧 Linux
-          - **nuwax-cli-linux-amd64.tar.gz** - 适用于 x86_64 架构（动态链接，需要 GLIBC 2.31+，兼容 Ubuntu 20.04+）
-          - **nuwax-cli-linux-arm64.tar.gz** - 适用于 ARM64 架构（动态链接，需要 GLIBC 2.35+）
+          - **nuwax-cli-linux-amd64.tar.gz** - 适用于 x86_64 架构（动态链接，需要 GLIBC 2.28+）
+          - **nuwax-cli-linux-arm64.tar.gz** - 适用于 ARM64 架构（动态链接，需要 GLIBC 2.28+）
           
           #### 🪟 Windows
           - **nuwax-cli-windows-amd64.zip** - 适用于 x86_64 架构
@@ -442,14 +442,13 @@ jobs:
           
           ### 📋 Linux 版本选择指南
           
-          **系统要求**:
-          - **x86_64**: Ubuntu 20.04+ / Debian 10+ / CentOS 8+ / RHEL 8+ (GLIBC 2.31+)
-          - **ARM64**: Ubuntu 22.04+ / Debian 11+ / CentOS 9+ / RHEL 9+ (GLIBC 2.35+)
+          **系统要求**（x86_64 与 ARM64 相同）:
+          - **GLIBC 2.28+**: 统信 UOS、Deepin 20、Debian 10+、Ubuntu 20.04+、CentOS 8+、RHEL 8+
+          - 根证书：程序内置了 Mozilla 根证书，系统没装 CA 证书也能访问更新服务器
           - 检查方法：`ldd --version` 查看当前 GLIBC 版本
           
           📝 **对于旧系统**：
-          - **Ubuntu 18.04、CentOS 7、RHEL 7**: 系统 GLIBC 版本过低，不支持运行
-          - **Ubuntu 20.04+**: 可以使用 x86_64 动态版本
+          - **Ubuntu 18.04、CentOS 7、RHEL 7**: 系统 GLIBC 版本低于 2.28，不支持运行
           - **推荐**: 使用较新的 Linux 发行版以获得最佳兼容性
           
           ### 📋 校验文件完整性
