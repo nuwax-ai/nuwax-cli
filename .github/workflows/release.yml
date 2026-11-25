@@ -432,20 +432,23 @@ jobs:
           #### 🪟 Windows
           - **nuwax-cli-windows-amd64.zip** - 适用于 x86_64 架构
           - **nuwax-cli-windows-arm64.zip** - 适用于 ARM64 架构
+
+          > ⚠️ **Windows 升级提示**：1.0.145 之前的版本自升级有缺陷，会把压缩包直接覆盖成程序文件，导致升级后无法启动。
+          > 如果当前版本低于 1.0.145，请不要用 \`nuwax-cli check-update install\`，改为下载上面的 zip 手动覆盖，或通过 npm 更新。
           
           ### 🔧 安装说明
           
           1. 下载对应平台的压缩包
           2. 解压到您希望的目录
           3. 将可执行文件路径添加到系统 PATH 环境变量
-          4. 运行 `nuwax-cli --help` 验证安装
+          4. 运行 \`nuwax-cli --help\` 验证安装
           
           ### 📋 Linux 版本选择指南
           
           **系统要求**（x86_64 与 ARM64 相同）:
           - **GLIBC 2.28+**: 统信 UOS、Deepin 20、Debian 10+、Ubuntu 20.04+、CentOS 8+、RHEL 8+
           - 根证书：程序内置了 Mozilla 根证书，系统没装 CA 证书也能访问更新服务器
-          - 检查方法：`ldd --version` 查看当前 GLIBC 版本
+          - 检查方法：\`ldd --version\` 查看当前 GLIBC 版本
           
           📝 **对于旧系统**：
           - **Ubuntu 18.04、CentOS 7、RHEL 7**: 系统 GLIBC 版本低于 2.28，不支持运行
@@ -453,24 +456,24 @@ jobs:
           
           ### 📋 校验文件完整性
           
-          下载 `SHA256SUMS` 文件，使用以下命令验证文件完整性：
+          下载 \`SHA256SUMS\` 文件，使用以下命令验证文件完整性：
           
-          ```bash
+          \`\`\`bash
           # Linux/macOS
           sha256sum -c SHA256SUMS
           
           # Windows (PowerShell)
           Get-FileHash *.zip | Format-Table
-          ```
+          \`\`\`
           
           ### 🆕 更新说明
           
           如果您已安装旧版本，可以使用内置的更新功能：
           
-          ```bash
+          \`\`\`bash
           nuwax-cli check-update check     # 检查更新
           nuwax-cli check-update install   # 自动安装最新版本
-          ```
+          \`\`\`
           
           ### 📝 版本信息
           
